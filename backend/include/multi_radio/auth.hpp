@@ -1,10 +1,7 @@
 #pragma once
 
 #include <string>
-
-namespace grpc {
-class ServerContext;
-}
+#include <grpcpp/server_context.h>
 
 namespace multi_radio::auth {
 

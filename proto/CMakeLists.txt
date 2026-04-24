@@ -1,9 +1,22 @@
 set(MR_PROTO_AVAILABLE OFF CACHE BOOL "Whether protobuf/gRPC codegen is available" FORCE)
 
 find_package(Protobuf QUIET)
-find_package(gRPC QUIET)
+find_package(gRPC CONFIG QUIET)
 
-if(Protobuf_FOUND AND gRPC_FOUND)
+set(MR_GRPC_LINK_TARGET "")
+if(gRPC_FOUND AND TARGET gRPC::grpc++)
+  set(MR_GRPC_LINK_TARGET gRPC::grpc++)
+else()
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(GRPCPP QUIET IMPORTED_TARGET grpc++)
+    if(GRPCPP_FOUND)
+      set(MR_GRPC_LINK_TARGET PkgConfig::GRPCPP)
+    endif()
+  endif()
+endif()
+
+if(Protobuf_FOUND AND MR_GRPC_LINK_TARGET)
   set(MR_PROTO_AVAILABLE ON CACHE BOOL "Whether protobuf/gRPC codegen is available" FORCE)
 
   set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/radio.proto")
@@ -31,11 +44,11 @@ if(Protobuf_FOUND AND gRPC_FOUND)
       "${PROTO_OUT_DIR}/radio.grpc.pb.h"
     COMMAND protobuf::protoc
     ARGS
-      --proto_path="${CMAKE_CURRENT_SOURCE_DIR}"
-      --cpp_out="${PROTO_OUT_DIR}"
-      --grpc_out="${PROTO_OUT_DIR}"
-      --plugin=protoc-gen-grpc="${GRPC_CPP_PLUGIN_EXECUTABLE}"
-      "${PROTO_FILE}"
+      --proto_path=${CMAKE_CURRENT_SOURCE_DIR}
+      --cpp_out=${PROTO_OUT_DIR}
+      --grpc_out=${PROTO_OUT_DIR}
+      --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
+      ${PROTO_FILE}
     DEPENDS "${PROTO_FILE}"
     VERBATIM
   )
@@ -53,12 +66,12 @@ if(Protobuf_FOUND AND gRPC_FOUND)
   target_link_libraries(multi_radio_proto
     PUBLIC
       protobuf::libprotobuf
-      gRPC::grpc++
+      ${MR_GRPC_LINK_TARGET}
   )
 
   add_library(multi_radio::proto ALIAS multi_radio_proto)
 else()
-  message(WARNING "Protobuf/gRPC not found. gRPC server/frontend targets that depend on proto will be skipped.")
+  message(WARNING "Protobuf/gRPC not found (neither CMake gRPC package nor pkg-config grpc++). gRPC server/frontend targets that depend on proto will be skipped.")
   add_library(multi_radio_proto INTERFACE)
   add_library(multi_radio::proto ALIAS multi_radio_proto)
 endif()

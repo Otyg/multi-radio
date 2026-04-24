@@ -65,7 +65,6 @@ if(MR_BUILD_SERVER)
   if(MR_PROTO_AVAILABLE)
     add_library(multi_radio_server_lib
       src/auth.cpp
-      src/server_app.cpp
       src/grpc_services.cpp
     )
 

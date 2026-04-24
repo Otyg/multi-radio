@@ -17,6 +17,8 @@ add_executable(multi_radio_client
   src/main.cpp
   src/main_window.cpp
   src/grpc_client.cpp
+  include/main_window.hpp
+  include/grpc_client.hpp
 )
 
 target_include_directories(multi_radio_client
