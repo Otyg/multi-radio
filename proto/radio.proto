@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package multi_radio.v1;
+
+enum RadioMode {
+  RADIO_MODE_UNSPECIFIED = 0;
+  RADIO_MODE_FIXED = 1;
+  RADIO_MODE_SCAN_RANGE = 2;
+  RADIO_MODE_SCAN_LIST = 3;
+  RADIO_MODE_AIR_MARINE_PLOT = 4;
+}
+
+enum SignalType {
+  SIGNAL_TYPE_UNKNOWN = 0;
+  SIGNAL_TYPE_AIS = 1;
+  SIGNAL_TYPE_ADSB = 2;
+  SIGNAL_TYPE_DSC = 3;
+}
+
+enum EventKind {
+  EVENT_KIND_INFO = 0;
+  EVENT_KIND_WARNING = 1;
+  EVENT_KIND_ERROR = 2;
+  EVENT_KIND_STATE_CHANGE = 3;
+  EVENT_KIND_TUNE_HOP = 4;
+}
+
+message ModeConfig {
+  double fixed_frequency_hz = 1;
+  double range_start_hz = 2;
+  double range_end_hz = 3;
+  double range_step_hz = 4;
+  repeated double frequency_list_hz = 5;
+  uint32 dwell_ms = 6;
+}
+
+message ReceiverInfo {
+  uint32 receiver_id = 1;
+  string serial = 2;
+  bool running = 3;
+  RadioMode mode = 4;
+  ModeConfig mode_config = 5;
+  string last_error = 6;
+}
+
+message PluginInfo {
+  string plugin_name = 1;
+  string plugin_version = 2;
+  uint32 api_version = 3;
+  repeated SignalType supported_signals = 4;
+  bool enabled = 5;
+  string path = 6;
+}
+
+message ReceiverEvent {
+  uint64 unix_ms = 1;
+  uint32 receiver_id = 2;
+  EventKind kind = 3;
+  string message = 4;
+  double tuned_frequency_hz = 5;
+}
+
+message DecodedMessage {
+  uint64 unix_ms = 1;
+  uint32 receiver_id = 2;
+  SignalType signal_type = 3;
+  double frequency_hz = 4;
+  string payload = 5;
+  map<string, string> normalized_fields = 6;
+}
+
+message Empty {}
+
+message ListReceiversRequest {}
+message ListReceiversResponse { repeated ReceiverInfo receivers = 1; }
+
+message GetReceiverStatusRequest { uint32 receiver_id = 1; }
+message GetReceiverStatusResponse { ReceiverInfo receiver = 1; }
+
+message StartReceiverRequest { uint32 receiver_id = 1; }
+message StartReceiverResponse { bool ok = 1; string error = 2; }
+
+message StopReceiverRequest { uint32 receiver_id = 1; }
+message StopReceiverResponse { bool ok = 1; string error = 2; }
+
+message SetModeRequest {
+  uint32 receiver_id = 1;
+  RadioMode mode = 2;
+}
+message SetModeResponse { bool ok = 1; string error = 2; }
+
+message SetModeConfigRequest {
+  uint32 receiver_id = 1;
+  ModeConfig mode_config = 2;
+}
+message SetModeConfigResponse { bool ok = 1; string error = 2; }
+
+message ListPluginsRequest {}
+message ListPluginsResponse { repeated PluginInfo plugins = 1; }
+
+message EnablePluginRequest { string plugin_name = 1; }
+message EnablePluginResponse { bool ok = 1; string error = 2; }
+
+message DisablePluginRequest { string plugin_name = 1; }
+message DisablePluginResponse { bool ok = 1; string error = 2; }
+
+message StreamReceiverEventsRequest { uint32 receiver_id = 1; bool include_all_receivers = 2; }
+message StreamDecodedMessagesRequest {
+  uint32 receiver_id = 1;
+  bool include_all_receivers = 2;
+  repeated SignalType signal_filter = 3;
+}
+
+service RadioControlService {
+  rpc ListReceivers(ListReceiversRequest) returns (ListReceiversResponse);
+  rpc GetReceiverStatus(GetReceiverStatusRequest) returns (GetReceiverStatusResponse);
+  rpc StartReceiver(StartReceiverRequest) returns (StartReceiverResponse);
+  rpc StopReceiver(StopReceiverRequest) returns (StopReceiverResponse);
+  rpc SetMode(SetModeRequest) returns (SetModeResponse);
+  rpc SetModeConfig(SetModeConfigRequest) returns (SetModeConfigResponse);
+  rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse);
+  rpc EnablePlugin(EnablePluginRequest) returns (EnablePluginResponse);
+  rpc DisablePlugin(DisablePluginRequest) returns (DisablePluginResponse);
+}
+
+service TelemetryService {
+  rpc StreamReceiverEvents(StreamReceiverEventsRequest) returns (stream ReceiverEvent);
+  rpc StreamDecodedMessages(StreamDecodedMessagesRequest) returns (stream DecodedMessage);
+}
