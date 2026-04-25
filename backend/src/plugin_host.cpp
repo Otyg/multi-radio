@@ -195,8 +195,8 @@ bool PluginHost::DisablePlugin(const std::string& plugin_name, std::string* erro
   return true;
 }
 
-bool PluginHost::ConfigureAisSquelch(double threshold_db, double min_signal_abs,
-                                     uint32_t hangover_blocks, std::string* error) {
+bool PluginHost::ConfigureAisSquelch(double threshold_db, uint32_t hangover_blocks, bool force_open,
+                                     std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
   auto* plugin = FindPluginByName("ais_wrapper");
   if (plugin == nullptr || plugin->descriptor == nullptr || plugin->descriptor->init == nullptr) {
@@ -209,8 +209,8 @@ bool PluginHost::ConfigureAisSquelch(double threshold_db, double min_signal_abs,
   std::ostringstream config_json;
   config_json << std::fixed << std::setprecision(6)
               << "{\"squelch_threshold_db\":" << threshold_db
-              << ",\"squelch_min_signal_abs\":" << min_signal_abs
-              << ",\"squelch_hangover_blocks\":" << hangover_blocks << "}";
+              << ",\"squelch_hangover_blocks\":" << hangover_blocks
+              << ",\"squelch_force_open\":" << (force_open ? 1 : 0) << "}";
 
   const int rc = plugin->descriptor->init(config_json.str().c_str());
   if (rc != 0) {

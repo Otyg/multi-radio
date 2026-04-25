@@ -21,7 +21,6 @@ constexpr double kSymbolRate = 9600.0;
 constexpr int kSamplesPerSymbol = 5;
 constexpr double kResampledRate = kSymbolRate * static_cast<double>(kSamplesPerSymbol);
 constexpr double kDefaultSquelchThresholdDb = 6.0;
-constexpr double kDefaultSquelchMinSignalAbs = 0.003;
 constexpr int kDefaultSquelchHangoverBlocks = 2;
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
@@ -45,8 +44,8 @@ std::atomic<uint64_t> g_metric_squelch_open{0};
 std::atomic<uint64_t> g_metric_squelch_closed{0};
 std::atomic<bool> g_initialized{false};
 std::atomic<double> g_squelch_threshold_db{kDefaultSquelchThresholdDb};
-std::atomic<double> g_squelch_min_signal_abs{kDefaultSquelchMinSignalAbs};
 std::atomic<int> g_squelch_hangover_blocks{kDefaultSquelchHangoverBlocks};
+std::atomic<bool> g_squelch_force_open{false};
 
 struct SquelchState {
   double noise_floor = 0.002;
@@ -118,14 +117,14 @@ int Init(const char* config_json) {
   if (TryParseJsonNumber(config, "squelch_threshold_db", &parsed_threshold)) {
     g_squelch_threshold_db.store(std::clamp(parsed_threshold, 0.0, 30.0), std::memory_order_relaxed);
   }
-  double parsed_min_signal = 0.0;
-  if (TryParseJsonNumber(config, "squelch_min_signal_abs", &parsed_min_signal)) {
-    g_squelch_min_signal_abs.store(std::clamp(parsed_min_signal, 0.00001, 1.0), std::memory_order_relaxed);
-  }
   double parsed_hangover = 0.0;
   if (TryParseJsonNumber(config, "squelch_hangover_blocks", &parsed_hangover)) {
     const int hangover = static_cast<int>(std::lround(parsed_hangover));
     g_squelch_hangover_blocks.store(std::clamp(hangover, 0, 20), std::memory_order_relaxed);
+  }
+  double parsed_force_open = 0.0;
+  if (TryParseJsonNumber(config, "squelch_force_open", &parsed_force_open)) {
+    g_squelch_force_open.store(parsed_force_open >= 0.5, std::memory_order_relaxed);
   }
   return 0;
 }
@@ -633,9 +632,9 @@ SquelchDecision EvaluateSquelch(SquelchState* state, const std::vector<double>& 
   const double snr_linear = (signal_estimate + kEpsilon) / (state->noise_floor + kEpsilon);
   const double snr_db = 20.0 * std::log10(snr_linear);
   const double threshold_db = g_squelch_threshold_db.load(std::memory_order_relaxed);
-  const double min_signal_abs = g_squelch_min_signal_abs.load(std::memory_order_relaxed);
   const int hangover_blocks = g_squelch_hangover_blocks.load(std::memory_order_relaxed);
-  const bool triggered = signal_estimate >= min_signal_abs && snr_db >= threshold_db;
+  const bool force_open = g_squelch_force_open.load(std::memory_order_relaxed);
+  const bool triggered = force_open || snr_db >= threshold_db;
 
   if (triggered) {
     state->hold_blocks = hangover_blocks;
@@ -647,7 +646,7 @@ SquelchDecision EvaluateSquelch(SquelchState* state, const std::vector<double>& 
     state->noise_floor = state->noise_floor * 0.90 + floor_estimate * 0.10;
   }
 
-  out.open = triggered || state->hold_blocks > 0;
+  out.open = force_open || triggered || state->hold_blocks > 0;
   out.noise_floor = state->noise_floor;
   out.signal_level = signal_estimate;
   out.snr_db = snr_db;
@@ -676,10 +675,13 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   }
 
   double abs_mean = 0.0;
+  double power_mean = 0.0;
   for (double v : discriminator) {
     abs_mean += std::abs(v);
+    power_mean += v * v;
   }
   abs_mean /= static_cast<double>(discriminator.size());
+  const double demod_rms = std::sqrt(power_mean / static_cast<double>(discriminator.size()));
 
   SquelchState* squelch_state = on_ais1 ? &g_squelch_ais1 : &g_squelch_ais2;
   const SquelchDecision squelch = EvaluateSquelch(squelch_state, discriminator);
@@ -689,32 +691,42 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     g_metric_squelch_closed.fetch_add(1, std::memory_order_relaxed);
   }
 
+  const std::vector<double> resampled =
+      ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kResampledRate);
+  const bool demod_ready = resampled.size() >= 512;
+
   bool emitted_this_block = false;
-  if (squelch.open) {
-    const std::vector<double> resampled =
-        ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kResampledRate);
-    if (resampled.size() >= 512) {
-      const int preferred_phase = EstimateBestPhase(resampled);
-      std::vector<int> phases = {preferred_phase};
-      for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
-        if (phase != preferred_phase) {
-          phases.push_back(phase);
+  bool decode_attempted = false;
+  std::string debug_state = "SQUELCH_CLOSED";
+  if (squelch.open && !demod_ready) {
+    debug_state = "NFM_TOO_SHORT";
+  }
+  if (squelch.open && demod_ready) {
+    decode_attempted = true;
+    debug_state = "DECODE_ATTEMPT";
+    const int preferred_phase = EstimateBestPhase(resampled);
+    std::vector<int> phases = {preferred_phase};
+    for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
+      if (phase != preferred_phase) {
+        phases.push_back(phase);
+      }
+    }
+    for (int phase : phases) {
+      for (bool invert : {false, true}) {
+        const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
+        if (symbols.size() < 96) {
+          continue;
+        }
+        for (int initial_level : {0, 1}) {
+          const std::vector<int> bits = NrziDecode(symbols, initial_level);
+          if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+            emitted_this_block = true;
+          }
         }
       }
-      for (int phase : phases) {
-        for (bool invert : {false, true}) {
-          const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
-          if (symbols.size() < 96) {
-            continue;
-          }
-          for (int initial_level : {0, 1}) {
-            const std::vector<int> bits = NrziDecode(symbols, initial_level);
-            if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
-              emitted_this_block = true;
-            }
-          }
-        }
-      }
+    }
+    if (emitted_this_block) {
+      debug_state = "AIS_DECODED";
     }
   }
 
@@ -741,10 +753,15 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_squelch_snr_db\":\"" << squelch.snr_db << "\""
                  << ",\"metric_squelch_threshold_db\":\""
                  << g_squelch_threshold_db.load(std::memory_order_relaxed) << "\""
-                 << ",\"metric_squelch_min_signal_abs\":\""
-                 << g_squelch_min_signal_abs.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_squelch_force_open\":\""
+                 << (g_squelch_force_open.load(std::memory_order_relaxed) ? "1" : "0") << "\""
                  << ",\"metric_squelch_hangover_blocks\":\""
                  << g_squelch_hangover_blocks.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_demod_ready\":\"" << (demod_ready ? "1" : "0") << "\""
+                 << ",\"metric_demod_resampled_samples\":\"" << resampled.size() << "\""
+                 << ",\"metric_demod_rms\":\"" << demod_rms << "\""
+                 << ",\"metric_decode_attempted\":\"" << (decode_attempted ? "1" : "0") << "\""
+                 << ",\"metric_debug_state\":\"" << debug_state << "\""
                  << ",\"metric_emitted_this_block\":\"" << (emitted_this_block ? "1" : "0") << "\"}";
     const double frequency_hz = static_cast<double>(on_ais1 ? kAis1Hz : kAis2Hz);
     emit_fn("AIS", "[AIS_METRICS]", frequency_hz, 0, metrics_json.str().c_str(), user_data);
@@ -771,13 +788,13 @@ void Shutdown() {
   g_squelch_ais2 = SquelchState{};
   g_initialized.store(false, std::memory_order_relaxed);
   g_squelch_threshold_db.store(kDefaultSquelchThresholdDb, std::memory_order_relaxed);
-  g_squelch_min_signal_abs.store(kDefaultSquelchMinSignalAbs, std::memory_order_relaxed);
   g_squelch_hangover_blocks.store(kDefaultSquelchHangoverBlocks, std::memory_order_relaxed);
+  g_squelch_force_open.store(false, std::memory_order_relaxed);
 }
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.5.0",
+    .plugin_version = "0.6.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,

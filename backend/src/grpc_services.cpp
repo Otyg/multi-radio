@@ -212,8 +212,8 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
 
     std::string error;
     response->set_ok(plugin_host_->ConfigureAisSquelch(request->threshold_db(),
-                                                       request->min_signal_abs(),
-                                                       request->hangover_blocks(), &error));
+                                                       request->hangover_blocks(),
+                                                       request->force_open(), &error));
     response->set_error(error);
     return grpc::Status::OK;
   }

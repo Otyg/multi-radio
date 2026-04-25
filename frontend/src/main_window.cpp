@@ -131,15 +131,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   ais_squelch_db_spin_->setValue(6.0);
   ais_squelch_db_spin_->setSuffix(" dB");
 
-  ais_min_signal_spin_ = new QDoubleSpinBox(control_group);
-  ais_min_signal_spin_->setDecimals(4);
-  ais_min_signal_spin_->setRange(0.0001, 1.0);
-  ais_min_signal_spin_->setSingleStep(0.0005);
-  ais_min_signal_spin_->setValue(0.0030);
-
   ais_hangover_spin_ = new QSpinBox(control_group);
   ais_hangover_spin_->setRange(0, 20);
   ais_hangover_spin_->setValue(2);
+
+  ais_debug_force_open_checkbox_ = new QCheckBox("Bypass squelch (debug)", control_group);
+  ais_debug_force_open_checkbox_->setChecked(false);
 
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
@@ -162,8 +159,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   control_layout->addRow("List Hz (comma)", list_frequencies_edit_);
   control_layout->addRow("Dwell ms", dwell_ms_spin_);
   control_layout->addRow("AIS squelch SNR", ais_squelch_db_spin_);
-  control_layout->addRow("AIS min signal", ais_min_signal_spin_);
   control_layout->addRow("AIS hangover", ais_hangover_spin_);
+  control_layout->addRow("AIS debug", ais_debug_force_open_checkbox_);
   control_layout->addRow(button_row);
 
   auto* filter_group = new QGroupBox("Message Filters", central);
@@ -339,17 +336,18 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  if (!client_->SetAisSquelch(ais_squelch_db_spin_->value(), ais_min_signal_spin_->value(),
-                              static_cast<uint32_t>(ais_hangover_spin_->value()), &error)) {
+  if (!client_->SetAisSquelch(ais_squelch_db_spin_->value(),
+                              static_cast<uint32_t>(ais_hangover_spin_->value()),
+                              ais_debug_force_open_checkbox_->isChecked(), &error)) {
     QMessageBox::warning(this, "SetAisSquelch failed", QString::fromStdString(error));
     return;
   }
 
-  AppendLog(QString("Applied mode/config + AIS squelch to receiver %1 (snr=%2 dB min=%3 hang=%4)")
+  AppendLog(QString("Applied mode/config + AIS squelch to receiver %1 (snr=%2 dB hang=%3 bypass=%4)")
                 .arg(receiver_id)
                 .arg(ais_squelch_db_spin_->value(), 0, 'f', 1)
-                .arg(ais_min_signal_spin_->value(), 0, 'f', 4)
-                .arg(ais_hangover_spin_->value()));
+                .arg(ais_hangover_spin_->value())
+                .arg(ais_debug_force_open_checkbox_->isChecked() ? "on" : "off"));
 }
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
@@ -389,22 +387,35 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString kind = field_text("kind");
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
-    AppendLog(QString("[%1] RX%2 AIS metrics ch=%3 blocks=%4 flags=%5 cand=%6 ok=%7 fail=%8 dup=%9 emitted=%10 abs=%11 sq_open=%12 sq_snr=%13 sq_noise=%14 sq_sig=%15 emitted_now=%16")
+    QString blocker = "none";
+    const QString debug_state = field_text("metric_debug_state");
+    if (debug_state == "SQUELCH_CLOSED") {
+      blocker = "squelch_closed";
+    } else if (debug_state == "NFM_TOO_SHORT") {
+      blocker = "nfm_short";
+    } else if (debug_state == "DECODE_ATTEMPT") {
+      blocker = "decode_no_frame";
+    } else if (debug_state == "AIS_DECODED") {
+      blocker = "decoded";
+    }
+
+    AppendLog(QString("[%1] RX%2 AIS dbg=%3 blocker=%4 ch=%5 sq_open=%6 sq_snr=%7/%8 bypass=%9 demod=%10 n=%11 rms=%12 decode_try=%13 ok=%14 fail=%15 emitted=%16 emitted_now=%17")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
+                  .arg(debug_state)
+                  .arg(blocker)
                   .arg(field_text("channel"))
-                  .arg(field_text("metric_blocks"))
-                  .arg(field_text("metric_flags"))
-                  .arg(field_text("metric_candidates"))
-                  .arg(field_text("metric_crc_ok"))
-                  .arg(field_text("metric_crc_fail"))
-                  .arg(field_text("metric_duplicates"))
-                  .arg(field_text("metric_emitted"))
-                  .arg(field_text("metric_abs_mean"))
                   .arg(field_text("metric_squelch_open"))
                   .arg(field_text("metric_squelch_snr_db"))
-                  .arg(field_text("metric_squelch_noise"))
-                  .arg(field_text("metric_squelch_signal"))
+                  .arg(field_text("metric_squelch_threshold_db"))
+                  .arg(field_text("metric_squelch_force_open"))
+                  .arg(field_text("metric_demod_ready"))
+                  .arg(field_text("metric_demod_resampled_samples"))
+                  .arg(field_text("metric_demod_rms"))
+                  .arg(field_text("metric_decode_attempted"))
+                  .arg(field_text("metric_crc_ok"))
+                  .arg(field_text("metric_crc_fail"))
+                  .arg(field_text("metric_emitted"))
                   .arg(field_text("metric_emitted_this_block")));
     return;
   }

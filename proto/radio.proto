@@ -97,8 +97,8 @@ message SetModeConfigResponse { bool ok = 1; string error = 2; }
 
 message SetAisSquelchRequest {
   double threshold_db = 1;
-  double min_signal_abs = 2;
   uint32 hangover_blocks = 3;
+  bool force_open = 4;
 }
 message SetAisSquelchResponse { bool ok = 1; string error = 2; }
 

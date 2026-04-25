@@ -128,15 +128,15 @@ bool GrpcClient::SetModeConfig(uint32_t receiver_id, const v1::ModeConfig& confi
   return true;
 }
 
-bool GrpcClient::SetAisSquelch(double threshold_db, double min_signal_abs, uint32_t hangover_blocks,
+bool GrpcClient::SetAisSquelch(double threshold_db, uint32_t hangover_blocks, bool force_open,
                                std::string* error) {
   grpc::ClientContext context;
   AddAuth(&context);
 
   v1::SetAisSquelchRequest request;
   request.set_threshold_db(threshold_db);
-  request.set_min_signal_abs(min_signal_abs);
   request.set_hangover_blocks(hangover_blocks);
+  request.set_force_open(force_open);
   v1::SetAisSquelchResponse response;
   grpc::Status status = control_client_->SetAisSquelch(&context, request, &response);
   if (!status.ok()) {
