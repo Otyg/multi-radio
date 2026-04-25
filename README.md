@@ -9,7 +9,7 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
   - `FIXED`
   - `SCAN_RANGE`
   - `SCAN_LIST`
-  - `AIR_MARINE_PLOT` (AIS1 `161.975 MHz`, AIS2 `162.025 MHz`)
+  - `AIR_MARINE_PLOT` (AIS1 `161.975 MHz`, AIS2 `162.025 MHz`, DSC `156.525 MHz`, ADS-B `1090 MHz`)
 - Multiple simultaneous receivers (one worker thread per receiver).
 - In-process plugin system (`.so`) with C ABI + API version check.
 - Event + decoded message telemetry streaming.
@@ -33,6 +33,7 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
 
 Useful variants:
 - Server-only environment (skip Qt): `./scripts/bootstrap_deps.sh --headless -y`
+- No RTL-SDR packages: `./scripts/bootstrap_deps.sh --skip-rtl -y`
 - Preview only: `./scripts/bootstrap_deps.sh --dry-run`
 
 ## Build
@@ -49,7 +50,7 @@ cmake --build build -j
 If dependencies are missing, relevant targets are skipped with warnings:
 - Missing Protobuf/gRPC: server/frontend skipped.
 - Missing Qt6: frontend skipped.
-- Missing `librtlsdr`: configure fails (no mock backend is used).
+- Missing `librtlsdr`: mock device backend used.
 
 ## Run server
 
@@ -64,7 +65,7 @@ MR_LOG_DIR=./logs \
 ## Run client
 
 ```bash
-MR_GRPC_TARGET=127.0.0.1:50051 \
+MR_GRPC_TARGET=192.168.128.82:50051 \
 MR_AUTH_TOKEN=multi-radio-dev-token \
 ./build/frontend/multi_radio_client
 ```

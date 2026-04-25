@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,9 @@ constexpr uint32_t kChannelToleranceHz = 2500;
 constexpr double kSymbolRate = 9600.0;
 constexpr int kSamplesPerSymbol = 5;
 constexpr double kResampledRate = kSymbolRate * static_cast<double>(kSamplesPerSymbol);
+constexpr double kDefaultSquelchThresholdDb = 6.0;
+constexpr double kDefaultSquelchMinSignalAbs = 0.003;
+constexpr int kDefaultSquelchHangoverBlocks = 2;
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
 constexpr uint64_t kMetricReportEveryBlocks = 1;
@@ -37,17 +41,92 @@ std::atomic<uint64_t> g_metric_crc_ok{0};
 std::atomic<uint64_t> g_metric_crc_fail{0};
 std::atomic<uint64_t> g_metric_duplicates{0};
 std::atomic<uint64_t> g_metric_emitted{0};
+std::atomic<uint64_t> g_metric_squelch_open{0};
+std::atomic<uint64_t> g_metric_squelch_closed{0};
+std::atomic<bool> g_initialized{false};
+std::atomic<double> g_squelch_threshold_db{kDefaultSquelchThresholdDb};
+std::atomic<double> g_squelch_min_signal_abs{kDefaultSquelchMinSignalAbs};
+std::atomic<int> g_squelch_hangover_blocks{kDefaultSquelchHangoverBlocks};
 
-int Init(const char* /*config_json*/) {
-  g_recent_frames.clear();
-  g_sequence = 0;
-  g_metric_blocks.store(0, std::memory_order_relaxed);
-  g_metric_flags.store(0, std::memory_order_relaxed);
-  g_metric_candidates.store(0, std::memory_order_relaxed);
-  g_metric_crc_ok.store(0, std::memory_order_relaxed);
-  g_metric_crc_fail.store(0, std::memory_order_relaxed);
-  g_metric_duplicates.store(0, std::memory_order_relaxed);
-  g_metric_emitted.store(0, std::memory_order_relaxed);
+struct SquelchState {
+  double noise_floor = 0.002;
+  int hold_blocks = 0;
+};
+
+SquelchState g_squelch_ais1;
+SquelchState g_squelch_ais2;
+
+bool TryParseJsonNumber(const std::string& json, const std::string& key, double* out_value) {
+  if (out_value == nullptr) {
+    return false;
+  }
+  const std::string needle = "\"" + key + "\"";
+  const size_t key_pos = json.find(needle);
+  if (key_pos == std::string::npos) {
+    return false;
+  }
+  const size_t colon = json.find(':', key_pos + needle.size());
+  if (colon == std::string::npos) {
+    return false;
+  }
+
+  size_t start = colon + 1;
+  while (start < json.size() && std::isspace(static_cast<unsigned char>(json[start]))) {
+    ++start;
+  }
+  if (start >= json.size()) {
+    return false;
+  }
+
+  size_t end = start;
+  while (end < json.size() && (std::isdigit(static_cast<unsigned char>(json[end])) || json[end] == '.' ||
+                               json[end] == '-' || json[end] == '+' || json[end] == 'e' ||
+                               json[end] == 'E')) {
+    ++end;
+  }
+  if (end == start) {
+    return false;
+  }
+
+  try {
+    *out_value = std::stod(json.substr(start, end - start));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+int Init(const char* config_json) {
+  if (!g_initialized.exchange(true, std::memory_order_relaxed)) {
+    g_recent_frames.clear();
+    g_sequence = 0;
+    g_metric_blocks.store(0, std::memory_order_relaxed);
+    g_metric_flags.store(0, std::memory_order_relaxed);
+    g_metric_candidates.store(0, std::memory_order_relaxed);
+    g_metric_crc_ok.store(0, std::memory_order_relaxed);
+    g_metric_crc_fail.store(0, std::memory_order_relaxed);
+    g_metric_duplicates.store(0, std::memory_order_relaxed);
+    g_metric_emitted.store(0, std::memory_order_relaxed);
+    g_metric_squelch_open.store(0, std::memory_order_relaxed);
+    g_metric_squelch_closed.store(0, std::memory_order_relaxed);
+    g_squelch_ais1 = SquelchState{};
+    g_squelch_ais2 = SquelchState{};
+  }
+
+  const std::string config = (config_json == nullptr) ? "{}" : std::string(config_json);
+  double parsed_threshold = 0.0;
+  if (TryParseJsonNumber(config, "squelch_threshold_db", &parsed_threshold)) {
+    g_squelch_threshold_db.store(std::clamp(parsed_threshold, 0.0, 30.0), std::memory_order_relaxed);
+  }
+  double parsed_min_signal = 0.0;
+  if (TryParseJsonNumber(config, "squelch_min_signal_abs", &parsed_min_signal)) {
+    g_squelch_min_signal_abs.store(std::clamp(parsed_min_signal, 0.00001, 1.0), std::memory_order_relaxed);
+  }
+  double parsed_hangover = 0.0;
+  if (TryParseJsonNumber(config, "squelch_hangover_blocks", &parsed_hangover)) {
+    const int hangover = static_cast<int>(std::lround(parsed_hangover));
+    g_squelch_hangover_blocks.store(std::clamp(hangover, 0, 20), std::memory_order_relaxed);
+  }
   return 0;
 }
 
@@ -513,6 +592,68 @@ bool DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
   return emitted_any;
 }
 
+double PercentileAbs(const std::vector<double>& values, double percentile) {
+  if (values.empty()) {
+    return 0.0;
+  }
+
+  std::vector<double> work;
+  work.reserve(values.size());
+  for (double value : values) {
+    work.push_back(std::abs(value));
+  }
+
+  const double clamped = std::clamp(percentile, 0.0, 1.0);
+  const size_t idx = static_cast<size_t>(clamped * static_cast<double>(work.size() - 1));
+  using Diff = std::vector<double>::difference_type;
+  std::nth_element(work.begin(), work.begin() + static_cast<Diff>(idx), work.end());
+  return work[idx];
+}
+
+struct SquelchDecision {
+  bool open = false;
+  double noise_floor = 0.0;
+  double signal_level = 0.0;
+  double snr_db = 0.0;
+};
+
+SquelchDecision EvaluateSquelch(SquelchState* state, const std::vector<double>& discriminator) {
+  SquelchDecision out;
+  if (state == nullptr || discriminator.empty()) {
+    return out;
+  }
+
+  const double floor_estimate = PercentileAbs(discriminator, 0.20);
+  const double signal_estimate = PercentileAbs(discriminator, 0.95);
+  if (!(state->noise_floor > 0.0)) {
+    state->noise_floor = floor_estimate;
+  }
+
+  const double kEpsilon = 1e-9;
+  const double snr_linear = (signal_estimate + kEpsilon) / (state->noise_floor + kEpsilon);
+  const double snr_db = 20.0 * std::log10(snr_linear);
+  const double threshold_db = g_squelch_threshold_db.load(std::memory_order_relaxed);
+  const double min_signal_abs = g_squelch_min_signal_abs.load(std::memory_order_relaxed);
+  const int hangover_blocks = g_squelch_hangover_blocks.load(std::memory_order_relaxed);
+  const bool triggered = signal_estimate >= min_signal_abs && snr_db >= threshold_db;
+
+  if (triggered) {
+    state->hold_blocks = hangover_blocks;
+    state->noise_floor = state->noise_floor * 0.995 + floor_estimate * 0.005;
+  } else {
+    if (state->hold_blocks > 0) {
+      --state->hold_blocks;
+    }
+    state->noise_floor = state->noise_floor * 0.90 + floor_estimate * 0.10;
+  }
+
+  out.open = triggered || state->hold_blocks > 0;
+  out.noise_floor = state->noise_floor;
+  out.signal_level = signal_estimate;
+  out.snr_db = snr_db;
+  return out;
+}
+
 int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn emit_fn, void* user_data) {
   if (iq_view == nullptr || emit_fn == nullptr) {
     return -1;
@@ -539,34 +680,39 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     abs_mean += std::abs(v);
   }
   abs_mean /= static_cast<double>(discriminator.size());
-  if (abs_mean < 0.0004) {
-    return 0;
-  }
 
-  const std::vector<double> resampled =
-      ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kResampledRate);
-  if (resampled.size() < 512) {
-    return 0;
+  SquelchState* squelch_state = on_ais1 ? &g_squelch_ais1 : &g_squelch_ais2;
+  const SquelchDecision squelch = EvaluateSquelch(squelch_state, discriminator);
+  if (squelch.open) {
+    g_metric_squelch_open.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    g_metric_squelch_closed.fetch_add(1, std::memory_order_relaxed);
   }
 
   bool emitted_this_block = false;
-  const int preferred_phase = EstimateBestPhase(resampled);
-  std::vector<int> phases = {preferred_phase};
-  for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
-    if (phase != preferred_phase) {
-      phases.push_back(phase);
-    }
-  }
-  for (int phase : phases) {
-    for (bool invert : {false, true}) {
-      const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
-      if (symbols.size() < 96) {
-        continue;
+  if (squelch.open) {
+    const std::vector<double> resampled =
+        ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kResampledRate);
+    if (resampled.size() >= 512) {
+      const int preferred_phase = EstimateBestPhase(resampled);
+      std::vector<int> phases = {preferred_phase};
+      for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
+        if (phase != preferred_phase) {
+          phases.push_back(phase);
+        }
       }
-      for (int initial_level : {0, 1}) {
-        const std::vector<int> bits = NrziDecode(symbols, initial_level);
-        if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
-          emitted_this_block = true;
+      for (int phase : phases) {
+        for (bool invert : {false, true}) {
+          const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
+          if (symbols.size() < 96) {
+            continue;
+          }
+          for (int initial_level : {0, 1}) {
+            const std::vector<int> bits = NrziDecode(symbols, initial_level);
+            if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+              emitted_this_block = true;
+            }
+          }
         }
       }
     }
@@ -585,6 +731,20 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_duplicates\":\"" << g_metric_duplicates.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_emitted\":\"" << g_metric_emitted.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_abs_mean\":\"" << abs_mean << "\""
+                 << ",\"metric_squelch_open_total\":\""
+                 << g_metric_squelch_open.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_squelch_closed_total\":\""
+                 << g_metric_squelch_closed.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_squelch_open\":\"" << (squelch.open ? "1" : "0") << "\""
+                 << ",\"metric_squelch_noise\":\"" << squelch.noise_floor << "\""
+                 << ",\"metric_squelch_signal\":\"" << squelch.signal_level << "\""
+                 << ",\"metric_squelch_snr_db\":\"" << squelch.snr_db << "\""
+                 << ",\"metric_squelch_threshold_db\":\""
+                 << g_squelch_threshold_db.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_squelch_min_signal_abs\":\""
+                 << g_squelch_min_signal_abs.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_squelch_hangover_blocks\":\""
+                 << g_squelch_hangover_blocks.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_emitted_this_block\":\"" << (emitted_this_block ? "1" : "0") << "\"}";
     const double frequency_hz = static_cast<double>(on_ais1 ? kAis1Hz : kAis2Hz);
     emit_fn("AIS", "[AIS_METRICS]", frequency_hz, 0, metrics_json.str().c_str(), user_data);
@@ -605,11 +765,19 @@ void Shutdown() {
   g_metric_crc_fail.store(0, std::memory_order_relaxed);
   g_metric_duplicates.store(0, std::memory_order_relaxed);
   g_metric_emitted.store(0, std::memory_order_relaxed);
+  g_metric_squelch_open.store(0, std::memory_order_relaxed);
+  g_metric_squelch_closed.store(0, std::memory_order_relaxed);
+  g_squelch_ais1 = SquelchState{};
+  g_squelch_ais2 = SquelchState{};
+  g_initialized.store(false, std::memory_order_relaxed);
+  g_squelch_threshold_db.store(kDefaultSquelchThresholdDb, std::memory_order_relaxed);
+  g_squelch_min_signal_abs.store(kDefaultSquelchMinSignalAbs, std::memory_order_relaxed);
+  g_squelch_hangover_blocks.store(kDefaultSquelchHangoverBlocks, std::memory_order_relaxed);
 }
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.3.0",
+    .plugin_version = "0.5.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,

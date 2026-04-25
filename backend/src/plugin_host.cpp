@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 #include <sstream>
 
 namespace multi_radio {
@@ -191,6 +192,36 @@ bool PluginHost::DisablePlugin(const std::string& plugin_name, std::string* erro
     return false;
   }
   plugin->info.enabled = false;
+  return true;
+}
+
+bool PluginHost::ConfigureAisSquelch(double threshold_db, double min_signal_abs,
+                                     uint32_t hangover_blocks, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto* plugin = FindPluginByName("ais_wrapper");
+  if (plugin == nullptr || plugin->descriptor == nullptr || plugin->descriptor->init == nullptr) {
+    if (error != nullptr) {
+      *error = "AIS plugin does not support runtime configuration";
+    }
+    return false;
+  }
+
+  std::ostringstream config_json;
+  config_json << std::fixed << std::setprecision(6)
+              << "{\"squelch_threshold_db\":" << threshold_db
+              << ",\"squelch_min_signal_abs\":" << min_signal_abs
+              << ",\"squelch_hangover_blocks\":" << hangover_blocks << "}";
+
+  const int rc = plugin->descriptor->init(config_json.str().c_str());
+  if (rc != 0) {
+    if (error != nullptr) {
+      *error = "AIS plugin rejected squelch configuration";
+    }
+    return false;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
   return true;
 }
 

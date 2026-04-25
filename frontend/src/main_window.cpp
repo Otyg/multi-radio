@@ -124,6 +124,23 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   dwell_ms_spin_->setRange(100, 10000);
   dwell_ms_spin_->setValue(500);
 
+  ais_squelch_db_spin_ = new QDoubleSpinBox(control_group);
+  ais_squelch_db_spin_->setDecimals(1);
+  ais_squelch_db_spin_->setRange(0.0, 30.0);
+  ais_squelch_db_spin_->setSingleStep(0.5);
+  ais_squelch_db_spin_->setValue(6.0);
+  ais_squelch_db_spin_->setSuffix(" dB");
+
+  ais_min_signal_spin_ = new QDoubleSpinBox(control_group);
+  ais_min_signal_spin_->setDecimals(4);
+  ais_min_signal_spin_->setRange(0.0001, 1.0);
+  ais_min_signal_spin_->setSingleStep(0.0005);
+  ais_min_signal_spin_->setValue(0.0030);
+
+  ais_hangover_spin_ = new QSpinBox(control_group);
+  ais_hangover_spin_->setRange(0, 20);
+  ais_hangover_spin_->setValue(2);
+
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
   button_layout->setContentsMargins(0, 0, 0, 0);
@@ -144,6 +161,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   control_layout->addRow("Range Step Hz", range_step_edit_);
   control_layout->addRow("List Hz (comma)", list_frequencies_edit_);
   control_layout->addRow("Dwell ms", dwell_ms_spin_);
+  control_layout->addRow("AIS squelch SNR", ais_squelch_db_spin_);
+  control_layout->addRow("AIS min signal", ais_min_signal_spin_);
+  control_layout->addRow("AIS hangover", ais_hangover_spin_);
   control_layout->addRow(button_row);
 
   auto* filter_group = new QGroupBox("Message Filters", central);
@@ -319,7 +339,17 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  AppendLog(QString("Applied mode/config to receiver %1").arg(receiver_id));
+  if (!client_->SetAisSquelch(ais_squelch_db_spin_->value(), ais_min_signal_spin_->value(),
+                              static_cast<uint32_t>(ais_hangover_spin_->value()), &error)) {
+    QMessageBox::warning(this, "SetAisSquelch failed", QString::fromStdString(error));
+    return;
+  }
+
+  AppendLog(QString("Applied mode/config + AIS squelch to receiver %1 (snr=%2 dB min=%3 hang=%4)")
+                .arg(receiver_id)
+                .arg(ais_squelch_db_spin_->value(), 0, 'f', 1)
+                .arg(ais_min_signal_spin_->value(), 0, 'f', 4)
+                .arg(ais_hangover_spin_->value()));
 }
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
@@ -359,7 +389,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString kind = field_text("kind");
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
-    AppendLog(QString("[%1] RX%2 AIS metrics ch=%3 blocks=%4 flags=%5 cand=%6 ok=%7 fail=%8 dup=%9 emitted=%10 abs=%11 emitted_now=%12")
+    AppendLog(QString("[%1] RX%2 AIS metrics ch=%3 blocks=%4 flags=%5 cand=%6 ok=%7 fail=%8 dup=%9 emitted=%10 abs=%11 sq_open=%12 sq_snr=%13 sq_noise=%14 sq_sig=%15 emitted_now=%16")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
                   .arg(field_text("channel"))
@@ -371,6 +401,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(field_text("metric_duplicates"))
                   .arg(field_text("metric_emitted"))
                   .arg(field_text("metric_abs_mean"))
+                  .arg(field_text("metric_squelch_open"))
+                  .arg(field_text("metric_squelch_snr_db"))
+                  .arg(field_text("metric_squelch_noise"))
+                  .arg(field_text("metric_squelch_signal"))
                   .arg(field_text("metric_emitted_this_block")));
     return;
   }
@@ -397,14 +431,16 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString metric_blocks = field_text("metric_blocks");
   if (!metric_blocks.isEmpty()) {
-    AppendLog(QString("AIS metrics: blocks=%1 flags=%2 candidates=%3 crc_ok=%4 crc_fail=%5 dup=%6 emitted=%7")
+    AppendLog(QString("AIS metrics: blocks=%1 flags=%2 candidates=%3 crc_ok=%4 crc_fail=%5 dup=%6 emitted=%7 sq_open=%8 sq_snr=%9")
                   .arg(metric_blocks)
                   .arg(field_text("metric_flags"))
                   .arg(field_text("metric_candidates"))
                   .arg(field_text("metric_crc_ok"))
                   .arg(field_text("metric_crc_fail"))
                   .arg(field_text("metric_duplicates"))
-                  .arg(field_text("metric_emitted")));
+                  .arg(field_text("metric_emitted"))
+                  .arg(field_text("metric_squelch_open"))
+                  .arg(field_text("metric_squelch_snr_db")));
   }
 
   all_rows_.push_back(row);

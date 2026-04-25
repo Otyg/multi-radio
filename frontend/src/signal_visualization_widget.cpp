@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include <QColor>
+#include <QLinearGradient>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -19,6 +20,7 @@ namespace {
 constexpr int kWaveformPoints = 200;
 constexpr int kSpectrogramRows = 34;
 constexpr int kWaterfallRows = 90;
+constexpr double kWaveformWindowSeconds = 10.0;
 
 inline double Clamp01(double value) {
   return std::max(0.0, std::min(1.0, value));
@@ -51,6 +53,26 @@ QVector<double> ResampleToSize(const std::vector<double>& source, int target_siz
     out[i] = Clamp01(value);
   }
   return out;
+}
+
+double ComputeWaveformSamplePoint(const std::vector<double>& waveform) {
+  if (waveform.empty()) {
+    return 0.5;
+  }
+  const size_t idx = waveform.size() - 1;
+  return Clamp01(waveform[idx]);
+}
+
+double ComputeWaveformActivity(const std::vector<double>& waveform) {
+  if (waveform.empty()) {
+    return 0.0;
+  }
+  double sum_abs = 0.0;
+  for (const double sample : waveform) {
+    sum_abs += std::abs(Clamp01(sample) - 0.5);
+  }
+  const double avg_abs = sum_abs / static_cast<double>(waveform.size());
+  return Clamp01(avg_abs * 2.0);
 }
 
 QString FormatFrequencyLabel(double hz) {
@@ -168,7 +190,7 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
     painter.drawText(title_rect, Qt::AlignLeft | Qt::AlignVCenter, title);
   };
 
-  draw_panel(waveform_rect, "Signal Waveform");
+  draw_panel(waveform_rect, QString("Signal Waveform (last %1s)").arg(kWaveformWindowSeconds, 0, 'f', 0));
   draw_panel(spectrogram_rect, QString("Spectrogram (FFT %1)").arg(fft_size_));
   draw_panel(waterfall_rect, QString("Waterfall (%1 - %2)")
                                  .arg(FormatFrequencyLabel(frequency_start_hz_))
@@ -184,7 +206,16 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
 
   const ReceiverState display = BuildDisplayState();
 
-  DrawWaveform(&painter, waveform_rect.adjusted(8, 30, -8, -8), display.waveform);
+  const QRect waveform_content = waveform_rect.adjusted(8, 30, -8, -8);
+  const int meter_height = std::clamp(waveform_content.height() / 7, 18, 28);
+  const int waveform_height = std::max(24, waveform_content.height() - meter_height - 8);
+  const QRect waveform_plot_rect(waveform_content.left(), waveform_content.top(), waveform_content.width(),
+                                 waveform_height);
+  const QRect level_meter_rect(waveform_content.left(), waveform_plot_rect.bottom() + 8,
+                               waveform_content.width(), meter_height);
+
+  DrawWaveform(&painter, waveform_plot_rect, display.waveform);
+  DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
                     frequency_start_hz_, frequency_end_hz_);
   DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true);
@@ -200,7 +231,7 @@ void SignalVisualizationWidget::EnsureState(ReceiverState* state) const {
     return;
   }
   if (state->waveform.size() != kWaveformPoints) {
-    state->waveform = QVector<double>(kWaveformPoints, 0.0);
+    state->waveform = QVector<double>(kWaveformPoints, 0.5);
   }
   if (state->spectrum.size() != spectrum_bins_) {
     state->spectrum = QVector<double>(spectrum_bins_, 0.0);
@@ -226,10 +257,12 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   if (state == nullptr) {
     return;
   }
-  state->waveform = QVector<double>(kWaveformPoints, 0.0);
+  state->waveform = QVector<double>(kWaveformPoints, 0.5);
   state->spectrum = QVector<double>(spectrum_bins_, 0.0);
   state->spectrogram_rows.clear();
   state->waterfall_rows.clear();
+  state->signal_level = 0.0;
+  state->signal_peak_hold = 0.0;
 }
 
 int SignalVisualizationWidget::NormalizeFftSize(int fft_size) {
@@ -294,6 +327,16 @@ void SignalVisualizationWidget::DrawWaveform(QPainter* painter, const QRect& are
     const int y = area.top() + (i * area.height() / 5);
     painter->drawLine(area.left(), y, area.right(), y);
   }
+  painter->setPen(QPen(QColor(42, 74, 92), 1));
+  const int center_y = area.top() + area.height() / 2;
+  painter->drawLine(area.left(), center_y, area.right(), center_y);
+
+  painter->setPen(QPen(QColor(40, 49, 66), 1));
+  for (int i = 0; i <= 5; ++i) {
+    const double t = static_cast<double>(i) / 5.0;
+    const int x = area.left() + static_cast<int>(t * (area.width() - 1));
+    painter->drawLine(x, area.top(), x, area.bottom());
+  }
 
   QPainterPath path;
   for (int i = 0; i < waveform.size(); ++i) {
@@ -309,6 +352,49 @@ void SignalVisualizationWidget::DrawWaveform(QPainter* painter, const QRect& are
 
   painter->setPen(QPen(QColor(92, 220, 168), 2));
   painter->drawPath(path);
+
+  painter->setPen(QColor(145, 161, 186));
+  painter->drawText(area.adjusted(4, 2, -4, -2), Qt::AlignTop | Qt::AlignLeft,
+                    QString("%1s window").arg(kWaveformWindowSeconds, 0, 'f', 0));
+  painter->restore();
+}
+
+void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& area, double level,
+                                               double peak_hold) {
+  if (painter == nullptr || !area.isValid()) {
+    return;
+  }
+
+  const double clamped_level = Clamp01(level);
+  const double clamped_peak = Clamp01(peak_hold);
+
+  painter->save();
+  painter->setClipRect(area);
+  painter->fillRect(area, QColor(11, 16, 24));
+  painter->setPen(QPen(QColor(66, 79, 102), 1));
+  painter->drawRect(area.adjusted(0, 0, -1, -1));
+
+  const QRect bar_rect = area.adjusted(8, 6, -8, -6);
+  painter->fillRect(bar_rect, QColor(24, 32, 45));
+
+  const int fill_width = static_cast<int>(std::round(clamped_level * bar_rect.width()));
+  if (fill_width > 0) {
+    QLinearGradient gradient(bar_rect.topLeft(), bar_rect.topRight());
+    gradient.setColorAt(0.0, QColor(72, 168, 110));
+    gradient.setColorAt(0.5, QColor(238, 194, 83));
+    gradient.setColorAt(1.0, QColor(222, 98, 74));
+    painter->fillRect(QRect(bar_rect.left(), bar_rect.top(), fill_width, bar_rect.height()), gradient);
+  }
+
+  const int peak_x =
+      bar_rect.left() + static_cast<int>(std::round(clamped_peak * static_cast<double>(bar_rect.width() - 1)));
+  painter->setPen(QPen(QColor(233, 237, 244), 1));
+  painter->drawLine(peak_x, bar_rect.top(), peak_x, bar_rect.bottom());
+
+  painter->setPen(QColor(178, 192, 214));
+  painter->drawText(area.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, "Signal Level");
+  painter->drawText(area.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignRight,
+                    QString("%1%").arg(static_cast<int>(std::round(clamped_level * 100.0))));
   painter->restore();
 }
 
@@ -446,6 +532,8 @@ SignalVisualizationWidget::ReceiverState SignalVisualizationWidget::BuildDisplay
 
   const auto state_values = states_.values();
   int used_states = 0;
+  double signal_level_sum = 0.0;
+  double signal_peak_sum = 0.0;
   for (const ReceiverState& state : state_values) {
     if (state.waveform.isEmpty() || state.spectrum.isEmpty()) {
       continue;
@@ -457,6 +545,8 @@ SignalVisualizationWidget::ReceiverState SignalVisualizationWidget::BuildDisplay
     for (int i = 0; i < display.spectrum.size() && i < state.spectrum.size(); ++i) {
       display.spectrum[i] += state.spectrum[i];
     }
+    signal_level_sum += state.signal_level;
+    signal_peak_sum += state.signal_peak_hold;
   }
 
   if (used_states > 0) {
@@ -467,6 +557,8 @@ SignalVisualizationWidget::ReceiverState SignalVisualizationWidget::BuildDisplay
     for (double& v : display.spectrum) {
       v *= inv;
     }
+    display.signal_level = signal_level_sum * inv;
+    display.signal_peak_hold = signal_peak_sum * inv;
   }
 
   PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
@@ -510,6 +602,8 @@ void SignalVisualizationWidget::BlendSampleIntoState(ReceiverState* state, doubl
 
   state->waveform.removeFirst();
   state->waveform.push_back(normalized_intensity);
+  state->signal_level = Clamp01(state->signal_level * 0.85 + normalized_intensity * 0.15);
+  state->signal_peak_hold = std::max(state->signal_level, state->signal_peak_hold * 0.97);
 
   PushRow(&state->spectrogram_rows, state->spectrum, kSpectrogramRows);
   PushRow(&state->waterfall_rows, state->spectrum, kWaterfallRows);
@@ -523,7 +617,14 @@ void SignalVisualizationWidget::BlendFrameIntoState(ReceiverState* state, const 
   }
   EnsureState(state);
 
-  state->waveform = ResampleToSize(waveform, kWaveformPoints);
+  const double waveform_point = ComputeWaveformSamplePoint(waveform);
+  state->waveform.removeFirst();
+  state->waveform.push_back(waveform_point);
+
+  const double activity = ComputeWaveformActivity(waveform);
+  const double level_input = std::max(activity, Clamp01(peak_intensity) * 0.35);
+  state->signal_level = Clamp01(state->signal_level * 0.88 + level_input * 0.12);
+  state->signal_peak_hold = std::max(state->signal_level, state->signal_peak_hold * 0.98);
   state->spectrum = ResampleToSize(spectrum, spectrum_bins_);
 
   if (peak_frequency_hz > 0.0) {

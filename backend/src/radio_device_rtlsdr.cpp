@@ -108,7 +108,7 @@ class RtlSdrDevice final : public IRadioDevice {
       return false;
     }
 
-    constexpr int kBytes = 32768;
+    constexpr int kBytes = 131072;
     std::vector<uint8_t> raw(kBytes);
     int n_read = 0;
     if (rtlsdr_read_sync(dev_, raw.data(), kBytes, &n_read) != 0 || n_read <= 0) {

@@ -31,6 +31,8 @@ class PluginHost {
 
   bool EnablePlugin(const std::string& plugin_name, std::string* error);
   bool DisablePlugin(const std::string& plugin_name, std::string* error);
+  bool ConfigureAisSquelch(double threshold_db, double min_signal_abs, uint32_t hangover_blocks,
+                           std::string* error);
 
   void ProcessIq(const IQSampleBlock& iq, const MessageCallback& callback);
 

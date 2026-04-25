@@ -44,6 +44,8 @@ class SignalVisualizationWidget : public QWidget {
     QVector<QVector<double>> spectrogram_rows;
     QVector<QVector<double>> waterfall_rows;
     double last_frequency_hz = 0.0;
+    double signal_level = 0.0;
+    double signal_peak_hold = 0.0;
   };
 
   void EnsureState(ReceiverState* state) const;
@@ -55,6 +57,7 @@ class SignalVisualizationWidget : public QWidget {
   static QColor HeatColor(double value);
   static QColor RainbowColor(double value);
   static void DrawWaveform(QPainter* painter, const QRect& area, const QVector<double>& waveform);
+  static void DrawLevelMeter(QPainter* painter, const QRect& area, double level, double peak_hold);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
                                 double frequency_start_hz, double frequency_end_hz);
   static void DrawHeatmap(QPainter* painter, const QRect& area, const QVector<QVector<double>>& rows,
