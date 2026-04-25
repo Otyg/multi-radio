@@ -357,6 +357,24 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     return fields.value(key).toString();
   };
 
+  const QString kind = field_text("kind");
+  if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
+    AppendLog(QString("[%1] RX%2 AIS metrics ch=%3 blocks=%4 flags=%5 cand=%6 ok=%7 fail=%8 dup=%9 emitted=%10 abs=%11 emitted_now=%12")
+                  .arg(ToLocalTime(unix_ms))
+                  .arg(receiver_id)
+                  .arg(field_text("channel"))
+                  .arg(field_text("metric_blocks"))
+                  .arg(field_text("metric_flags"))
+                  .arg(field_text("metric_candidates"))
+                  .arg(field_text("metric_crc_ok"))
+                  .arg(field_text("metric_crc_fail"))
+                  .arg(field_text("metric_duplicates"))
+                  .arg(field_text("metric_emitted"))
+                  .arg(field_text("metric_abs_mean"))
+                  .arg(field_text("metric_emitted_this_block")));
+    return;
+  }
+
   QString summary = QString("[%1] RX%2 %3 f=%4")
                         .arg(ToLocalTime(unix_ms))
                         .arg(receiver_id)

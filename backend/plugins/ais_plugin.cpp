@@ -21,6 +21,7 @@ constexpr int kSamplesPerSymbol = 5;
 constexpr double kResampledRate = kSymbolRate * static_cast<double>(kSamplesPerSymbol);
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
+constexpr uint64_t kMetricReportEveryBlocks = 1;
 
 struct RecentFrame {
   uint64_t hash = 0;
@@ -417,7 +418,7 @@ bool TryDecodeFrame(const std::vector<int>& stuffed_bits, std::vector<uint8_t>* 
       if (type == 0 || type > 27) {
         continue;
       }
-      if (parsed_mmsi < 10000000U || parsed_mmsi > 999999999U) {
+      if (parsed_mmsi == 0U || parsed_mmsi > 999999999U) {
         continue;
       }
       *message_bytes = variant;
@@ -473,12 +474,13 @@ void EmitAisMessage(const std::vector<uint8_t>& message_bytes, uint32_t message_
   emit_fn("AIS", sentence.c_str(), frequency_hz, 0, fields_json.str().c_str(), user_data);
 }
 
-void DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_radio_emit_message_fn emit_fn,
+bool DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_radio_emit_message_fn emit_fn,
                            void* user_data) {
   if (bits.size() < 128) {
-    return;
+    return false;
   }
 
+  bool emitted_any = false;
   for (size_t start = 0; start + 64 < bits.size(); ++start) {
     if (!IsFlagAt(bits, start)) {
       continue;
@@ -490,7 +492,7 @@ void DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
       }
       const size_t frame_len = end - (start + 8);
       if (frame_len < 80 || frame_len > 4096) {
-        break;
+        continue;
       }
 
       std::vector<int> stuffed(bits.begin() + static_cast<long>(start + 8),
@@ -502,12 +504,13 @@ void DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
       if (TryDecodeFrame(stuffed, &message_bytes, &message_type, &mmsi)) {
         g_metric_crc_ok.fetch_add(1, std::memory_order_relaxed);
         EmitAisMessage(message_bytes, message_type, mmsi, channel_a, emit_fn, user_data);
+        emitted_any = true;
       } else {
         g_metric_crc_fail.fetch_add(1, std::memory_order_relaxed);
       }
-      break;
     }
   }
+  return emitted_any;
 }
 
 int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn emit_fn, void* user_data) {
@@ -536,7 +539,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     abs_mean += std::abs(v);
   }
   abs_mean /= static_cast<double>(discriminator.size());
-  if (abs_mean < 0.0015) {
+  if (abs_mean < 0.0004) {
     return 0;
   }
 
@@ -546,16 +549,45 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     return 0;
   }
 
-  const int phase = EstimateBestPhase(resampled);
-  for (bool invert : {false, true}) {
-    const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
-    if (symbols.size() < 96) {
-      continue;
+  bool emitted_this_block = false;
+  const int preferred_phase = EstimateBestPhase(resampled);
+  std::vector<int> phases = {preferred_phase};
+  for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
+    if (phase != preferred_phase) {
+      phases.push_back(phase);
     }
-    for (int initial_level : {0, 1}) {
-      const std::vector<int> bits = NrziDecode(symbols, initial_level);
-      DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data);
+  }
+  for (int phase : phases) {
+    for (bool invert : {false, true}) {
+      const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
+      if (symbols.size() < 96) {
+        continue;
+      }
+      for (int initial_level : {0, 1}) {
+        const std::vector<int> bits = NrziDecode(symbols, initial_level);
+        if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+          emitted_this_block = true;
+        }
+      }
     }
+  }
+
+  const uint64_t blocks = g_metric_blocks.load(std::memory_order_relaxed);
+  if ((blocks % kMetricReportEveryBlocks) == 0) {
+    std::ostringstream metrics_json;
+    metrics_json << "{\"kind\":\"metric\""
+                 << ",\"channel\":\"" << (on_ais1 ? "AIS1" : "AIS2") << "\""
+                 << ",\"metric_blocks\":\"" << blocks << "\""
+                 << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_candidates\":\"" << g_metric_candidates.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_crc_ok\":\"" << g_metric_crc_ok.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_crc_fail\":\"" << g_metric_crc_fail.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_duplicates\":\"" << g_metric_duplicates.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_emitted\":\"" << g_metric_emitted.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_abs_mean\":\"" << abs_mean << "\""
+                 << ",\"metric_emitted_this_block\":\"" << (emitted_this_block ? "1" : "0") << "\"}";
+    const double frequency_hz = static_cast<double>(on_ais1 ? kAis1Hz : kAis2Hz);
+    emit_fn("AIS", "[AIS_METRICS]", frequency_hz, 0, metrics_json.str().c_str(), user_data);
   }
 
   return 0;
