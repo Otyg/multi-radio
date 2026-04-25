@@ -32,7 +32,8 @@ class ReceiverWorker {
 
  private:
   void RunLoop();
-  void PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz = 0.0);
+  void PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz = 0.0,
+                    bool log_event = true);
 
   const uint32_t receiver_id_;
   const std::string serial_;

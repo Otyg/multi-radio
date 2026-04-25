@@ -19,10 +19,38 @@ namespace {
 constexpr int kWaveformPoints = 200;
 constexpr int kSpectrogramRows = 34;
 constexpr int kWaterfallRows = 90;
-constexpr double kTwoPi = 6.28318530717958647692;
 
 inline double Clamp01(double value) {
   return std::max(0.0, std::min(1.0, value));
+}
+
+QVector<double> ResampleToSize(const std::vector<double>& source, int target_size) {
+  if (target_size <= 0) {
+    return {};
+  }
+  QVector<double> out(target_size, 0.0);
+  if (source.empty()) {
+    return out;
+  }
+  if (source.size() == 1) {
+    const double value = Clamp01(source.front());
+    for (double& item : out) {
+      item = value;
+    }
+    return out;
+  }
+
+  const int source_size = static_cast<int>(source.size());
+  for (int i = 0; i < target_size; ++i) {
+    const double t = (target_size <= 1) ? 0.0 : static_cast<double>(i) / static_cast<double>(target_size - 1);
+    const double source_pos = t * static_cast<double>(source_size - 1);
+    const int left = std::clamp(static_cast<int>(std::floor(source_pos)), 0, source_size - 1);
+    const int right = std::clamp(left + 1, 0, source_size - 1);
+    const double frac = source_pos - static_cast<double>(left);
+    const double value = source[left] + (source[right] - source[left]) * frac;
+    out[i] = Clamp01(value);
+  }
+  return out;
 }
 
 QString FormatFrequencyLabel(double hz) {
@@ -96,6 +124,14 @@ double SignalVisualizationWidget::FrequencyStartHz() const { return frequency_st
 
 double SignalVisualizationWidget::FrequencyEndHz() const { return frequency_end_hz_; }
 
+void SignalVisualizationWidget::PushVisualizationFrame(uint32_t receiver_id, const std::vector<double>& waveform,
+                                                       const std::vector<double>& spectrum,
+                                                       double peak_frequency_hz, double peak_intensity) {
+  ReceiverState& state = states_[receiver_id];
+  BlendFrameIntoState(&state, waveform, spectrum, peak_frequency_hz, peak_intensity);
+  update();
+}
+
 void SignalVisualizationWidget::PushSample(uint32_t receiver_id, double frequency_hz, double intensity) {
   ReceiverState& state = states_[receiver_id];
   BlendSampleIntoState(&state, frequency_hz, intensity);
@@ -155,9 +191,7 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
 }
 
 void SignalVisualizationWidget::OnFrameTick() {
-  for (auto it = states_.begin(); it != states_.end(); ++it) {
-    DecayState(&it.value(), 0.94);
-  }
+  // Keep UI responsive for repaint requests, but do not synthesize decay between samples.
   update();
 }
 
@@ -166,7 +200,7 @@ void SignalVisualizationWidget::EnsureState(ReceiverState* state) const {
     return;
   }
   if (state->waveform.size() != kWaveformPoints) {
-    state->waveform = QVector<double>(kWaveformPoints, 0.5);
+    state->waveform = QVector<double>(kWaveformPoints, 0.0);
   }
   if (state->spectrum.size() != spectrum_bins_) {
     state->spectrum = QVector<double>(spectrum_bins_, 0.0);
@@ -192,7 +226,7 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   if (state == nullptr) {
     return;
   }
-  state->waveform = QVector<double>(kWaveformPoints, 0.5);
+  state->waveform = QVector<double>(kWaveformPoints, 0.0);
   state->spectrum = QVector<double>(spectrum_bins_, 0.0);
   state->spectrogram_rows.clear();
   state->waterfall_rows.clear();
@@ -464,30 +498,46 @@ void SignalVisualizationWidget::BlendSampleIntoState(ReceiverState* state, doubl
   }
 
   for (double& bin : state->spectrum) {
-    bin *= 0.9;
+    bin = 0.0;
   }
 
   if (frequency_in_range) {
-    const double sigma = 0.045;
-    for (int i = 0; i < state->spectrum.size(); ++i) {
-      const double x = (state->spectrum.size() <= 1)
-                           ? 0.0
-                           : static_cast<double>(i) / static_cast<double>(state->spectrum.size() - 1);
-      const double dist = x - normalized_frequency;
-      const double gaussian = std::exp(-(dist * dist) / (2.0 * sigma * sigma));
-      state->spectrum[i] = std::max(state->spectrum[i], gaussian * normalized_intensity);
-    }
+    const int max_bin = state->spectrum.size() - 1;
+    const int peak_bin = static_cast<int>(std::round(normalized_frequency * max_bin));
+    const int clamped_bin = std::clamp(peak_bin, 0, max_bin);
+    state->spectrum[clamped_bin] = normalized_intensity;
   }
 
-  const int samples_to_add = 4;
-  const double amplitude = 0.15 + normalized_intensity * 0.75;
-  for (int i = 0; i < samples_to_add; ++i) {
-    state->phase += 0.16 + normalized_intensity * 0.12;
-    const double harmonic = std::sin(state->phase * kTwoPi);
-    const double overtone = std::sin((state->phase * 0.51 + normalized_frequency) * kTwoPi);
-    const double sample = 0.5 + amplitude * 0.38 * harmonic + 0.12 * overtone;
-    state->waveform.removeFirst();
-    state->waveform.push_back(Clamp01(sample));
+  state->waveform.removeFirst();
+  state->waveform.push_back(normalized_intensity);
+
+  PushRow(&state->spectrogram_rows, state->spectrum, kSpectrogramRows);
+  PushRow(&state->waterfall_rows, state->spectrum, kWaterfallRows);
+}
+
+void SignalVisualizationWidget::BlendFrameIntoState(ReceiverState* state, const std::vector<double>& waveform,
+                                                    const std::vector<double>& spectrum,
+                                                    double peak_frequency_hz, double peak_intensity) {
+  if (state == nullptr) {
+    return;
+  }
+  EnsureState(state);
+
+  state->waveform = ResampleToSize(waveform, kWaveformPoints);
+  state->spectrum = ResampleToSize(spectrum, spectrum_bins_);
+
+  if (peak_frequency_hz > 0.0) {
+    state->last_frequency_hz = peak_frequency_hz;
+  }
+
+  if (!state->spectrum.isEmpty() && state->last_frequency_hz > 0.0) {
+    const double span_hz = std::max(1.0, frequency_end_hz_ - frequency_start_hz_);
+    const double mapped_frequency = (state->last_frequency_hz - frequency_start_hz_) / span_hz;
+    if (mapped_frequency >= 0.0 && mapped_frequency <= 1.0) {
+      const int max_bin = state->spectrum.size() - 1;
+      const int peak_bin = std::clamp(static_cast<int>(std::round(mapped_frequency * max_bin)), 0, max_bin);
+      state->spectrum[peak_bin] = std::max(state->spectrum[peak_bin], Clamp01(peak_intensity));
+    }
   }
 
   PushRow(&state->spectrogram_rows, state->spectrum, kSpectrogramRows);
@@ -495,27 +545,8 @@ void SignalVisualizationWidget::BlendSampleIntoState(ReceiverState* state, doubl
 }
 
 void SignalVisualizationWidget::DecayState(ReceiverState* state, double decay_factor) {
-  if (state == nullptr) {
-    return;
-  }
-  EnsureState(state);
-
-  for (double& bin : state->spectrum) {
-    bin = Clamp01(bin * decay_factor);
-  }
-
-  double peak = 0.0;
-  for (const double value : std::as_const(state->spectrum)) {
-    peak = std::max(peak, value);
-  }
-
-  state->phase += 0.06;
-  const double sample = 0.5 + std::sin(state->phase * kTwoPi) * (0.08 + peak * 0.25);
-  state->waveform.removeFirst();
-  state->waveform.push_back(Clamp01(sample));
-
-  PushRow(&state->spectrogram_rows, state->spectrum, kSpectrogramRows);
-  PushRow(&state->waterfall_rows, state->spectrum, kWaterfallRows);
+  Q_UNUSED(state);
+  Q_UNUSED(decay_factor);
 }
 
 }  // namespace multi_radio

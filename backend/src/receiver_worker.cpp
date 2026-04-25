@@ -12,6 +12,8 @@ namespace multi_radio {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr int kWaveformPoints = 200;
+constexpr int kSpectrumBins = 256;
 
 std::string FormatDouble(double value, int precision) {
   std::ostringstream out;
@@ -19,24 +21,31 @@ std::string FormatDouble(double value, int precision) {
   return out.str();
 }
 
-bool EstimateAudioPeak(const IQSampleBlock& iq, double* peak_hz, double* peak_strength) {
-  if (peak_hz == nullptr || peak_strength == nullptr) {
-    return false;
+std::string FormatSeries(const std::vector<double>& values, int precision) {
+  std::ostringstream out;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      out << ",";
+    }
+    out << std::fixed << std::setprecision(precision) << values[i];
   }
+  return out.str();
+}
+
+std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq) {
+  std::vector<double> discriminator;
   if (iq.sample_rate_hz == 0 || iq.interleaved_iq.size() < 4) {
-    return false;
+    return discriminator;
   }
 
   const size_t available_samples = iq.interleaved_iq.size() / 2;
   const size_t max_samples = 8192;
   const size_t sample_count = std::min(available_samples, max_samples);
   if (sample_count < 64) {
-    return false;
+    return discriminator;
   }
 
-  std::vector<double> discriminator;
   discriminator.reserve(sample_count - 1);
-
   double prev_i = static_cast<double>(iq.interleaved_iq[0]);
   double prev_q = static_cast<double>(iq.interleaved_iq[1]);
   for (size_t n = 1; n < sample_count; ++n) {
@@ -49,8 +58,8 @@ bool EstimateAudioPeak(const IQSampleBlock& iq, double* peak_hz, double* peak_st
     prev_q = cur_q;
   }
 
-  if (discriminator.size() < 32) {
-    return false;
+  if (discriminator.empty()) {
+    return discriminator;
   }
 
   double mean = 0.0;
@@ -61,26 +70,45 @@ bool EstimateAudioPeak(const IQSampleBlock& iq, double* peak_hz, double* peak_st
   for (double& value : discriminator) {
     value -= mean;
   }
+  return discriminator;
+}
 
-  double rms = 0.0;
-  for (double value : discriminator) {
-    rms += value * value;
-  }
-  rms = std::sqrt(rms / static_cast<double>(discriminator.size()));
-
-  const double sample_rate = static_cast<double>(iq.sample_rate_hz);
-  const double nyquist = sample_rate * 0.5;
-  const double min_hz = 200.0;
-  const double max_hz = std::min(20000.0, nyquist - 1.0);
-  if (max_hz <= min_hz) {
+bool BuildAudioVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* waveform,
+                                  std::vector<double>* spectrum, double* peak_hz,
+                                  double* peak_strength) {
+  if (waveform == nullptr || spectrum == nullptr || peak_hz == nullptr || peak_strength == nullptr) {
     return false;
   }
 
-  const double step_hz = 100.0;
-  double best_power = -1.0;
-  double best_hz = min_hz;
-  for (double candidate_hz = min_hz; candidate_hz <= max_hz; candidate_hz += step_hz) {
-    const double omega = 2.0 * kPi * candidate_hz / sample_rate;
+  const std::vector<double> discriminator = BuildFmDiscriminator(iq);
+  if (discriminator.size() < 32) {
+    return false;
+  }
+
+  waveform->assign(kWaveformPoints, 0.5);
+  for (int i = 0; i < kWaveformPoints; ++i) {
+    const size_t idx = static_cast<size_t>((static_cast<double>(i) * (discriminator.size() - 1)) /
+                                           static_cast<double>(kWaveformPoints - 1));
+    const double raw = discriminator[idx];
+    const double normalized = std::clamp((raw / 1.25 + 1.0) * 0.5, 0.0, 1.0);
+    (*waveform)[static_cast<size_t>(i)] = normalized;
+  }
+
+  const double sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
+  const double nyquist_hz = sample_rate_hz * 0.5;
+  const double min_hz = 0.0;
+  const double max_hz = std::min(20000.0, nyquist_hz - 1.0);
+  if (max_hz <= min_hz + 1.0) {
+    return false;
+  }
+
+  spectrum->assign(kSpectrumBins, 0.0);
+  double max_power = 0.0;
+  int peak_bin = 0;
+  for (int bin = 0; bin < kSpectrumBins; ++bin) {
+    const double t = (kSpectrumBins <= 1) ? 0.0 : static_cast<double>(bin) / static_cast<double>(kSpectrumBins - 1);
+    const double candidate_hz = min_hz + t * (max_hz - min_hz);
+    const double omega = 2.0 * kPi * candidate_hz / sample_rate_hz;
     const double coeff = 2.0 * std::cos(omega);
     double q0 = 0.0;
     double q1 = 0.0;
@@ -91,19 +119,24 @@ bool EstimateAudioPeak(const IQSampleBlock& iq, double* peak_hz, double* peak_st
       q1 = q0;
     }
     const double power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
-    if (power > best_power) {
-      best_power = power;
-      best_hz = candidate_hz;
+    (*spectrum)[static_cast<size_t>(bin)] = std::max(0.0, power);
+    if (power > max_power) {
+      max_power = power;
+      peak_bin = bin;
     }
   }
 
-  if (best_power <= 0.0) {
+  if (max_power <= 0.0) {
     return false;
   }
 
-  *peak_hz = best_hz;
-  *peak_strength =
-      std::clamp(std::sqrt(best_power / static_cast<double>(discriminator.size())) / (rms + 1e-9), 0.0, 1.0);
+  for (double& value : *spectrum) {
+    value = std::clamp(value / max_power, 0.0, 1.0);
+  }
+
+  const double peak_t = (kSpectrumBins <= 1) ? 0.0 : static_cast<double>(peak_bin) / static_cast<double>(kSpectrumBins - 1);
+  *peak_hz = min_hz + peak_t * (max_hz - min_hz);
+  *peak_strength = (*spectrum)[static_cast<size_t>(peak_bin)];
   return true;
 }
 
@@ -250,7 +283,18 @@ void ReceiverWorker::RunLoop() {
 
     double audio_peak_hz = 0.0;
     double audio_peak_strength = 0.0;
-    const bool have_audio_peak = EstimateAudioPeak(iq, &audio_peak_hz, &audio_peak_strength);
+    std::vector<double> audio_waveform;
+    std::vector<double> audio_spectrum;
+    const bool have_audio_frame = BuildAudioVisualizationFrame(
+        iq, &audio_waveform, &audio_spectrum, &audio_peak_hz, &audio_peak_strength);
+    if (have_audio_frame) {
+      std::ostringstream viz_message;
+      viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(audio_peak_hz, 1)
+                  << " peak_strength=" << FormatDouble(audio_peak_strength, 3)
+                  << " waveform=" << FormatSeries(audio_waveform, 4)
+                  << " spectrum=" << FormatSeries(audio_spectrum, 4);
+      PublishEvent(EventKind::kInfo, viz_message.str(), frequency_hz.value(), false);
+    }
 
     plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
       DecodedMessage msg;
@@ -260,7 +304,7 @@ void ReceiverWorker::RunLoop() {
       msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? frequency_hz.value() : plugin_msg.frequency_hz;
       msg.payload = plugin_msg.payload;
       msg.normalized_fields = plugin_msg.normalized_fields;
-      if (have_audio_peak) {
+      if (have_audio_frame) {
         msg.normalized_fields["audio_peak_hz"] = FormatDouble(audio_peak_hz, 1);
         msg.normalized_fields["audio_peak_strength"] = FormatDouble(audio_peak_strength, 3);
       }
@@ -272,7 +316,8 @@ void ReceiverWorker::RunLoop() {
   }
 }
 
-void ReceiverWorker::PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz) {
+void ReceiverWorker::PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz,
+                                  bool log_event) {
   ReceiverEvent event;
   event.unix_ms = UnixMillisNow();
   event.receiver_id = receiver_id_;
@@ -280,7 +325,9 @@ void ReceiverWorker::PublishEvent(EventKind kind, const std::string& message, do
   event.message = message;
   event.tuned_frequency_hz = tuned_frequency_hz;
   event_bus_->PublishReceiverEvent(event);
-  logger_->LogEvent(event);
+  if (log_event) {
+    logger_->LogEvent(event);
+  }
 }
 
 }  // namespace multi_radio

@@ -50,7 +50,6 @@ class MainWindow : public QMainWindow {
   void AppendLog(const QString& line);
   void AddMessageRow(const MessageRow& row);
   bool PassesFilter(const MessageRow& row) const;
-  double EstimateVisualizationIntensity(const QString& signal_type, const QVariantMap& fields) const;
 
   std::unique_ptr<GrpcClient> client_;
   std::vector<MessageRow> all_rows_;

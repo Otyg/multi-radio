@@ -26,6 +26,72 @@ QString ToLocalTime(quint64 unix_ms) {
   return QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(unix_ms)).toLocalTime().toString("HH:mm:ss");
 }
 
+bool ParseSeries(const QString& value, std::vector<double>* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  out->clear();
+  if (value.isEmpty()) {
+    return false;
+  }
+  const QStringList tokens = value.split(',', Qt::SkipEmptyParts);
+  out->reserve(tokens.size());
+  for (const QString& token : tokens) {
+    bool ok = false;
+    const double parsed = token.toDouble(&ok);
+    if (!ok) {
+      return false;
+    }
+    out->push_back(parsed);
+  }
+  return !out->empty();
+}
+
+bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, double* peak_strength,
+                                  std::vector<double>* waveform, std::vector<double>* spectrum) {
+  if (peak_hz == nullptr || peak_strength == nullptr || waveform == nullptr || spectrum == nullptr) {
+    return false;
+  }
+  if (!message.startsWith("VIZ_FRAME ")) {
+    return false;
+  }
+
+  const QStringList tokens = message.split(' ', Qt::SkipEmptyParts);
+  if (tokens.size() < 5) {
+    return false;
+  }
+
+  bool peak_hz_ok = false;
+  bool peak_strength_ok = false;
+  bool waveform_ok = false;
+  bool spectrum_ok = false;
+  double parsed_peak_hz = 0.0;
+  double parsed_peak_strength = 0.0;
+  std::vector<double> parsed_waveform;
+  std::vector<double> parsed_spectrum;
+  for (int i = 1; i < tokens.size(); ++i) {
+    const QString token = tokens[i];
+    if (token.startsWith("peak_hz=")) {
+      parsed_peak_hz = token.mid(8).toDouble(&peak_hz_ok);
+    } else if (token.startsWith("peak_strength=")) {
+      parsed_peak_strength = token.mid(14).toDouble(&peak_strength_ok);
+    } else if (token.startsWith("waveform=")) {
+      waveform_ok = ParseSeries(token.mid(9), &parsed_waveform);
+    } else if (token.startsWith("spectrum=")) {
+      spectrum_ok = ParseSeries(token.mid(9), &parsed_spectrum);
+    }
+  }
+
+  if (!peak_hz_ok || !peak_strength_ok || !waveform_ok || !spectrum_ok) {
+    return false;
+  }
+  *peak_hz = parsed_peak_hz;
+  *peak_strength = std::clamp(parsed_peak_strength, 0.0, 1.0);
+  *waveform = std::move(parsed_waveform);
+  *spectrum = std::move(parsed_spectrum);
+  return true;
+}
+
 }  // namespace
 
 MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* parent)
@@ -258,9 +324,15 @@ void MainWindow::ApplyModeAndConfig() {
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
                                  const QString& message, quint64 unix_ms) {
-  if (event_kind == static_cast<int>(v1::EVENT_KIND_TUNE_HOP) && tuned_frequency_hz > 0.0) {
-    signal_visualization_->PushSample(receiver_id, tuned_frequency_hz, 0.35);
+  double peak_hz = 0.0;
+  double peak_strength = 0.0;
+  std::vector<double> waveform;
+  std::vector<double> spectrum;
+  if (ParseVisualizationFrameEvent(message, &peak_hz, &peak_strength, &waveform, &spectrum)) {
+    signal_visualization_->PushVisualizationFrame(receiver_id, waveform, spectrum, peak_hz, peak_strength);
+    return;
   }
+
   AppendLog(QString("[%1] RX%2 kind=%3 f=%4 %5")
                 .arg(ToLocalTime(unix_ms))
                 .arg(receiver_id)
@@ -270,41 +342,13 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
 }
 
 void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
-                                  const QString& payload, const QVariantMap& fields, quint64 unix_ms) {
+                                  const QString& payload, const QVariantMap& /*fields*/, quint64 unix_ms) {
   MessageRow row;
   row.timestamp = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(unix_ms)).toLocalTime();
   row.receiver_id = receiver_id;
   row.signal_type = signal_type;
   row.frequency_hz = frequency_hz;
   row.payload = payload;
-
-  auto parse_field_double = [&fields](const QString& key, double* value) -> bool {
-    if (!fields.contains(key) || value == nullptr) {
-      return false;
-    }
-    bool ok = false;
-    const QVariant raw = fields.value(key);
-    const double direct = raw.toDouble(&ok);
-    if (ok) {
-      *value = direct;
-      return true;
-    }
-    const double from_string = raw.toString().toDouble(&ok);
-    if (ok) {
-      *value = from_string;
-      return true;
-    }
-    return false;
-  };
-
-  double visualization_frequency_hz = frequency_hz;
-  double audio_peak_hz = 0.0;
-  if (parse_field_double("audio_peak_hz", &audio_peak_hz)) {
-    visualization_frequency_hz = audio_peak_hz;
-  }
-
-  signal_visualization_->PushSample(receiver_id, visualization_frequency_hz,
-                                    EstimateVisualizationIntensity(signal_type, fields));
 
   all_rows_.push_back(row);
   AddMessageRow(row);
@@ -410,56 +454,6 @@ bool MainWindow::PassesFilter(const MessageRow& row) const {
   const int minutes = minutes_filter_spin_->value();
   const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-minutes * 60);
   return row.timestamp >= cutoff;
-}
-
-double MainWindow::EstimateVisualizationIntensity(const QString& signal_type,
-                                                  const QVariantMap& fields) const {
-  auto read_numeric = [&fields](const QString& key, double* value) -> bool {
-    if (!fields.contains(key) || value == nullptr) {
-      return false;
-    }
-    bool ok = false;
-    const QVariant raw_value = fields.value(key);
-    const double parsed = raw_value.toDouble(&ok);
-    if (ok) {
-      *value = parsed;
-      return true;
-    }
-    const double from_string = raw_value.toString().toDouble(&ok);
-    if (ok) {
-      *value = from_string;
-      return true;
-    }
-    return false;
-  };
-
-  double value = 0.0;
-  if (read_numeric("audio_peak_strength", &value)) {
-    return std::clamp(value, 0.05, 1.0);
-  }
-  if (read_numeric("snr_db", &value) || read_numeric("snr", &value)) {
-    return std::clamp((value + 5.0) / 35.0, 0.05, 1.0);
-  }
-  if (read_numeric("rssi_dbm", &value) || read_numeric("rssi", &value)) {
-    return std::clamp((value + 120.0) / 90.0, 0.05, 1.0);
-  }
-  if (read_numeric("power_dbfs", &value) || read_numeric("power_db", &value)) {
-    return std::clamp((value + 120.0) / 120.0, 0.05, 1.0);
-  }
-  if (read_numeric("confidence", &value)) {
-    return std::clamp(value, 0.05, 1.0);
-  }
-
-  if (signal_type == "SIGNAL_TYPE_ADSB") {
-    return 0.82;
-  }
-  if (signal_type == "SIGNAL_TYPE_DSC") {
-    return 0.72;
-  }
-  if (signal_type == "SIGNAL_TYPE_AIS") {
-    return 0.66;
-  }
-  return 0.6;
 }
 
 }  // namespace multi_radio

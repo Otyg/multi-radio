@@ -26,6 +26,9 @@ class SignalVisualizationWidget : public QWidget {
   int FftSize() const;
   double FrequencyStartHz() const;
   double FrequencyEndHz() const;
+  void PushVisualizationFrame(uint32_t receiver_id, const std::vector<double>& waveform,
+                              const std::vector<double>& spectrum, double peak_frequency_hz,
+                              double peak_intensity);
   void PushSample(uint32_t receiver_id, double frequency_hz, double intensity);
 
  protected:
@@ -40,7 +43,6 @@ class SignalVisualizationWidget : public QWidget {
     QVector<double> spectrum;
     QVector<QVector<double>> spectrogram_rows;
     QVector<QVector<double>> waterfall_rows;
-    double phase = 0.0;
     double last_frequency_hz = 0.0;
   };
 
@@ -62,6 +64,9 @@ class SignalVisualizationWidget : public QWidget {
   ReceiverState BuildDisplayState() const;
 
   void BlendSampleIntoState(ReceiverState* state, double frequency_hz, double intensity);
+  void BlendFrameIntoState(ReceiverState* state, const std::vector<double>& waveform,
+                           const std::vector<double>& spectrum, double peak_frequency_hz,
+                           double peak_intensity);
   void DecayState(ReceiverState* state, double decay_factor);
 
   QHash<uint32_t, ReceiverState> states_;
