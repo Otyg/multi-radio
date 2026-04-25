@@ -6,8 +6,7 @@ if(MR_ENABLE_RTLSDR)
   if(RTLSDR_LIBRARY AND RTLSDR_INCLUDE_DIR)
     set(MR_HAS_RTLSDR TRUE)
   else()
-    set(MR_HAS_RTLSDR FALSE)
-    message(WARNING "librtlsdr not found. Falling back to mock radio device backend.")
+    message(FATAL_ERROR "librtlsdr not found. Install RTL-SDR dependencies and rebuild.")
   endif()
 else()
   set(MR_HAS_RTLSDR FALSE)
@@ -20,7 +19,6 @@ add_library(multi_radio_core
   src/jsonl_logger.cpp
   src/plugin_host.cpp
   src/radio_device_factory.cpp
-  src/radio_device_mock.cpp
   src/radio_device_rtlsdr.cpp
   src/receiver_worker.cpp
   src/receiver_manager.cpp

@@ -175,4 +175,12 @@ std::unique_ptr<IRadioDeviceFactory> TryCreateRtlSdrDeviceFactory() {
 #endif
 }
 
+bool IsRtlSdrBackendCompiled() {
+#if defined(MULTI_RADIO_WITH_RTLSDR)
+  return true;
+#else
+  return false;
+#endif
+}
+
 }  // namespace multi_radio

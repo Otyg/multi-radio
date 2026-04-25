@@ -14,6 +14,7 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kWaveformPoints = 200;
 constexpr int kSpectrumBins = 256;
+constexpr uint32_t kVisualizationFrameIntervalMs = 50;
 
 std::string FormatDouble(double value, int precision) {
   std::ostringstream out;
@@ -270,49 +271,55 @@ void ReceiverWorker::RunLoop() {
 
     PublishEvent(EventKind::kTuneHop, "tuned", frequency_hz.value());
 
-    IQSampleBlock iq;
-    if (!device_->ReadIq(&iq, &error)) {
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = error;
+    const double tuned_frequency_hz = frequency_hz.value();
+    const auto dwell_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dwell_ms);
+    auto next_viz_emit = std::chrono::steady_clock::time_point::min();
+
+    while (running_.load() && std::chrono::steady_clock::now() < dwell_deadline) {
+      IQSampleBlock iq;
+      if (!device_->ReadIq(&iq, &error)) {
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          last_error_ = error;
+        }
+        PublishEvent(EventKind::kError, "read failed: " + error, tuned_frequency_hz);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        break;
       }
-      PublishEvent(EventKind::kError, "read failed: " + error, frequency_hz.value());
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      continue;
-    }
 
-    double audio_peak_hz = 0.0;
-    double audio_peak_strength = 0.0;
-    std::vector<double> audio_waveform;
-    std::vector<double> audio_spectrum;
-    const bool have_audio_frame = BuildAudioVisualizationFrame(
-        iq, &audio_waveform, &audio_spectrum, &audio_peak_hz, &audio_peak_strength);
-    if (have_audio_frame) {
-      std::ostringstream viz_message;
-      viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(audio_peak_hz, 1)
-                  << " peak_strength=" << FormatDouble(audio_peak_strength, 3)
-                  << " waveform=" << FormatSeries(audio_waveform, 4)
-                  << " spectrum=" << FormatSeries(audio_spectrum, 4);
-      PublishEvent(EventKind::kInfo, viz_message.str(), frequency_hz.value(), false);
-    }
-
-    plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
-      DecodedMessage msg;
-      msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
-      msg.receiver_id = receiver_id_;
-      msg.signal_type = plugin_msg.signal_type;
-      msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? frequency_hz.value() : plugin_msg.frequency_hz;
-      msg.payload = plugin_msg.payload;
-      msg.normalized_fields = plugin_msg.normalized_fields;
-      if (have_audio_frame) {
-        msg.normalized_fields["audio_peak_hz"] = FormatDouble(audio_peak_hz, 1);
-        msg.normalized_fields["audio_peak_strength"] = FormatDouble(audio_peak_strength, 3);
+      double audio_peak_hz = 0.0;
+      double audio_peak_strength = 0.0;
+      std::vector<double> audio_waveform;
+      std::vector<double> audio_spectrum;
+      const bool have_audio_frame = BuildAudioVisualizationFrame(
+          iq, &audio_waveform, &audio_spectrum, &audio_peak_hz, &audio_peak_strength);
+      const auto now = std::chrono::steady_clock::now();
+      if (have_audio_frame && now >= next_viz_emit) {
+        std::ostringstream viz_message;
+        viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(audio_peak_hz, 1)
+                    << " peak_strength=" << FormatDouble(audio_peak_strength, 3)
+                    << " waveform=" << FormatSeries(audio_waveform, 4)
+                    << " spectrum=" << FormatSeries(audio_spectrum, 4);
+        PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+        next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
       }
-      event_bus_->PublishDecodedMessage(msg);
-      logger_->LogDecodedMessage(msg);
-    });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(dwell_ms));
+      plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
+        DecodedMessage msg;
+        msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
+        msg.receiver_id = receiver_id_;
+        msg.signal_type = plugin_msg.signal_type;
+        msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? tuned_frequency_hz : plugin_msg.frequency_hz;
+        msg.payload = plugin_msg.payload;
+        msg.normalized_fields = plugin_msg.normalized_fields;
+        if (have_audio_frame) {
+          msg.normalized_fields["audio_peak_hz"] = FormatDouble(audio_peak_hz, 1);
+          msg.normalized_fields["audio_peak_strength"] = FormatDouble(audio_peak_strength, 3);
+        }
+        event_bus_->PublishDecodedMessage(msg);
+        logger_->LogDecodedMessage(msg);
+      });
+    }
   }
 }
 

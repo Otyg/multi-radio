@@ -15,6 +15,9 @@
 
 namespace multi_radio {
 
+using RadioControlClient = v1::RadioControlService::StubInterface;
+using TelemetryClient = v1::TelemetryService::StubInterface;
+
 class GrpcClient : public QObject {
   Q_OBJECT
 
@@ -44,8 +47,8 @@ class GrpcClient : public QObject {
   void MessagesLoop();
 
   std::string token_;
-  std::unique_ptr<v1::RadioControlService::Stub> control_stub_;
-  std::unique_ptr<v1::TelemetryService::Stub> telemetry_stub_;
+  std::unique_ptr<RadioControlClient> control_client_;
+  std::unique_ptr<TelemetryClient> telemetry_client_;
 
   std::atomic<bool> streaming_{false};
   std::thread events_thread_;

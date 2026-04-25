@@ -9,8 +9,8 @@ namespace multi_radio {
 GrpcClient::GrpcClient(std::string target, std::string token, QObject* parent)
     : QObject(parent), token_(std::move(token)) {
   auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
-  control_stub_ = v1::RadioControlService::NewStub(channel);
-  telemetry_stub_ = v1::TelemetryService::NewStub(channel);
+  control_client_ = v1::RadioControlService::NewStub(channel);
+  telemetry_client_ = v1::TelemetryService::NewStub(channel);
 }
 
 GrpcClient::~GrpcClient() { StopStreaming(); }
@@ -20,7 +20,7 @@ bool GrpcClient::ListReceivers(std::vector<v1::ReceiverInfo>* receivers, std::st
   AddAuth(&context);
   v1::ListReceiversRequest request;
   v1::ListReceiversResponse response;
-  grpc::Status status = control_stub_->ListReceivers(&context, request, &response);
+  grpc::Status status = control_client_->ListReceivers(&context, request, &response);
   if (!status.ok()) {
     if (error != nullptr) {
       *error = status.error_message();
@@ -41,7 +41,7 @@ bool GrpcClient::StartReceiver(uint32_t receiver_id, std::string* error) {
   v1::StartReceiverRequest request;
   request.set_receiver_id(receiver_id);
   v1::StartReceiverResponse response;
-  grpc::Status status = control_stub_->StartReceiver(&context, request, &response);
+  grpc::Status status = control_client_->StartReceiver(&context, request, &response);
   if (!status.ok()) {
     if (error != nullptr) {
       *error = status.error_message();
@@ -64,7 +64,7 @@ bool GrpcClient::StopReceiver(uint32_t receiver_id, std::string* error) {
   v1::StopReceiverRequest request;
   request.set_receiver_id(receiver_id);
   v1::StopReceiverResponse response;
-  grpc::Status status = control_stub_->StopReceiver(&context, request, &response);
+  grpc::Status status = control_client_->StopReceiver(&context, request, &response);
   if (!status.ok()) {
     if (error != nullptr) {
       *error = status.error_message();
@@ -88,7 +88,7 @@ bool GrpcClient::SetMode(uint32_t receiver_id, v1::RadioMode mode, std::string* 
   request.set_receiver_id(receiver_id);
   request.set_mode(mode);
   v1::SetModeResponse response;
-  grpc::Status status = control_stub_->SetMode(&context, request, &response);
+  grpc::Status status = control_client_->SetMode(&context, request, &response);
   if (!status.ok()) {
     if (error != nullptr) {
       *error = status.error_message();
@@ -112,7 +112,7 @@ bool GrpcClient::SetModeConfig(uint32_t receiver_id, const v1::ModeConfig& confi
   request.set_receiver_id(receiver_id);
   *request.mutable_mode_config() = config;
   v1::SetModeConfigResponse response;
-  grpc::Status status = control_stub_->SetModeConfig(&context, request, &response);
+  grpc::Status status = control_client_->SetModeConfig(&context, request, &response);
   if (!status.ok()) {
     if (error != nullptr) {
       *error = status.error_message();
@@ -163,7 +163,7 @@ void GrpcClient::EventsLoop() {
     v1::StreamReceiverEventsRequest request;
     request.set_include_all_receivers(true);
 
-    auto reader = telemetry_stub_->StreamReceiverEvents(&context, request);
+    auto reader = telemetry_client_->StreamReceiverEvents(&context, request);
     v1::ReceiverEvent event;
     while (streaming_.load() && reader->Read(&event)) {
       emit ReceiverEventReceived(event.receiver_id(), event.kind(), event.tuned_frequency_hz(),
@@ -185,7 +185,7 @@ void GrpcClient::MessagesLoop() {
     v1::StreamDecodedMessagesRequest request;
     request.set_include_all_receivers(true);
 
-    auto reader = telemetry_stub_->StreamDecodedMessages(&context, request);
+    auto reader = telemetry_client_->StreamDecodedMessages(&context, request);
     v1::DecodedMessage msg;
     while (streaming_.load() && reader->Read(&msg)) {
       QVariantMap fields;

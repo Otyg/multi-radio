@@ -47,8 +47,6 @@ int main() {
 
     assert(Eq(scheduler.NextFrequencyHz().value(), 161975000.0));
     assert(Eq(scheduler.NextFrequencyHz().value(), 162025000.0));
-    assert(Eq(scheduler.NextFrequencyHz().value(), 156525000.0));
-    assert(Eq(scheduler.NextFrequencyHz().value(), 1090000000.0));
     assert(Eq(scheduler.NextFrequencyHz().value(), 161975000.0));
   }
 
