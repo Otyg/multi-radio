@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -15,6 +16,76 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kWaveformPoints = 200;
 constexpr int kSpectrumBins = 256;
 constexpr uint32_t kVisualizationFrameIntervalMs = 50;
+constexpr uint32_t kDefaultSampleRateHz = 2048000;
+constexpr uint32_t kMinSampleRateHz = 225000;
+constexpr uint32_t kMaxSampleRateHz = 3200000;
+constexpr uint32_t kDefaultChannelBandwidthHz = 25000;
+constexpr uint32_t kMinChannelBandwidthHz = 2000;
+constexpr uint32_t kMaxChannelBandwidthHz = 500000;
+constexpr uint32_t kMinHardwareBandwidthHz = 1000;
+
+struct IqLowPassState {
+  double i = 0.0;
+  double q = 0.0;
+  bool initialized = false;
+};
+
+ModeConfig NormalizeModeConfig(const ModeConfig& input) {
+  ModeConfig out = input;
+  if (out.dwell_ms == 0) {
+    out.dwell_ms = 500;
+  }
+  if (out.sample_rate_hz == 0) {
+    out.sample_rate_hz = kDefaultSampleRateHz;
+  }
+  out.sample_rate_hz = std::clamp(out.sample_rate_hz, kMinSampleRateHz, kMaxSampleRateHz);
+  if (out.channel_bandwidth_hz != 0) {
+    out.channel_bandwidth_hz =
+        std::clamp(out.channel_bandwidth_hz, kMinChannelBandwidthHz, kMaxChannelBandwidthHz);
+  }
+  if (out.hardware_bandwidth_hz != 0) {
+    out.hardware_bandwidth_hz =
+        std::clamp(out.hardware_bandwidth_hz, kMinHardwareBandwidthHz, out.sample_rate_hz);
+  }
+  return out;
+}
+
+void ApplyIqChannelBandwidth(IQSampleBlock* iq, uint32_t channel_bandwidth_hz, IqLowPassState* state) {
+  if (iq == nullptr || state == nullptr || iq->sample_rate_hz == 0 || iq->interleaved_iq.size() < 4) {
+    return;
+  }
+  if (channel_bandwidth_hz == 0) {
+    state->initialized = false;
+    return;
+  }
+
+  const double nyquist_hz = static_cast<double>(iq->sample_rate_hz) * 0.5;
+  const double cutoff_hz =
+      std::clamp(static_cast<double>(channel_bandwidth_hz) * 0.5, 1.0, nyquist_hz - 1.0);
+  if (cutoff_hz <= 1.0 || nyquist_hz <= 1.0) {
+    return;
+  }
+
+  const double alpha = std::clamp(1.0 - std::exp((-2.0 * kPi * cutoff_hz) /
+                                                  static_cast<double>(iq->sample_rate_hz)),
+                                  0.0001, 1.0);
+  for (size_t idx = 0; idx + 1 < iq->interleaved_iq.size(); idx += 2) {
+    const double in_i = static_cast<double>(iq->interleaved_iq[idx]);
+    const double in_q = static_cast<double>(iq->interleaved_iq[idx + 1]);
+    if (!state->initialized) {
+      state->i = in_i;
+      state->q = in_q;
+      state->initialized = true;
+    } else {
+      state->i += alpha * (in_i - state->i);
+      state->q += alpha * (in_q - state->q);
+    }
+    const double out_i = std::clamp(state->i, -32768.0, 32767.0);
+    const double out_q = std::clamp(state->q, -32768.0, 32767.0);
+    iq->interleaved_iq[idx] = static_cast<int16_t>(std::lrint(out_i));
+    iq->interleaved_iq[idx + 1] = static_cast<int16_t>(std::lrint(out_q));
+  }
+}
 
 std::string FormatDouble(double value, int precision) {
   std::ostringstream out;
@@ -156,6 +227,10 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
       logger_(std::move(logger)) {
   mode_config_.fixed_frequency_hz = 162025000.0;
   mode_config_.dwell_ms = 500;
+  mode_config_.sample_rate_hz = kDefaultSampleRateHz;
+  mode_config_.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
+  mode_config_.hardware_bandwidth_hz = 0;
+  mode_config_ = NormalizeModeConfig(mode_config_);
   scheduler_.Configure(mode_, mode_config_);
 }
 
@@ -178,7 +253,14 @@ bool ReceiverWorker::Start(std::string* error) {
     return false;
   }
 
-  if (!device_->SetSampleRateHz(2048000, error)) {
+  uint32_t sample_rate_hz = kDefaultSampleRateHz;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    mode_config_ = NormalizeModeConfig(mode_config_);
+    sample_rate_hz = mode_config_.sample_rate_hz;
+  }
+
+  if (!device_->SetSampleRateHz(sample_rate_hz, error)) {
     device_->Close();
     running_.store(false);
     return false;
@@ -222,7 +304,7 @@ bool ReceiverWorker::SetMode(RadioMode mode, std::string* error) {
 
 bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
-  mode_config_ = config;
+  mode_config_ = NormalizeModeConfig(config);
   scheduler_.Configure(mode_, mode_config_);
   if (error != nullptr) {
     error->clear();
@@ -242,13 +324,62 @@ ReceiverStatus ReceiverWorker::Status() const {
 }
 
 void ReceiverWorker::RunLoop() {
+  uint32_t applied_sample_rate_hz = 0;
+  uint32_t applied_hardware_bandwidth_hz = std::numeric_limits<uint32_t>::max();
+  IqLowPassState lowpass_state;
+
   while (running_.load()) {
     std::optional<double> frequency_hz;
     uint32_t dwell_ms = 500;
+    uint32_t desired_sample_rate_hz = kDefaultSampleRateHz;
+    uint32_t channel_bandwidth_hz = kDefaultChannelBandwidthHz;
+    uint32_t desired_hardware_bandwidth_hz = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
+      mode_config_ = NormalizeModeConfig(mode_config_);
       frequency_hz = scheduler_.NextFrequencyHz();
       dwell_ms = scheduler_.DwellMs();
+      desired_sample_rate_hz = mode_config_.sample_rate_hz;
+      channel_bandwidth_hz = mode_config_.channel_bandwidth_hz;
+      desired_hardware_bandwidth_hz = mode_config_.hardware_bandwidth_hz;
+    }
+
+    std::string error;
+    if (desired_sample_rate_hz != applied_sample_rate_hz) {
+      if (!device_->SetSampleRateHz(desired_sample_rate_hz, &error)) {
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          last_error_ = error;
+        }
+        std::ostringstream msg;
+        msg << "sample-rate update failed (" << desired_sample_rate_hz << " Hz): " << error;
+        PublishEvent(EventKind::kError, msg.str());
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        continue;
+      }
+      applied_sample_rate_hz = desired_sample_rate_hz;
+      lowpass_state.initialized = false;
+      std::ostringstream msg;
+      msg << "sample-rate updated to " << desired_sample_rate_hz << " Hz";
+      PublishEvent(EventKind::kInfo, msg.str());
+    }
+    if (desired_hardware_bandwidth_hz != applied_hardware_bandwidth_hz) {
+      if (!device_->SetHardwareBandwidthHz(desired_hardware_bandwidth_hz, &error)) {
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          last_error_ = error;
+        }
+        std::ostringstream msg;
+        msg << "hardware-bandwidth update failed (" << desired_hardware_bandwidth_hz
+            << " Hz): " << error;
+        PublishEvent(EventKind::kError, msg.str());
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        continue;
+      }
+      applied_hardware_bandwidth_hz = desired_hardware_bandwidth_hz;
+      std::ostringstream msg;
+      msg << "hardware-bandwidth updated to " << desired_hardware_bandwidth_hz << " Hz";
+      PublishEvent(EventKind::kInfo, msg.str());
     }
 
     if (!frequency_hz.has_value()) {
@@ -257,7 +388,6 @@ void ReceiverWorker::RunLoop() {
       continue;
     }
 
-    std::string error;
     const auto tune_hz = static_cast<uint32_t>(frequency_hz.value());
     if (!device_->SetCenterFrequencyHz(tune_hz, &error)) {
       {
@@ -270,6 +400,7 @@ void ReceiverWorker::RunLoop() {
     }
 
     PublishEvent(EventKind::kTuneHop, "tuned", frequency_hz.value());
+    lowpass_state.initialized = false;
 
     const double tuned_frequency_hz = frequency_hz.value();
     const auto dwell_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dwell_ms);
@@ -286,6 +417,7 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
+      ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
 
       double demod_peak_hz = 0.0;
       double demod_peak_strength = 0.0;

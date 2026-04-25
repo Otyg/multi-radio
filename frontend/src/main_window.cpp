@@ -123,6 +123,23 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   dwell_ms_spin_ = new QSpinBox(control_group);
   dwell_ms_spin_->setRange(100, 10000);
   dwell_ms_spin_->setValue(500);
+  sample_rate_spin_ = new QSpinBox(control_group);
+  sample_rate_spin_->setRange(225000, 3200000);
+  sample_rate_spin_->setSingleStep(1000);
+  sample_rate_spin_->setValue(2048000);
+  sample_rate_spin_->setSuffix(" Hz");
+  channel_bandwidth_spin_ = new QSpinBox(control_group);
+  channel_bandwidth_spin_->setRange(0, 500000);
+  channel_bandwidth_spin_->setSingleStep(1000);
+  channel_bandwidth_spin_->setValue(25000);
+  channel_bandwidth_spin_->setSuffix(" Hz");
+  channel_bandwidth_spin_->setSpecialValueText("Off");
+  hardware_bandwidth_spin_ = new QSpinBox(control_group);
+  hardware_bandwidth_spin_->setRange(0, 3200000);
+  hardware_bandwidth_spin_->setSingleStep(1000);
+  hardware_bandwidth_spin_->setValue(0);
+  hardware_bandwidth_spin_->setSuffix(" Hz");
+  hardware_bandwidth_spin_->setSpecialValueText("Auto");
 
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
@@ -130,7 +147,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* refresh_button = new QPushButton("Refresh", button_row);
   auto* start_button = new QPushButton("Start", button_row);
   auto* stop_button = new QPushButton("Stop", button_row);
-  auto* apply_button = new QPushButton("Apply mode/config", button_row);
+  auto* apply_button = new QPushButton("Apply mode/radio settings", button_row);
   button_layout->addWidget(refresh_button);
   button_layout->addWidget(start_button);
   button_layout->addWidget(stop_button);
@@ -144,6 +161,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   control_layout->addRow("Range Step Hz", range_step_edit_);
   control_layout->addRow("List Hz (comma)", list_frequencies_edit_);
   control_layout->addRow("Dwell ms", dwell_ms_spin_);
+  control_layout->addRow("Sample rate", sample_rate_spin_);
+  control_layout->addRow("Channel bandwidth", channel_bandwidth_spin_);
+  control_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
   control_layout->addRow(button_row);
 
   auto* filter_group = new QGroupBox("Message Filters", central);
@@ -313,6 +333,9 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_range_end_hz(range_end_edit_->text().toDouble());
   config.set_range_step_hz(range_step_edit_->text().toDouble());
   config.set_dwell_ms(static_cast<uint32_t>(dwell_ms_spin_->value()));
+  config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
+  config.set_channel_bandwidth_hz(static_cast<uint32_t>(channel_bandwidth_spin_->value()));
+  config.set_hardware_bandwidth_hz(static_cast<uint32_t>(hardware_bandwidth_spin_->value()));
 
   const auto list_tokens = list_frequencies_edit_->text().split(',', Qt::SkipEmptyParts);
   for (const auto& token : list_tokens) {
@@ -324,11 +347,19 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  AppendLog(QString("Applied mode/config to receiver %1").arg(receiver_id));
+  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz)")
+                .arg(receiver_id)
+                .arg(sample_rate_spin_->value())
+                .arg(channel_bandwidth_spin_->value())
+                .arg(hardware_bandwidth_spin_->value()));
 }
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
                                  const QString& message, quint64 unix_ms) {
+  if (event_kind == static_cast<int>(v1::EVENT_KIND_TUNE_HOP)) {
+    return;
+  }
+
   double peak_hz = 0.0;
   double peak_strength = 0.0;
   std::vector<double> waveform;

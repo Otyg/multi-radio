@@ -81,6 +81,9 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.range_step_hz = config.range_step_hz();
   out.frequency_list_hz.assign(config.frequency_list_hz().begin(), config.frequency_list_hz().end());
   out.dwell_ms = config.dwell_ms();
+  out.sample_rate_hz = config.sample_rate_hz();
+  out.channel_bandwidth_hz = config.channel_bandwidth_hz();
+  out.hardware_bandwidth_hz = config.hardware_bandwidth_hz();
   return out;
 }
 
@@ -90,6 +93,9 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_range_end_hz(config.range_end_hz);
   out->set_range_step_hz(config.range_step_hz);
   out->set_dwell_ms(config.dwell_ms);
+  out->set_sample_rate_hz(config.sample_rate_hz);
+  out->set_channel_bandwidth_hz(config.channel_bandwidth_hz);
+  out->set_hardware_bandwidth_hz(config.hardware_bandwidth_hz);
   out->clear_frequency_list_hz();
   for (double frequency : config.frequency_list_hz) {
     out->add_frequency_list_hz(frequency);

@@ -32,6 +32,9 @@ message ModeConfig {
   double range_step_hz = 4;
   repeated double frequency_list_hz = 5;
   uint32 dwell_ms = 6;
+  uint32 sample_rate_hz = 7;
+  uint32 channel_bandwidth_hz = 8;
+  uint32 hardware_bandwidth_hz = 9;
 }
 
 message ReceiverInfo {

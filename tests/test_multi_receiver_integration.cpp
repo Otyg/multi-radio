@@ -43,6 +43,16 @@ class FakeDevice final : public multi_radio::IRadioDevice {
     sample_rate_hz_ = sample_rate_hz;
     return true;
   }
+  bool SetHardwareBandwidthHz(uint32_t hardware_bandwidth_hz, std::string* error) override {
+    if (!opened_) {
+      if (error != nullptr) {
+        *error = "not opened";
+      }
+      return false;
+    }
+    hardware_bandwidth_hz_ = hardware_bandwidth_hz;
+    return true;
+  }
 
   bool SetGainTenthdB(int /*gain_tenth_db*/, std::string* /*error*/) override { return true; }
 
@@ -70,6 +80,7 @@ class FakeDevice final : public multi_radio::IRadioDevice {
   bool opened_ = false;
   uint32_t center_frequency_hz_ = 0;
   uint32_t sample_rate_hz_ = 0;
+  uint32_t hardware_bandwidth_hz_ = 0;
 };
 
 class FakeFactory final : public multi_radio::IRadioDeviceFactory {

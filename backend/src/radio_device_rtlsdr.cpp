@@ -77,6 +77,23 @@ class RtlSdrDevice final : public IRadioDevice {
     return true;
   }
 
+  bool SetHardwareBandwidthHz(uint32_t bandwidth_hz, std::string* error) override {
+    if (dev_ == nullptr) {
+      if (error != nullptr) {
+        *error = "device not opened";
+      }
+      return false;
+    }
+    if (rtlsdr_set_tuner_bandwidth(dev_, bandwidth_hz) != 0) {
+      if (error != nullptr) {
+        *error = "rtlsdr_set_tuner_bandwidth failed";
+      }
+      return false;
+    }
+    hardware_bandwidth_hz_ = bandwidth_hz;
+    return true;
+  }
+
   bool SetGainTenthdB(int gain_tenth_db, std::string* error) override {
     if (dev_ == nullptr) {
       if (error != nullptr) {
@@ -133,6 +150,7 @@ class RtlSdrDevice final : public IRadioDevice {
   rtlsdr_dev_t* dev_ = nullptr;
   uint32_t center_frequency_hz_ = 100000000;
   uint32_t sample_rate_hz_ = 2048000;
+  uint32_t hardware_bandwidth_hz_ = 0;
 };
 
 class RtlSdrDeviceFactory final : public IRadioDeviceFactory {

@@ -71,6 +71,9 @@ class MainWindow : public QMainWindow {
   QLineEdit* range_step_edit_ = nullptr;
   QLineEdit* list_frequencies_edit_ = nullptr;
   QSpinBox* dwell_ms_spin_ = nullptr;
+  QSpinBox* sample_rate_spin_ = nullptr;
+  QSpinBox* channel_bandwidth_spin_ = nullptr;
+  QSpinBox* hardware_bandwidth_spin_ = nullptr;
 
   QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;
