@@ -366,13 +366,19 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
     const QString profile_name = field_text("metric_autotune_profile_name");
     const QString locked = field_text("metric_autotune_locked");
+    const QString afc_tracking = field_text("metric_afc_tracking");
     const QString channel = field_text("channel");
     if (ais_autotune_indicator_ != nullptr) {
       const bool is_locked = (locked == "1");
-      const QString status = is_locked ? "locked" : "probing";
+      const bool afc_is_tracking = (afc_tracking == "1");
+      const QString status = is_locked ? "profile locked" : "probing";
+      const QString afc_mode = afc_is_tracking ? "AFC track" : "AFC hold";
       ais_autotune_indicator_->setText(
-          QString("AUTOTUNE: %1 (%2, %3)").arg(status).arg(profile_name.isEmpty() ? "n/a" : profile_name).arg(
-              channel.isEmpty() ? "n/a" : channel));
+          QString("AUTOTUNE: %1, %2 (%3, %4)")
+              .arg(status)
+              .arg(afc_mode)
+              .arg(profile_name.isEmpty() ? "n/a" : profile_name)
+              .arg(channel.isEmpty() ? "n/a" : channel));
       if (is_locked) {
         ais_autotune_indicator_->setStyleSheet(
             "QLabel { font-weight: 600; color: #215732; background: #e8f6ec; border: 1px solid #9fd5ad; "

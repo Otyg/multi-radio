@@ -62,6 +62,7 @@ constexpr std::array<AutotuneProfile, 3> kAutotuneProfiles = {{
     {"balanced", 0.0030, 0.030, 0.0008},
     {"aggressive", 0.0060, 0.045, 0.0012},
 }};
+constexpr uint64_t kAfcUpdatePeriodBlocks = 10;
 
 constexpr auto kAutotuneWindow = std::chrono::seconds(60);
 constexpr auto kAutotuneRecoveryWindow = std::chrono::seconds(300);
@@ -78,6 +79,9 @@ struct ChannelAutotuneState {
   bool locked = false;
   size_t active_profile = 0;
   double afc_offset_rad = 0.0;
+  uint64_t afc_blocks_since_update = 0;
+  double afc_mean_acc = 0.0;
+  uint64_t afc_mean_count = 0;
   std::chrono::steady_clock::time_point window_start;
   uint64_t window_crc_ok_start = 0;
   uint64_t window_crc_fail_start = 0;
@@ -835,9 +839,29 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   }
   block_mean /= static_cast<double>(discriminator_raw.size());
 
-  const double alpha = std::clamp(profile.afc_alpha, 0.0, 1.0);
-  autotune_state->afc_offset_rad =
-      autotune_state->afc_offset_rad * (1.0 - alpha) + block_mean * alpha;
+  const bool afc_tracking = !autotune_state->locked;
+  const double alpha = afc_tracking ? std::clamp(profile.afc_alpha, 0.0, 1.0) : 0.0;
+  bool afc_updated_this_block = false;
+  if (afc_tracking) {
+    autotune_state->afc_mean_acc += block_mean;
+    ++autotune_state->afc_mean_count;
+    ++autotune_state->afc_blocks_since_update;
+    if (autotune_state->afc_blocks_since_update >= kAfcUpdatePeriodBlocks &&
+        autotune_state->afc_mean_count > 0) {
+      const double block_mean_avg =
+          autotune_state->afc_mean_acc / static_cast<double>(autotune_state->afc_mean_count);
+      autotune_state->afc_offset_rad =
+          autotune_state->afc_offset_rad * (1.0 - alpha) + block_mean_avg * alpha;
+      autotune_state->afc_blocks_since_update = 0;
+      autotune_state->afc_mean_acc = 0.0;
+      autotune_state->afc_mean_count = 0;
+      afc_updated_this_block = true;
+    }
+  } else {
+    autotune_state->afc_blocks_since_update = 0;
+    autotune_state->afc_mean_acc = 0.0;
+    autotune_state->afc_mean_count = 0;
+  }
 
   std::vector<double> discriminator;
   discriminator.reserve(discriminator_raw.size());
@@ -959,6 +983,10 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_afc_alpha\":\"" << alpha << "\""
                  << ",\"metric_afc_offset_rad\":\"" << autotune_state->afc_offset_rad << "\""
                  << ",\"metric_afc_offset_hz\":\"" << afc_offset_hz << "\""
+                 << ",\"metric_afc_tracking\":\"" << (afc_tracking ? "1" : "0") << "\""
+                 << ",\"metric_afc_update_period_blocks\":\"" << kAfcUpdatePeriodBlocks << "\""
+                 << ",\"metric_afc_updated\":\"" << (afc_updated_this_block ? "1" : "0") << "\""
+                 << ",\"metric_afc_hold_blocks\":\"" << autotune_state->afc_blocks_since_update << "\""
                  << ",\"metric_gmsk_bt\":\"" << kGmskBt << "\""
                  << ",\"metric_gmsk_h\":\"" << kGmskModulationIndex << "\""
                  << ",\"metric_timing_sps\":\"" << kTimingSamplesPerSymbol << "\""
