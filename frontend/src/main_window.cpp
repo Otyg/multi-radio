@@ -359,11 +359,12 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString kind = field_text("kind");
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
-    AppendLog(QString("[%1] RX%2 AIS dbg=%3 mode=%4 ch=%5 demod=%6 n=%7 rms=%8 timing_lock=%9 timing_n=%10 timing_err=%11 decode_try=%12 ok=%13 fail=%14 emitted=%15 emitted_now=%16")
+    AppendLog(QString("[%1] RX%2 AIS dbg=%3 mode=%4 path=%5 ch=%6 demod=%7 n=%8 rms=%9 timing_lock=%10 timing_n=%11 timing_err=%12 legacy_ready=%13 legacy_n=%14 decode_try=%15 ok=%16 fail=%17 emitted=%18 emitted_now=%19")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
                   .arg(field_text("metric_debug_state"))
                   .arg(field_text("metric_decode_mode"))
+                  .arg(field_text("metric_decode_path"))
                   .arg(field_text("channel"))
                   .arg(field_text("metric_demod_ready"))
                   .arg(field_text("metric_demod_resampled_samples"))
@@ -371,6 +372,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(field_text("metric_timing_lock"))
                   .arg(field_text("metric_timing_symbols"))
                   .arg(field_text("metric_timing_avg_abs_error"))
+                  .arg(field_text("metric_legacy_ready"))
+                  .arg(field_text("metric_legacy_symbols"))
                   .arg(field_text("metric_decode_attempted"))
                   .arg(field_text("metric_crc_ok"))
                   .arg(field_text("metric_crc_fail"))

@@ -21,6 +21,8 @@ constexpr double kGmskModulationIndex = 0.5;
 constexpr double kGmskBt = 0.4;
 constexpr int kTimingSamplesPerSymbol = 4;
 constexpr double kTimingResampledRate = kSymbolRate * static_cast<double>(kTimingSamplesPerSymbol);
+constexpr int kLegacySamplesPerSymbol = 5;
+constexpr double kLegacyResampledRate = kSymbolRate * static_cast<double>(kLegacySamplesPerSymbol);
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
 constexpr uint64_t kMetricReportEveryBlocks = 1;
@@ -268,6 +270,52 @@ std::vector<int> BuildSymbolsFromRecovered(const std::vector<double>& samples, b
   symbols.reserve(samples.size());
   for (double sample : samples) {
     int bit = sample >= 0.0 ? 1 : 0;
+    if (invert) {
+      bit ^= 1;
+    }
+    symbols.push_back(bit);
+  }
+  return symbols;
+}
+
+int EstimateBestPhaseLegacy(const std::vector<double>& samples, int samples_per_symbol) {
+  int best_phase = 0;
+  int best_score = -1;
+  if (samples_per_symbol <= 1) {
+    return 0;
+  }
+  for (int phase = 0; phase < samples_per_symbol; ++phase) {
+    int score = 0;
+    int prev_sign = 0;
+    bool have_prev = false;
+    int considered = 0;
+    for (size_t i = static_cast<size_t>(phase); i < samples.size() && considered < 400;
+         i += static_cast<size_t>(samples_per_symbol), ++considered) {
+      const int sign = samples[i] >= 0.0 ? 1 : 0;
+      if (have_prev && sign != prev_sign) {
+        ++score;
+      }
+      prev_sign = sign;
+      have_prev = true;
+    }
+    if (score > best_score) {
+      best_score = score;
+      best_phase = phase;
+    }
+  }
+  return best_phase;
+}
+
+std::vector<int> BuildSymbolStreamLegacy(const std::vector<double>& samples, int phase, bool invert,
+                                         int samples_per_symbol) {
+  std::vector<int> symbols;
+  if (samples.empty() || samples_per_symbol <= 1) {
+    return symbols;
+  }
+  symbols.reserve(samples.size() / static_cast<size_t>(samples_per_symbol) + 1);
+  for (size_t i = static_cast<size_t>(std::max(0, phase)); i < samples.size();
+       i += static_cast<size_t>(samples_per_symbol)) {
+    int bit = samples[i] >= 0.0 ? 1 : 0;
     if (invert) {
       bit ^= 1;
     }
@@ -669,9 +717,13 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
 
   const TimingRecoveryResult timing = RecoverClockGardner(matched, static_cast<double>(kTimingSamplesPerSymbol));
   const bool timing_ready = timing.lock;
+  const std::vector<double> legacy_resampled = ResampleLinear(
+      discriminator, static_cast<double>(iq_view->sample_rate_hz), kLegacyResampledRate);
+  const bool legacy_ready = legacy_resampled.size() >= 512;
 
   bool emitted_this_block = false;
   bool decode_attempted = false;
+  std::string decode_path = "none";
   std::string debug_state = demod_ready ? "TIMING_NO_LOCK" : "DEMOD_TOO_SHORT";
   if (timing_ready) {
     debug_state = "DECODE_ATTEMPT";
@@ -685,12 +737,42 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
         const std::vector<int> bits = NrziDecode(symbols, initial_level);
         if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
           emitted_this_block = true;
+          decode_path = "timing_gardner";
         }
       }
     }
-    if (emitted_this_block) {
-      debug_state = "AIS_DECODED";
+  }
+
+  if (!emitted_this_block && legacy_ready) {
+    decode_attempted = true;
+    debug_state = "LEGACY_PHASE_SCAN";
+    const int preferred_phase = EstimateBestPhaseLegacy(legacy_resampled, kLegacySamplesPerSymbol);
+    std::vector<int> phases = {preferred_phase};
+    for (int phase = 0; phase < kLegacySamplesPerSymbol; ++phase) {
+      if (phase != preferred_phase) {
+        phases.push_back(phase);
+      }
     }
+    for (int phase : phases) {
+      for (bool invert : {false, true}) {
+        const std::vector<int> symbols =
+            BuildSymbolStreamLegacy(legacy_resampled, phase, invert, kLegacySamplesPerSymbol);
+        if (symbols.size() < 96) {
+          continue;
+        }
+        for (int initial_level : {0, 1}) {
+          const std::vector<int> bits = NrziDecode(symbols, initial_level);
+          if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+            emitted_this_block = true;
+            decode_path = "legacy_phase_scan";
+          }
+        }
+      }
+    }
+  }
+
+  if (emitted_this_block) {
+    debug_state = "AIS_DECODED";
   }
 
   const uint64_t blocks = g_metric_blocks.load(std::memory_order_relaxed);
@@ -716,6 +798,11 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_timing_symbols\":\"" << timing.symbol_samples.size() << "\""
                  << ",\"metric_timing_avg_abs_error\":\"" << timing.avg_abs_error << "\""
                  << ",\"metric_timing_lock\":\"" << (timing_ready ? "1" : "0") << "\""
+                 << ",\"metric_legacy_sps\":\"" << kLegacySamplesPerSymbol << "\""
+                 << ",\"metric_legacy_ready\":\"" << (legacy_ready ? "1" : "0") << "\""
+                 << ",\"metric_legacy_symbols\":\""
+                 << (legacy_resampled.size() / static_cast<size_t>(kLegacySamplesPerSymbol)) << "\""
+                 << ",\"metric_decode_path\":\"" << decode_path << "\""
                  << ",\"metric_decode_attempted\":\"" << (decode_attempted ? "1" : "0") << "\""
                  << ",\"metric_debug_state\":\"" << debug_state << "\""
                  << ",\"metric_emitted_this_block\":\"" << (emitted_this_block ? "1" : "0") << "\"}";
