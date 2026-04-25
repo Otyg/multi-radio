@@ -1,7 +1,9 @@
 #include "multi_radio/plugin_api.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -40,9 +42,50 @@ std::atomic<uint64_t> g_metric_flags{0};
 std::atomic<uint64_t> g_metric_candidates{0};
 std::atomic<uint64_t> g_metric_crc_ok{0};
 std::atomic<uint64_t> g_metric_crc_fail{0};
+std::atomic<uint64_t> g_metric_crc_ok_ais1{0};
+std::atomic<uint64_t> g_metric_crc_ok_ais2{0};
+std::atomic<uint64_t> g_metric_crc_fail_ais1{0};
+std::atomic<uint64_t> g_metric_crc_fail_ais2{0};
 std::atomic<uint64_t> g_metric_duplicates{0};
 std::atomic<uint64_t> g_metric_emitted{0};
 std::atomic<bool> g_initialized{false};
+
+struct AutotuneProfile {
+  const char* name = "";
+  double afc_alpha = 0.0;
+  double timing_gain_mu = 0.0;
+  double timing_gain_omega = 0.0;
+};
+
+constexpr std::array<AutotuneProfile, 3> kAutotuneProfiles = {{
+    {"stable", 0.0015, 0.020, 0.0006},
+    {"balanced", 0.0030, 0.030, 0.0008},
+    {"aggressive", 0.0060, 0.045, 0.0012},
+}};
+
+constexpr auto kAutotuneWindow = std::chrono::seconds(60);
+constexpr auto kAutotuneRecoveryWindow = std::chrono::seconds(300);
+constexpr uint64_t kAutotuneRecoveryFailThreshold = 300;
+
+struct AutotuneProfileScore {
+  uint64_t crc_ok = 0;
+  uint64_t crc_fail = 0;
+  uint64_t windows = 0;
+};
+
+struct ChannelAutotuneState {
+  bool initialized = false;
+  bool locked = false;
+  size_t active_profile = 0;
+  double afc_offset_rad = 0.0;
+  std::chrono::steady_clock::time_point window_start;
+  uint64_t window_crc_ok_start = 0;
+  uint64_t window_crc_fail_start = 0;
+  std::array<AutotuneProfileScore, kAutotuneProfiles.size()> scores{};
+};
+
+ChannelAutotuneState g_autotune_ais1;
+ChannelAutotuneState g_autotune_ais2;
 
 int Init(const char* config_json) {
   (void)config_json;
@@ -54,10 +97,94 @@ int Init(const char* config_json) {
     g_metric_candidates.store(0, std::memory_order_relaxed);
     g_metric_crc_ok.store(0, std::memory_order_relaxed);
     g_metric_crc_fail.store(0, std::memory_order_relaxed);
+    g_metric_crc_ok_ais1.store(0, std::memory_order_relaxed);
+    g_metric_crc_ok_ais2.store(0, std::memory_order_relaxed);
+    g_metric_crc_fail_ais1.store(0, std::memory_order_relaxed);
+    g_metric_crc_fail_ais2.store(0, std::memory_order_relaxed);
     g_metric_duplicates.store(0, std::memory_order_relaxed);
     g_metric_emitted.store(0, std::memory_order_relaxed);
+    g_autotune_ais1 = ChannelAutotuneState{};
+    g_autotune_ais2 = ChannelAutotuneState{};
   }
   return 0;
+}
+
+void StartAutotuneWindow(ChannelAutotuneState* state, uint64_t crc_ok_now, uint64_t crc_fail_now) {
+  if (state == nullptr) {
+    return;
+  }
+  state->window_start = std::chrono::steady_clock::now();
+  state->window_crc_ok_start = crc_ok_now;
+  state->window_crc_fail_start = crc_fail_now;
+}
+
+double ProfileScore(const AutotuneProfileScore& score) {
+  if (score.crc_ok == 0) {
+    return -(static_cast<double>(score.crc_fail));
+  }
+  return static_cast<double>(score.crc_ok) / static_cast<double>(score.crc_fail + 1);
+}
+
+void AdvanceAutotune(ChannelAutotuneState* state, uint64_t crc_ok_now, uint64_t crc_fail_now) {
+  if (state == nullptr) {
+    return;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  if (!state->initialized) {
+    state->initialized = true;
+    StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
+    return;
+  }
+
+  const auto elapsed = now - state->window_start;
+  const auto active_idx = std::min(state->active_profile, kAutotuneProfiles.size() - 1);
+  const uint64_t ok_delta = crc_ok_now - state->window_crc_ok_start;
+  const uint64_t fail_delta = crc_fail_now - state->window_crc_fail_start;
+
+  if (!state->locked) {
+    if (elapsed < kAutotuneWindow) {
+      return;
+    }
+    auto& profile_score = state->scores[active_idx];
+    profile_score.crc_ok += ok_delta;
+    profile_score.crc_fail += fail_delta;
+    ++profile_score.windows;
+
+    if (state->active_profile + 1 < kAutotuneProfiles.size()) {
+      ++state->active_profile;
+      StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
+      return;
+    }
+
+    // Completed one full probe sweep (~3 minutes). Lock to best profile.
+    size_t best_idx = 0;
+    double best = ProfileScore(state->scores[0]);
+    for (size_t i = 1; i < state->scores.size(); ++i) {
+      const double candidate = ProfileScore(state->scores[i]);
+      if (candidate > best) {
+        best = candidate;
+        best_idx = i;
+      }
+    }
+    state->active_profile = best_idx;
+    state->locked = true;
+    StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
+    return;
+  }
+
+  if (elapsed < kAutotuneRecoveryWindow) {
+    return;
+  }
+
+  // If locked profile stalls, restart probing from next profile.
+  if (ok_delta == 0 && fail_delta >= kAutotuneRecoveryFailThreshold) {
+    const size_t next_profile = (active_idx + 1U) % kAutotuneProfiles.size();
+    state->locked = false;
+    state->active_profile = next_profile;
+    state->scores = {};
+  }
+  StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
 }
 
 bool IsNearFrequency(uint32_t value, uint32_t target, uint32_t tolerance) {
@@ -87,18 +214,6 @@ std::vector<double> BuildFmDiscriminator(const multi_radio_iq_view* iq_view) {
     prev_q = cur_q;
   }
 
-  if (out.empty()) {
-    return out;
-  }
-
-  double mean = 0.0;
-  for (double value : out) {
-    mean += value;
-  }
-  mean /= static_cast<double>(out.size());
-  for (double& value : out) {
-    value -= mean;
-  }
   return out;
 }
 
@@ -203,7 +318,8 @@ struct TimingRecoveryResult {
   bool lock = false;
 };
 
-TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, double nominal_sps) {
+TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, double nominal_sps,
+                                         double gain_mu, double gain_omega) {
   TimingRecoveryResult out;
   if (samples.size() < 256 || nominal_sps < 2.0) {
     return out;
@@ -213,9 +329,6 @@ TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, dou
   const double omega_min = nominal_sps * 0.85;
   const double omega_max = nominal_sps * 1.15;
   double mu = 0.0;
-  const double gain_mu = 0.03;
-  const double gain_omega = 0.0008;
-
   size_t base = static_cast<size_t>(std::ceil(nominal_sps));
   bool have_prev = false;
   double prev = 0.0;
@@ -663,10 +776,20 @@ bool DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
       g_metric_candidates.fetch_add(1, std::memory_order_relaxed);
       if (TryDecodeFrame(stuffed, &message_bytes, &message_type, &mmsi)) {
         g_metric_crc_ok.fetch_add(1, std::memory_order_relaxed);
+        if (channel_a) {
+          g_metric_crc_ok_ais1.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          g_metric_crc_ok_ais2.fetch_add(1, std::memory_order_relaxed);
+        }
         EmitAisMessage(message_bytes, message_type, mmsi, channel_a, emit_fn, user_data);
         emitted_any = true;
       } else {
         g_metric_crc_fail.fetch_add(1, std::memory_order_relaxed);
+        if (channel_a) {
+          g_metric_crc_fail_ais1.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          g_metric_crc_fail_ais2.fetch_add(1, std::memory_order_relaxed);
+        }
       }
     }
   }
@@ -689,9 +812,37 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     return 0;
   }
 
-  const std::vector<double> discriminator = BuildFmDiscriminator(iq_view);
-  if (discriminator.size() < 512) {
+  const std::vector<double> discriminator_raw = BuildFmDiscriminator(iq_view);
+  if (discriminator_raw.size() < 512) {
     return 0;
+  }
+
+  ChannelAutotuneState* autotune_state = on_ais1 ? &g_autotune_ais1 : &g_autotune_ais2;
+  const uint64_t crc_ok_channel_now =
+      on_ais1 ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
+              : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
+  const uint64_t crc_fail_channel_now =
+      on_ais1 ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
+              : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
+  AdvanceAutotune(autotune_state, crc_ok_channel_now, crc_fail_channel_now);
+
+  const size_t profile_idx = std::min(autotune_state->active_profile, kAutotuneProfiles.size() - 1);
+  const AutotuneProfile& profile = kAutotuneProfiles[profile_idx];
+
+  double block_mean = 0.0;
+  for (double v : discriminator_raw) {
+    block_mean += v;
+  }
+  block_mean /= static_cast<double>(discriminator_raw.size());
+
+  const double alpha = std::clamp(profile.afc_alpha, 0.0, 1.0);
+  autotune_state->afc_offset_rad =
+      autotune_state->afc_offset_rad * (1.0 - alpha) + block_mean * alpha;
+
+  std::vector<double> discriminator;
+  discriminator.reserve(discriminator_raw.size());
+  for (double v : discriminator_raw) {
+    discriminator.push_back(v - autotune_state->afc_offset_rad);
   }
 
   double abs_mean = 0.0;
@@ -715,7 +866,9 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   const double demod_rms =
       matched.empty() ? 0.0 : std::sqrt(power_mean / static_cast<double>(matched.size()));
 
-  const TimingRecoveryResult timing = RecoverClockGardner(matched, static_cast<double>(kTimingSamplesPerSymbol));
+  const TimingRecoveryResult timing = RecoverClockGardner(
+      matched, static_cast<double>(kTimingSamplesPerSymbol), profile.timing_gain_mu,
+      profile.timing_gain_omega);
   const bool timing_ready = timing.lock;
   const std::vector<double> legacy_resampled = ResampleLinear(
       discriminator, static_cast<double>(iq_view->sample_rate_hz), kLegacyResampledRate);
@@ -775,29 +928,47 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     debug_state = "AIS_DECODED";
   }
 
+  const double afc_offset_hz = autotune_state->afc_offset_rad *
+                               (static_cast<double>(iq_view->sample_rate_hz) / (2.0 * kPi));
+  const uint64_t channel_crc_ok =
+      on_ais1 ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
+              : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
+  const uint64_t channel_crc_fail =
+      on_ais1 ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
+              : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
+
   const uint64_t blocks = g_metric_blocks.load(std::memory_order_relaxed);
   if ((blocks % kMetricReportEveryBlocks) == 0) {
     std::ostringstream metrics_json;
     metrics_json << "{\"kind\":\"metric\""
                  << ",\"channel\":\"" << (on_ais1 ? "AIS1" : "AIS2") << "\""
-                 << ",\"metric_decode_mode\":\"continuous_gmsk_gardner\""
+                 << ",\"metric_decode_mode\":\"continuous_gmsk_gardner_afc\""
                  << ",\"metric_blocks\":\"" << blocks << "\""
                  << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_candidates\":\"" << g_metric_candidates.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_crc_ok\":\"" << g_metric_crc_ok.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_crc_fail\":\"" << g_metric_crc_fail.load(std::memory_order_relaxed) << "\""
+                 << ",\"metric_crc_ok_channel\":\"" << channel_crc_ok << "\""
+                 << ",\"metric_crc_fail_channel\":\"" << channel_crc_fail << "\""
                  << ",\"metric_duplicates\":\"" << g_metric_duplicates.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_emitted\":\"" << g_metric_emitted.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_abs_mean\":\"" << abs_mean << "\""
                  << ",\"metric_demod_ready\":\"" << (demod_ready ? "1" : "0") << "\""
                  << ",\"metric_demod_resampled_samples\":\"" << resampled.size() << "\""
                  << ",\"metric_demod_rms\":\"" << demod_rms << "\""
+                 << ",\"metric_afc_alpha\":\"" << alpha << "\""
+                 << ",\"metric_afc_offset_rad\":\"" << autotune_state->afc_offset_rad << "\""
+                 << ",\"metric_afc_offset_hz\":\"" << afc_offset_hz << "\""
                  << ",\"metric_gmsk_bt\":\"" << kGmskBt << "\""
                  << ",\"metric_gmsk_h\":\"" << kGmskModulationIndex << "\""
                  << ",\"metric_timing_sps\":\"" << kTimingSamplesPerSymbol << "\""
                  << ",\"metric_timing_symbols\":\"" << timing.symbol_samples.size() << "\""
                  << ",\"metric_timing_avg_abs_error\":\"" << timing.avg_abs_error << "\""
                  << ",\"metric_timing_lock\":\"" << (timing_ready ? "1" : "0") << "\""
+                 << ",\"metric_autotune_profile\":\"" << profile_idx << "\""
+                 << ",\"metric_autotune_profile_name\":\"" << profile.name << "\""
+                 << ",\"metric_autotune_locked\":\"" << (autotune_state->locked ? "1" : "0") << "\""
+                 << ",\"metric_autotune_window_s\":\"" << kAutotuneWindow.count() << "\""
                  << ",\"metric_legacy_sps\":\"" << kLegacySamplesPerSymbol << "\""
                  << ",\"metric_legacy_ready\":\"" << (legacy_ready ? "1" : "0") << "\""
                  << ",\"metric_legacy_symbols\":\""
@@ -823,14 +994,20 @@ void Shutdown() {
   g_metric_candidates.store(0, std::memory_order_relaxed);
   g_metric_crc_ok.store(0, std::memory_order_relaxed);
   g_metric_crc_fail.store(0, std::memory_order_relaxed);
+  g_metric_crc_ok_ais1.store(0, std::memory_order_relaxed);
+  g_metric_crc_ok_ais2.store(0, std::memory_order_relaxed);
+  g_metric_crc_fail_ais1.store(0, std::memory_order_relaxed);
+  g_metric_crc_fail_ais2.store(0, std::memory_order_relaxed);
   g_metric_duplicates.store(0, std::memory_order_relaxed);
   g_metric_emitted.store(0, std::memory_order_relaxed);
+  g_autotune_ais1 = ChannelAutotuneState{};
+  g_autotune_ais2 = ChannelAutotuneState{};
   g_initialized.store(false, std::memory_order_relaxed);
 }
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.8.0",
+    .plugin_version = "0.9.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,

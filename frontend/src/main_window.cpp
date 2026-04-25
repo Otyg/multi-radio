@@ -160,11 +160,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   minutes_filter_spin_ = new QSpinBox(filter_group);
   minutes_filter_spin_->setRange(1, 240);
   minutes_filter_spin_->setValue(30);
+  ais_autotune_indicator_ = new QLabel("AUTOTUNE: waiting", filter_group);
+  ais_autotune_indicator_->setStyleSheet(
+      "QLabel { font-weight: 600; color: #8a6d3b; background: #fcf8e3; border: 1px solid #f1da9a; "
+      "padding: 4px 8px; border-radius: 4px; }");
   auto* visualization_settings_button = new QPushButton("Visualization settings...", filter_group);
 
   filter_layout->addRow("Signal", signal_filter_combo_);
   filter_layout->addRow("Receiver", receiver_filter_combo_);
   filter_layout->addRow("Last minutes", minutes_filter_spin_);
+  filter_layout->addRow("AIS autotune", ais_autotune_indicator_);
   filter_layout->addRow(visualization_settings_button);
 
   top_layout->addWidget(control_group, 2);
@@ -359,7 +364,27 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString kind = field_text("kind");
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
-    AppendLog(QString("[%1] RX%2 AIS dbg=%3 mode=%4 path=%5 ch=%6 demod=%7 n=%8 rms=%9 timing_lock=%10 timing_n=%11 timing_err=%12 legacy_ready=%13 legacy_n=%14 decode_try=%15 ok=%16 fail=%17 emitted=%18 emitted_now=%19")
+    const QString profile_name = field_text("metric_autotune_profile_name");
+    const QString locked = field_text("metric_autotune_locked");
+    const QString channel = field_text("channel");
+    if (ais_autotune_indicator_ != nullptr) {
+      const bool is_locked = (locked == "1");
+      const QString status = is_locked ? "locked" : "probing";
+      ais_autotune_indicator_->setText(
+          QString("AUTOTUNE: %1 (%2, %3)").arg(status).arg(profile_name.isEmpty() ? "n/a" : profile_name).arg(
+              channel.isEmpty() ? "n/a" : channel));
+      if (is_locked) {
+        ais_autotune_indicator_->setStyleSheet(
+            "QLabel { font-weight: 600; color: #215732; background: #e8f6ec; border: 1px solid #9fd5ad; "
+            "padding: 4px 8px; border-radius: 4px; }");
+      } else {
+        ais_autotune_indicator_->setStyleSheet(
+            "QLabel { font-weight: 600; color: #8a6d3b; background: #fcf8e3; border: 1px solid #f1da9a; "
+            "padding: 4px 8px; border-radius: 4px; }");
+      }
+    }
+
+    AppendLog(QString("[%1] RX%2 AIS dbg=%3 mode=%4 path=%5 ch=%6 demod=%7 n=%8 rms=%9 afc_hz=%10 afc_a=%11 auto=%12/%13 timing_lock=%14 timing_n=%15 timing_err=%16 legacy_ready=%17 legacy_n=%18 decode_try=%19 ok=%20 fail=%21 emitted=%22 emitted_now=%23")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
                   .arg(field_text("metric_debug_state"))
@@ -369,6 +394,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(field_text("metric_demod_ready"))
                   .arg(field_text("metric_demod_resampled_samples"))
                   .arg(field_text("metric_demod_rms"))
+                  .arg(field_text("metric_afc_offset_hz"))
+                  .arg(field_text("metric_afc_alpha"))
+                  .arg(field_text("metric_autotune_profile_name"))
+                  .arg(field_text("metric_autotune_locked"))
                   .arg(field_text("metric_timing_lock"))
                   .arg(field_text("metric_timing_symbols"))
                   .arg(field_text("metric_timing_avg_abs_error"))

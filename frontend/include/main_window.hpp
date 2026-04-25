@@ -7,6 +7,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDoubleSpinBox>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QPlainTextEdit>
@@ -67,6 +68,7 @@ class MainWindow : public QMainWindow {
   QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
+  QLabel* ais_autotune_indicator_ = nullptr;
 
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;
