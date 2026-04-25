@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QMap>
 #include <QPlainTextEdit>
 #include <QSpinBox>
 #include <QTableWidget>
@@ -47,6 +48,12 @@ class MainWindow : public QMainWindow {
     double frequency_hz = 0.0;
     QString payload;
   };
+  struct AisCrcSummaryState {
+    quint64 last_log_unix_ms = 0;
+    quint64 last_crc_ok = 0;
+    quint64 last_crc_fail = 0;
+    quint64 last_emitted = 0;
+  };
 
   bool CurrentReceiverId(uint32_t* receiver_id) const;
   void AppendLog(const QString& line);
@@ -69,6 +76,7 @@ class MainWindow : public QMainWindow {
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
   QLabel* ais_autotune_indicator_ = nullptr;
+  QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
 
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;

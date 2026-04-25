@@ -22,9 +22,9 @@ constexpr double kSymbolRate = 9600.0;
 constexpr double kGmskModulationIndex = 0.5;
 constexpr double kGmskBt = 0.4;
 constexpr int kTimingSamplesPerSymbol = 4;
-constexpr double kTimingResampledRate = kSymbolRate * static_cast<double>(kTimingSamplesPerSymbol);
 constexpr int kLegacySamplesPerSymbol = 5;
-constexpr double kLegacyResampledRate = kSymbolRate * static_cast<double>(kLegacySamplesPerSymbol);
+constexpr double kMinBaudRate = 9300.0;
+constexpr double kMaxBaudRate = 9900.0;
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
 constexpr uint64_t kMetricReportEveryBlocks = 1;
@@ -63,6 +63,8 @@ constexpr std::array<AutotuneProfile, 3> kAutotuneProfiles = {{
     {"aggressive", 0.0060, 0.045, 0.0012},
 }};
 constexpr uint64_t kAfcUpdatePeriodBlocks = 10;
+constexpr uint64_t kBaudUpdatePeriodBlocks = 20;
+constexpr double kBaudTrimAlpha = 0.25;
 
 constexpr auto kAutotuneWindow = std::chrono::seconds(60);
 constexpr auto kAutotuneRecoveryWindow = std::chrono::seconds(300);
@@ -82,6 +84,10 @@ struct ChannelAutotuneState {
   uint64_t afc_blocks_since_update = 0;
   double afc_mean_acc = 0.0;
   uint64_t afc_mean_count = 0;
+  double baud_estimate_hz = kSymbolRate;
+  uint64_t baud_blocks_since_update = 0;
+  double baud_mean_acc = 0.0;
+  uint64_t baud_mean_count = 0;
   std::chrono::steady_clock::time_point window_start;
   uint64_t window_crc_ok_start = 0;
   uint64_t window_crc_fail_start = 0;
@@ -319,6 +325,7 @@ double InterpolateLinear(const std::vector<double>& samples, double pos) {
 struct TimingRecoveryResult {
   std::vector<double> symbol_samples;
   double avg_abs_error = 0.0;
+  double avg_omega = 0.0;
   bool lock = false;
 };
 
@@ -338,6 +345,8 @@ TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, dou
   double prev = 0.0;
   double error_sum = 0.0;
   size_t error_count = 0;
+  double omega_sum = 0.0;
+  size_t omega_count = 0;
 
   while (base + 4 < samples.size()) {
     const double t_now = static_cast<double>(base) + mu;
@@ -355,6 +364,8 @@ TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, dou
       ++error_count;
 
       omega = std::clamp(omega + gain_omega * err, omega_min, omega_max);
+      omega_sum += omega;
+      ++omega_count;
       mu += omega + gain_mu * err;
     } else {
       mu += omega;
@@ -374,6 +385,11 @@ TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, dou
 
   if (error_count > 0) {
     out.avg_abs_error = error_sum / static_cast<double>(error_count);
+  }
+  if (omega_count > 0) {
+    out.avg_omega = omega_sum / static_cast<double>(omega_count);
+  } else {
+    out.avg_omega = nominal_sps;
   }
   out.lock = out.symbol_samples.size() >= 96;
   return out;
@@ -869,6 +885,14 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     discriminator.push_back(v - autotune_state->afc_offset_rad);
   }
 
+  autotune_state->baud_estimate_hz =
+      std::clamp(autotune_state->baud_estimate_hz, kMinBaudRate, kMaxBaudRate);
+  const bool baud_tracking = true;
+  const double timing_resampled_rate =
+      autotune_state->baud_estimate_hz * static_cast<double>(kTimingSamplesPerSymbol);
+  const double legacy_resampled_rate =
+      autotune_state->baud_estimate_hz * static_cast<double>(kLegacySamplesPerSymbol);
+
   double abs_mean = 0.0;
   for (double v : discriminator) {
     abs_mean += std::abs(v);
@@ -876,7 +900,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   abs_mean /= static_cast<double>(discriminator.size());
 
   const std::vector<double> resampled =
-      ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kTimingResampledRate);
+      ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), timing_resampled_rate);
   const bool demod_ready = resampled.size() >= 512;
 
   static const std::vector<double> kGaussianTaps =
@@ -894,8 +918,33 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
       matched, static_cast<double>(kTimingSamplesPerSymbol), profile.timing_gain_mu,
       profile.timing_gain_omega);
   const bool timing_ready = timing.lock;
+  bool baud_updated_this_block = false;
+  double measured_baud_hz = 0.0;
+  if (baud_tracking && timing_ready && timing.avg_omega > 1e-6) {
+    measured_baud_hz = std::clamp(timing_resampled_rate / timing.avg_omega, kMinBaudRate, kMaxBaudRate);
+    autotune_state->baud_mean_acc += measured_baud_hz;
+    ++autotune_state->baud_mean_count;
+    ++autotune_state->baud_blocks_since_update;
+    if (autotune_state->baud_blocks_since_update >= kBaudUpdatePeriodBlocks &&
+        autotune_state->baud_mean_count > 0) {
+      const double baud_avg = autotune_state->baud_mean_acc /
+                              static_cast<double>(autotune_state->baud_mean_count);
+      autotune_state->baud_estimate_hz =
+          std::clamp(autotune_state->baud_estimate_hz * (1.0 - kBaudTrimAlpha) +
+                         baud_avg * kBaudTrimAlpha,
+                     kMinBaudRate, kMaxBaudRate);
+      autotune_state->baud_blocks_since_update = 0;
+      autotune_state->baud_mean_acc = 0.0;
+      autotune_state->baud_mean_count = 0;
+      baud_updated_this_block = true;
+    }
+  } else if (!baud_tracking) {
+    autotune_state->baud_blocks_since_update = 0;
+    autotune_state->baud_mean_acc = 0.0;
+    autotune_state->baud_mean_count = 0;
+  }
   const std::vector<double> legacy_resampled = ResampleLinear(
-      discriminator, static_cast<double>(iq_view->sample_rate_hz), kLegacyResampledRate);
+      discriminator, static_cast<double>(iq_view->sample_rate_hz), legacy_resampled_rate);
   const bool legacy_ready = legacy_resampled.size() >= 512;
 
   bool emitted_this_block = false;
@@ -987,6 +1036,13 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_afc_update_period_blocks\":\"" << kAfcUpdatePeriodBlocks << "\""
                  << ",\"metric_afc_updated\":\"" << (afc_updated_this_block ? "1" : "0") << "\""
                  << ",\"metric_afc_hold_blocks\":\"" << autotune_state->afc_blocks_since_update << "\""
+                 << ",\"metric_baud_estimate_hz\":\"" << autotune_state->baud_estimate_hz << "\""
+                 << ",\"metric_baud_measured_hz\":\"" << measured_baud_hz << "\""
+                 << ",\"metric_baud_tracking\":\"" << (baud_tracking ? "1" : "0") << "\""
+                 << ",\"metric_baud_update_period_blocks\":\"" << kBaudUpdatePeriodBlocks << "\""
+                 << ",\"metric_baud_updated\":\"" << (baud_updated_this_block ? "1" : "0") << "\""
+                 << ",\"metric_baud_hold_blocks\":\"" << autotune_state->baud_blocks_since_update << "\""
+                 << ",\"metric_timing_omega_avg\":\"" << timing.avg_omega << "\""
                  << ",\"metric_gmsk_bt\":\"" << kGmskBt << "\""
                  << ",\"metric_gmsk_h\":\"" << kGmskModulationIndex << "\""
                  << ",\"metric_timing_sps\":\"" << kTimingSamplesPerSymbol << "\""
@@ -1035,7 +1091,7 @@ void Shutdown() {
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.9.0",
+    .plugin_version = "0.10.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,

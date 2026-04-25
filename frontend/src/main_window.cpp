@@ -389,31 +389,66 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
             "padding: 4px 8px; border-radius: 4px; }");
       }
     }
+    auto parse_u64 = [&field_text](const QString& key, quint64 fallback = 0) -> quint64 {
+      bool ok = false;
+      const quint64 value = field_text(key).toULongLong(&ok);
+      return ok ? value : fallback;
+    };
+    const QString channel_key = channel.isEmpty() ? QString("AIS?") : channel;
+    const quint64 crc_ok_total =
+        parse_u64("metric_crc_ok_channel", parse_u64("metric_crc_ok", 0));
+    const quint64 crc_fail_total =
+        parse_u64("metric_crc_fail_channel", parse_u64("metric_crc_fail", 0));
+    const quint64 emitted_total = parse_u64("metric_emitted", 0);
+    const bool is_locked = (locked == "1");
+    const quint64 interval_ms = is_locked ? 10000 : 30000;
 
-    AppendLog(QString("[%1] RX%2 AIS dbg=%3 mode=%4 path=%5 ch=%6 demod=%7 n=%8 rms=%9 afc_hz=%10 afc_a=%11 auto=%12/%13 timing_lock=%14 timing_n=%15 timing_err=%16 legacy_ready=%17 legacy_n=%18 decode_try=%19 ok=%20 fail=%21 emitted=%22 emitted_now=%23")
-                  .arg(ToLocalTime(unix_ms))
-                  .arg(receiver_id)
-                  .arg(field_text("metric_debug_state"))
-                  .arg(field_text("metric_decode_mode"))
-                  .arg(field_text("metric_decode_path"))
-                  .arg(field_text("channel"))
-                  .arg(field_text("metric_demod_ready"))
-                  .arg(field_text("metric_demod_resampled_samples"))
-                  .arg(field_text("metric_demod_rms"))
-                  .arg(field_text("metric_afc_offset_hz"))
-                  .arg(field_text("metric_afc_alpha"))
-                  .arg(field_text("metric_autotune_profile_name"))
-                  .arg(field_text("metric_autotune_locked"))
-                  .arg(field_text("metric_timing_lock"))
-                  .arg(field_text("metric_timing_symbols"))
-                  .arg(field_text("metric_timing_avg_abs_error"))
-                  .arg(field_text("metric_legacy_ready"))
-                  .arg(field_text("metric_legacy_symbols"))
-                  .arg(field_text("metric_decode_attempted"))
-                  .arg(field_text("metric_crc_ok"))
-                  .arg(field_text("metric_crc_fail"))
-                  .arg(field_text("metric_emitted"))
-                  .arg(field_text("metric_emitted_this_block")));
+    AisCrcSummaryState& summary = ais_crc_summary_by_channel_[channel_key];
+    if (summary.last_log_unix_ms == 0 || unix_ms <= summary.last_log_unix_ms ||
+        (unix_ms - summary.last_log_unix_ms) >= interval_ms) {
+      const quint64 ok_delta =
+          (crc_ok_total >= summary.last_crc_ok) ? (crc_ok_total - summary.last_crc_ok) : crc_ok_total;
+      const quint64 fail_delta = (crc_fail_total >= summary.last_crc_fail)
+                                     ? (crc_fail_total - summary.last_crc_fail)
+                                     : crc_fail_total;
+      const quint64 emitted_delta = (emitted_total >= summary.last_emitted)
+                                        ? (emitted_total - summary.last_emitted)
+                                        : emitted_total;
+      const double ratio = (crc_ok_total + crc_fail_total) == 0
+                               ? 0.0
+                               : static_cast<double>(crc_ok_total) /
+                                     static_cast<double>(crc_ok_total + crc_fail_total);
+
+      AppendLog(QString("[%1] RX%2 AIS CRC summary ch=%3 auto=%4/%5 afc=%6 offset=%7Hz baud=%8Hz(track=%9) path=%10 ok=%11 (+%12) fail=%13 (+%14) emitted=%15 (+%16) ok_ratio=%17")
+                    .arg(ToLocalTime(unix_ms))
+                    .arg(receiver_id)
+                    .arg(channel_key)
+                    .arg(profile_name.isEmpty() ? "n/a" : profile_name)
+                    .arg(locked == "1" ? "locked" : "probing")
+                    .arg(afc_tracking == "1" ? "track" : "hold")
+                    .arg(field_text("metric_afc_offset_hz"))
+                    .arg(field_text("metric_baud_estimate_hz"))
+                    .arg(field_text("metric_baud_tracking"))
+                    .arg(field_text("metric_decode_path"))
+                    .arg(crc_ok_total)
+                    .arg(ok_delta)
+                    .arg(crc_fail_total)
+                    .arg(fail_delta)
+                    .arg(emitted_total)
+                    .arg(emitted_delta)
+                    .arg(ratio, 0, 'f', 4));
+      if (is_locked && ok_delta == 0 && fail_delta > 0) {
+        AppendLog(QString("[%1] RX%2 AIS warning: locked profile but still no CRC OK on %3 in this interval")
+                      .arg(ToLocalTime(unix_ms))
+                      .arg(receiver_id)
+                      .arg(channel_key));
+      }
+
+      summary.last_log_unix_ms = unix_ms;
+      summary.last_crc_ok = crc_ok_total;
+      summary.last_crc_fail = crc_fail_total;
+      summary.last_emitted = emitted_total;
+    }
     return;
   }
 
