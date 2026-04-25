@@ -17,11 +17,14 @@ constexpr uint32_t kAis1Hz = 161975000;
 constexpr uint32_t kAis2Hz = 162025000;
 constexpr uint32_t kChannelToleranceHz = 2500;
 constexpr double kSymbolRate = 9600.0;
-constexpr int kSamplesPerSymbol = 5;
-constexpr double kResampledRate = kSymbolRate * static_cast<double>(kSamplesPerSymbol);
+constexpr double kGmskModulationIndex = 0.5;
+constexpr double kGmskBt = 0.4;
+constexpr int kTimingSamplesPerSymbol = 4;
+constexpr double kTimingResampledRate = kSymbolRate * static_cast<double>(kTimingSamplesPerSymbol);
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
 constexpr uint64_t kMetricReportEveryBlocks = 1;
+constexpr double kPi = 3.14159265358979323846;
 
 struct RecentFrame {
   uint64_t hash = 0;
@@ -124,42 +127,147 @@ std::vector<double> ResampleLinear(const std::vector<double>& in, double source_
   return out;
 }
 
-int EstimateBestPhase(const std::vector<double>& samples) {
-  int best_phase = 0;
-  int best_score = -1;
+std::vector<double> BuildGaussianMatchedFilterTaps(double bt, int samples_per_symbol, int span_symbols) {
+  std::vector<double> taps;
+  if (bt <= 0.0 || samples_per_symbol <= 0 || span_symbols <= 0) {
+    return taps;
+  }
+  int tap_count = span_symbols * samples_per_symbol;
+  if ((tap_count % 2) == 0) {
+    ++tap_count;
+  }
+  taps.resize(static_cast<size_t>(tap_count), 0.0);
 
-  for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
-    int score = 0;
-    int prev_sign = 0;
-    bool have_prev = false;
-    int considered = 0;
-    for (size_t i = static_cast<size_t>(phase); i < samples.size() && considered < 320;
-         i += static_cast<size_t>(kSamplesPerSymbol), ++considered) {
-      const int sign = samples[i] >= 0.0 ? 1 : 0;
-      if (have_prev && sign != prev_sign) {
-        ++score;
-      }
-      prev_sign = sign;
-      have_prev = true;
-    }
-    if (score > best_score) {
-      best_score = score;
-      best_phase = phase;
+  // Gaussian pulse-shaping/matched-filter approximation from BT product.
+  const double sigma_symbols = std::sqrt(std::log(2.0)) / (2.0 * kPi * bt);
+  const int center = tap_count / 2;
+  double sum = 0.0;
+  for (int n = 0; n < tap_count; ++n) {
+    const double t_symbols = static_cast<double>(n - center) / static_cast<double>(samples_per_symbol);
+    const double exponent = -0.5 * (t_symbols * t_symbols) / (sigma_symbols * sigma_symbols);
+    const double value = std::exp(exponent);
+    taps[static_cast<size_t>(n)] = value;
+    sum += value;
+  }
+  if (sum > 0.0) {
+    for (double& tap : taps) {
+      tap /= sum;
     }
   }
-  return best_phase;
+  return taps;
 }
 
-std::vector<int> BuildSymbolStream(const std::vector<double>& samples, int phase, bool invert) {
-  std::vector<int> symbols;
+std::vector<double> ApplyFirCentered(const std::vector<double>& in, const std::vector<double>& taps) {
+  std::vector<double> out;
+  if (in.empty() || taps.empty()) {
+    return out;
+  }
+  out.assign(in.size(), 0.0);
+  const int half = static_cast<int>(taps.size() / 2);
+  for (size_t n = 0; n < in.size(); ++n) {
+    double acc = 0.0;
+    for (size_t k = 0; k < taps.size(); ++k) {
+      const int idx = static_cast<int>(n) + static_cast<int>(k) - half;
+      if (idx < 0 || idx >= static_cast<int>(in.size())) {
+        continue;
+      }
+      acc += in[static_cast<size_t>(idx)] * taps[k];
+    }
+    out[n] = acc;
+  }
+  return out;
+}
+
+double InterpolateLinear(const std::vector<double>& samples, double pos) {
   if (samples.empty()) {
-    return symbols;
+    return 0.0;
+  }
+  if (pos <= 0.0) {
+    return samples.front();
+  }
+  const double max_pos = static_cast<double>(samples.size() - 1);
+  if (pos >= max_pos) {
+    return samples.back();
+  }
+  const size_t left = static_cast<size_t>(std::floor(pos));
+  const size_t right = std::min(left + 1, samples.size() - 1);
+  const double frac = pos - static_cast<double>(left);
+  return samples[left] + (samples[right] - samples[left]) * frac;
+}
+
+struct TimingRecoveryResult {
+  std::vector<double> symbol_samples;
+  double avg_abs_error = 0.0;
+  bool lock = false;
+};
+
+TimingRecoveryResult RecoverClockGardner(const std::vector<double>& samples, double nominal_sps) {
+  TimingRecoveryResult out;
+  if (samples.size() < 256 || nominal_sps < 2.0) {
+    return out;
   }
 
-  symbols.reserve(samples.size() / static_cast<size_t>(kSamplesPerSymbol) + 1);
-  for (size_t i = static_cast<size_t>(std::max(0, phase)); i < samples.size();
-       i += static_cast<size_t>(kSamplesPerSymbol)) {
-    int bit = samples[i] >= 0.0 ? 1 : 0;
+  double omega = nominal_sps;
+  const double omega_min = nominal_sps * 0.85;
+  const double omega_max = nominal_sps * 1.15;
+  double mu = 0.0;
+  const double gain_mu = 0.03;
+  const double gain_omega = 0.0008;
+
+  size_t base = static_cast<size_t>(std::ceil(nominal_sps));
+  bool have_prev = false;
+  double prev = 0.0;
+  double error_sum = 0.0;
+  size_t error_count = 0;
+
+  while (base + 4 < samples.size()) {
+    const double t_now = static_cast<double>(base) + mu;
+    if (t_now + 1.0 >= static_cast<double>(samples.size())) {
+      break;
+    }
+    const double cur = InterpolateLinear(samples, t_now);
+    out.symbol_samples.push_back(cur);
+
+    if (have_prev) {
+      const double half_t = t_now - 0.5 * omega;
+      const double mid = InterpolateLinear(samples, half_t);
+      const double err = (prev - cur) * mid;
+      error_sum += std::abs(err);
+      ++error_count;
+
+      omega = std::clamp(omega + gain_omega * err, omega_min, omega_max);
+      mu += omega + gain_mu * err;
+    } else {
+      mu += omega;
+      have_prev = true;
+    }
+    prev = cur;
+
+    const double advance = std::floor(mu);
+    const size_t step = static_cast<size_t>(std::max(1.0, advance));
+    base += step;
+    mu -= advance;
+
+    if (out.symbol_samples.size() > 12000) {
+      break;
+    }
+  }
+
+  if (error_count > 0) {
+    out.avg_abs_error = error_sum / static_cast<double>(error_count);
+  }
+  out.lock = out.symbol_samples.size() >= 96;
+  return out;
+}
+
+std::vector<int> BuildSymbolsFromRecovered(const std::vector<double>& samples, bool invert) {
+  std::vector<int> symbols;
+  if (samples.empty()) {
+    return {};
+  }
+  symbols.reserve(samples.size());
+  for (double sample : samples) {
+    int bit = sample >= 0.0 ? 1 : 0;
     if (invert) {
       bit ^= 1;
     }
@@ -539,44 +647,44 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   }
 
   double abs_mean = 0.0;
-  double power_mean = 0.0;
   for (double v : discriminator) {
     abs_mean += std::abs(v);
-    power_mean += v * v;
   }
   abs_mean /= static_cast<double>(discriminator.size());
-  const double demod_rms = std::sqrt(power_mean / static_cast<double>(discriminator.size()));
 
   const std::vector<double> resampled =
-      ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kResampledRate);
+      ResampleLinear(discriminator, static_cast<double>(iq_view->sample_rate_hz), kTimingResampledRate);
   const bool demod_ready = resampled.size() >= 512;
+
+  static const std::vector<double> kGaussianTaps =
+      BuildGaussianMatchedFilterTaps(kGmskBt, kTimingSamplesPerSymbol, 6);
+  const std::vector<double> matched = ApplyFirCentered(resampled, kGaussianTaps);
+
+  double power_mean = 0.0;
+  for (double v : matched) {
+    power_mean += v * v;
+  }
+  const double demod_rms =
+      matched.empty() ? 0.0 : std::sqrt(power_mean / static_cast<double>(matched.size()));
+
+  const TimingRecoveryResult timing = RecoverClockGardner(matched, static_cast<double>(kTimingSamplesPerSymbol));
+  const bool timing_ready = timing.lock;
 
   bool emitted_this_block = false;
   bool decode_attempted = false;
-  std::string debug_state = "DEMOD_TOO_SHORT";
-  if (demod_ready) {
+  std::string debug_state = demod_ready ? "TIMING_NO_LOCK" : "DEMOD_TOO_SHORT";
+  if (timing_ready) {
     debug_state = "DECODE_ATTEMPT";
-  }
-  if (demod_ready) {
     decode_attempted = true;
-    const int preferred_phase = EstimateBestPhase(resampled);
-    std::vector<int> phases = {preferred_phase};
-    for (int phase = 0; phase < kSamplesPerSymbol; ++phase) {
-      if (phase != preferred_phase) {
-        phases.push_back(phase);
+    for (bool invert : {false, true}) {
+      const std::vector<int> symbols = BuildSymbolsFromRecovered(timing.symbol_samples, invert);
+      if (symbols.size() < 96) {
+        continue;
       }
-    }
-    for (int phase : phases) {
-      for (bool invert : {false, true}) {
-        const std::vector<int> symbols = BuildSymbolStream(resampled, phase, invert);
-        if (symbols.size() < 96) {
-          continue;
-        }
-        for (int initial_level : {0, 1}) {
-          const std::vector<int> bits = NrziDecode(symbols, initial_level);
-          if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
-            emitted_this_block = true;
-          }
+      for (int initial_level : {0, 1}) {
+        const std::vector<int> bits = NrziDecode(symbols, initial_level);
+        if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+          emitted_this_block = true;
         }
       }
     }
@@ -590,7 +698,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     std::ostringstream metrics_json;
     metrics_json << "{\"kind\":\"metric\""
                  << ",\"channel\":\"" << (on_ais1 ? "AIS1" : "AIS2") << "\""
-                 << ",\"metric_decode_mode\":\"continuous_gmsk\""
+                 << ",\"metric_decode_mode\":\"continuous_gmsk_gardner\""
                  << ",\"metric_blocks\":\"" << blocks << "\""
                  << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_candidates\":\"" << g_metric_candidates.load(std::memory_order_relaxed) << "\""
@@ -602,6 +710,12 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_demod_ready\":\"" << (demod_ready ? "1" : "0") << "\""
                  << ",\"metric_demod_resampled_samples\":\"" << resampled.size() << "\""
                  << ",\"metric_demod_rms\":\"" << demod_rms << "\""
+                 << ",\"metric_gmsk_bt\":\"" << kGmskBt << "\""
+                 << ",\"metric_gmsk_h\":\"" << kGmskModulationIndex << "\""
+                 << ",\"metric_timing_sps\":\"" << kTimingSamplesPerSymbol << "\""
+                 << ",\"metric_timing_symbols\":\"" << timing.symbol_samples.size() << "\""
+                 << ",\"metric_timing_avg_abs_error\":\"" << timing.avg_abs_error << "\""
+                 << ",\"metric_timing_lock\":\"" << (timing_ready ? "1" : "0") << "\""
                  << ",\"metric_decode_attempted\":\"" << (decode_attempted ? "1" : "0") << "\""
                  << ",\"metric_debug_state\":\"" << debug_state << "\""
                  << ",\"metric_emitted_this_block\":\"" << (emitted_this_block ? "1" : "0") << "\"}";
@@ -629,7 +743,7 @@ void Shutdown() {
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.7.0",
+    .plugin_version = "0.8.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,
