@@ -293,18 +293,24 @@ void ReceiverWorker::RunLoop() {
       std::vector<double> audio_spectrum;
       const bool have_audio_frame = BuildAudioVisualizationFrame(
           iq, &audio_waveform, &audio_spectrum, &audio_peak_hz, &audio_peak_strength);
-      const auto now = std::chrono::steady_clock::now();
-      if (have_audio_frame && now >= next_viz_emit) {
-        std::ostringstream viz_message;
-        viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(audio_peak_hz, 1)
-                    << " peak_strength=" << FormatDouble(audio_peak_strength, 3)
-                    << " waveform=" << FormatSeries(audio_waveform, 4)
-                    << " spectrum=" << FormatSeries(audio_spectrum, 4);
-        PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
-        next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
-      }
+      bool saw_ais_metric = false;
+      bool ais_squelch_open = false;
+      bool saw_non_ais_plugin_message = false;
 
       plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
+        if (plugin_msg.signal_type == SignalType::kAis) {
+          const auto kind_it = plugin_msg.normalized_fields.find("kind");
+          if (kind_it != plugin_msg.normalized_fields.end() && kind_it->second == "metric") {
+            const auto sq_it = plugin_msg.normalized_fields.find("metric_squelch_open");
+            if (sq_it != plugin_msg.normalized_fields.end()) {
+              saw_ais_metric = true;
+              ais_squelch_open = (sq_it->second == "1");
+            }
+          }
+        } else {
+          saw_non_ais_plugin_message = true;
+        }
+
         DecodedMessage msg;
         msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
         msg.receiver_id = receiver_id_;
@@ -319,6 +325,18 @@ void ReceiverWorker::RunLoop() {
         event_bus_->PublishDecodedMessage(msg);
         logger_->LogDecodedMessage(msg);
       });
+
+      const bool allow_visualization_frame = saw_ais_metric ? ais_squelch_open : saw_non_ais_plugin_message;
+      const auto now = std::chrono::steady_clock::now();
+      if (have_audio_frame && allow_visualization_frame && now >= next_viz_emit) {
+        std::ostringstream viz_message;
+        viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(audio_peak_hz, 1)
+                    << " peak_strength=" << FormatDouble(audio_peak_strength, 3)
+                    << " waveform=" << FormatSeries(audio_waveform, 4)
+                    << " spectrum=" << FormatSeries(audio_spectrum, 4);
+        PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+        next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
+      }
     }
   }
 }
