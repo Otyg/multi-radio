@@ -95,13 +95,6 @@ message SetModeConfigRequest {
 }
 message SetModeConfigResponse { bool ok = 1; string error = 2; }
 
-message SetAisSquelchRequest {
-  double threshold_db = 1;
-  uint32 hangover_blocks = 3;
-  bool force_open = 4;
-}
-message SetAisSquelchResponse { bool ok = 1; string error = 2; }
-
 message ListPluginsRequest {}
 message ListPluginsResponse { repeated PluginInfo plugins = 1; }
 
@@ -125,7 +118,6 @@ service RadioControlService {
   rpc StopReceiver(StopReceiverRequest) returns (StopReceiverResponse);
   rpc SetMode(SetModeRequest) returns (SetModeResponse);
   rpc SetModeConfig(SetModeConfigRequest) returns (SetModeConfigResponse);
-  rpc SetAisSquelch(SetAisSquelchRequest) returns (SetAisSquelchResponse);
   rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse);
   rpc EnablePlugin(EnablePluginRequest) returns (EnablePluginResponse);
   rpc DisablePlugin(DisablePluginRequest) returns (DisablePluginResponse);

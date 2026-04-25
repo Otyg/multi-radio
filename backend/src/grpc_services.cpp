@@ -203,21 +203,6 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     return grpc::Status::OK;
   }
 
-  grpc::Status SetAisSquelch(grpc::ServerContext* context,
-                             const v1::SetAisSquelchRequest* request,
-                             v1::SetAisSquelchResponse* response) override {
-    if (!auth::ValidateBearerToken(*context, auth_token_)) {
-      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
-    }
-
-    std::string error;
-    response->set_ok(plugin_host_->ConfigureAisSquelch(request->threshold_db(),
-                                                       request->hangover_blocks(),
-                                                       request->force_open(), &error));
-    response->set_error(error);
-    return grpc::Status::OK;
-  }
-
   grpc::Status ListPlugins(grpc::ServerContext* context, const v1::ListPluginsRequest*,
                            v1::ListPluginsResponse* response) override {
     if (!auth::ValidateBearerToken(*context, auth_token_)) {

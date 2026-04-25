@@ -74,7 +74,7 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq) {
   return discriminator;
 }
 
-bool BuildAudioVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* waveform,
+bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* waveform,
                                   std::vector<double>* spectrum, double* peak_hz,
                                   double* peak_strength) {
   if (waveform == nullptr || spectrum == nullptr || peak_hz == nullptr || peak_strength == nullptr) {
@@ -287,30 +287,14 @@ void ReceiverWorker::RunLoop() {
         break;
       }
 
-      double audio_peak_hz = 0.0;
-      double audio_peak_strength = 0.0;
-      std::vector<double> audio_waveform;
-      std::vector<double> audio_spectrum;
-      const bool have_audio_frame = BuildAudioVisualizationFrame(
-          iq, &audio_waveform, &audio_spectrum, &audio_peak_hz, &audio_peak_strength);
-      bool saw_ais_metric = false;
-      bool ais_squelch_open = false;
-      bool saw_non_ais_plugin_message = false;
+      double demod_peak_hz = 0.0;
+      double demod_peak_strength = 0.0;
+      std::vector<double> demod_waveform;
+      std::vector<double> demod_spectrum;
+      const bool have_demod_frame = BuildDemodVisualizationFrame(
+          iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
 
       plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
-        if (plugin_msg.signal_type == SignalType::kAis) {
-          const auto kind_it = plugin_msg.normalized_fields.find("kind");
-          if (kind_it != plugin_msg.normalized_fields.end() && kind_it->second == "metric") {
-            const auto sq_it = plugin_msg.normalized_fields.find("metric_squelch_open");
-            if (sq_it != plugin_msg.normalized_fields.end()) {
-              saw_ais_metric = true;
-              ais_squelch_open = (sq_it->second == "1");
-            }
-          }
-        } else {
-          saw_non_ais_plugin_message = true;
-        }
-
         DecodedMessage msg;
         msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
         msg.receiver_id = receiver_id_;
@@ -318,22 +302,21 @@ void ReceiverWorker::RunLoop() {
         msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? tuned_frequency_hz : plugin_msg.frequency_hz;
         msg.payload = plugin_msg.payload;
         msg.normalized_fields = plugin_msg.normalized_fields;
-        if (have_audio_frame) {
-          msg.normalized_fields["audio_peak_hz"] = FormatDouble(audio_peak_hz, 1);
-          msg.normalized_fields["audio_peak_strength"] = FormatDouble(audio_peak_strength, 3);
+        if (have_demod_frame) {
+          msg.normalized_fields["demod_peak_hz"] = FormatDouble(demod_peak_hz, 1);
+          msg.normalized_fields["demod_peak_strength"] = FormatDouble(demod_peak_strength, 3);
         }
         event_bus_->PublishDecodedMessage(msg);
         logger_->LogDecodedMessage(msg);
       });
 
-      const bool allow_visualization_frame = saw_ais_metric ? ais_squelch_open : saw_non_ais_plugin_message;
       const auto now = std::chrono::steady_clock::now();
-      if (have_audio_frame && allow_visualization_frame && now >= next_viz_emit) {
+      if (have_demod_frame && now >= next_viz_emit) {
         std::ostringstream viz_message;
-        viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(audio_peak_hz, 1)
-                    << " peak_strength=" << FormatDouble(audio_peak_strength, 3)
-                    << " waveform=" << FormatSeries(audio_waveform, 4)
-                    << " spectrum=" << FormatSeries(audio_spectrum, 4);
+        viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(demod_peak_hz, 1)
+                    << " peak_strength=" << FormatDouble(demod_peak_strength, 3)
+                    << " waveform=" << FormatSeries(demod_waveform, 4)
+                    << " spectrum=" << FormatSeries(demod_spectrum, 4);
         PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
         next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
       }
