@@ -1,9 +1,113 @@
 #include "multi_radio/receiver_worker.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <iomanip>
 #include <sstream>
+#include <vector>
 
 namespace multi_radio {
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+std::string FormatDouble(double value, int precision) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(precision) << value;
+  return out.str();
+}
+
+bool EstimateAudioPeak(const IQSampleBlock& iq, double* peak_hz, double* peak_strength) {
+  if (peak_hz == nullptr || peak_strength == nullptr) {
+    return false;
+  }
+  if (iq.sample_rate_hz == 0 || iq.interleaved_iq.size() < 4) {
+    return false;
+  }
+
+  const size_t available_samples = iq.interleaved_iq.size() / 2;
+  const size_t max_samples = 8192;
+  const size_t sample_count = std::min(available_samples, max_samples);
+  if (sample_count < 64) {
+    return false;
+  }
+
+  std::vector<double> discriminator;
+  discriminator.reserve(sample_count - 1);
+
+  double prev_i = static_cast<double>(iq.interleaved_iq[0]);
+  double prev_q = static_cast<double>(iq.interleaved_iq[1]);
+  for (size_t n = 1; n < sample_count; ++n) {
+    const double cur_i = static_cast<double>(iq.interleaved_iq[n * 2]);
+    const double cur_q = static_cast<double>(iq.interleaved_iq[n * 2 + 1]);
+    const double cross = prev_i * cur_q - prev_q * cur_i;
+    const double dot = prev_i * cur_i + prev_q * cur_q;
+    discriminator.push_back(std::atan2(cross, dot));
+    prev_i = cur_i;
+    prev_q = cur_q;
+  }
+
+  if (discriminator.size() < 32) {
+    return false;
+  }
+
+  double mean = 0.0;
+  for (double value : discriminator) {
+    mean += value;
+  }
+  mean /= static_cast<double>(discriminator.size());
+  for (double& value : discriminator) {
+    value -= mean;
+  }
+
+  double rms = 0.0;
+  for (double value : discriminator) {
+    rms += value * value;
+  }
+  rms = std::sqrt(rms / static_cast<double>(discriminator.size()));
+
+  const double sample_rate = static_cast<double>(iq.sample_rate_hz);
+  const double nyquist = sample_rate * 0.5;
+  const double min_hz = 200.0;
+  const double max_hz = std::min(20000.0, nyquist - 1.0);
+  if (max_hz <= min_hz) {
+    return false;
+  }
+
+  const double step_hz = 100.0;
+  double best_power = -1.0;
+  double best_hz = min_hz;
+  for (double candidate_hz = min_hz; candidate_hz <= max_hz; candidate_hz += step_hz) {
+    const double omega = 2.0 * kPi * candidate_hz / sample_rate;
+    const double coeff = 2.0 * std::cos(omega);
+    double q0 = 0.0;
+    double q1 = 0.0;
+    double q2 = 0.0;
+    for (double sample : discriminator) {
+      q0 = coeff * q1 - q2 + sample;
+      q2 = q1;
+      q1 = q0;
+    }
+    const double power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
+    if (power > best_power) {
+      best_power = power;
+      best_hz = candidate_hz;
+    }
+  }
+
+  if (best_power <= 0.0) {
+    return false;
+  }
+
+  *peak_hz = best_hz;
+  *peak_strength =
+      std::clamp(std::sqrt(best_power / static_cast<double>(discriminator.size())) / (rms + 1e-9), 0.0, 1.0);
+  return true;
+}
+
+}  // namespace
 
 ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
                                std::unique_ptr<IRadioDevice> device,
@@ -144,6 +248,10 @@ void ReceiverWorker::RunLoop() {
       continue;
     }
 
+    double audio_peak_hz = 0.0;
+    double audio_peak_strength = 0.0;
+    const bool have_audio_peak = EstimateAudioPeak(iq, &audio_peak_hz, &audio_peak_strength);
+
     plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
       DecodedMessage msg;
       msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
@@ -152,6 +260,10 @@ void ReceiverWorker::RunLoop() {
       msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? frequency_hz.value() : plugin_msg.frequency_hz;
       msg.payload = plugin_msg.payload;
       msg.normalized_fields = plugin_msg.normalized_fields;
+      if (have_audio_peak) {
+        msg.normalized_fields["audio_peak_hz"] = FormatDouble(audio_peak_hz, 1);
+        msg.normalized_fields["audio_peak_strength"] = FormatDouble(audio_peak_strength, 3);
+      }
       event_bus_->PublishDecodedMessage(msg);
       logger_->LogDecodedMessage(msg);
     });

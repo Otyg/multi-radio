@@ -13,6 +13,7 @@
 #include <QTableWidget>
 
 #include "grpc_client.hpp"
+#include "signal_visualization_widget.hpp"
 
 namespace multi_radio {
 
@@ -28,6 +29,7 @@ class MainWindow : public QMainWindow {
   void StartSelectedReceiver();
   void StopSelectedReceiver();
   void ApplyModeAndConfig();
+  void OpenVisualizationSettingsDialog();
 
   void OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
                        const QString& message, quint64 unix_ms);
@@ -48,6 +50,7 @@ class MainWindow : public QMainWindow {
   void AppendLog(const QString& line);
   void AddMessageRow(const MessageRow& row);
   bool PassesFilter(const MessageRow& row) const;
+  double EstimateVisualizationIntensity(const QString& signal_type, const QVariantMap& fields) const;
 
   std::unique_ptr<GrpcClient> client_;
   std::vector<MessageRow> all_rows_;
@@ -67,6 +70,7 @@ class MainWindow : public QMainWindow {
 
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;
+  SignalVisualizationWidget* signal_visualization_ = nullptr;
 };
 
 }  // namespace multi_radio

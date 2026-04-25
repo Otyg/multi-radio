@@ -1,6 +1,7 @@
 #include "signal_visualization_widget.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <QColor>
@@ -9,20 +10,30 @@
 #include <QPainterPath>
 #include <QPen>
 #include <QRect>
+#include <QString>
 
 namespace multi_radio {
 
 namespace {
 
 constexpr int kWaveformPoints = 200;
-constexpr int kSpectrumBins = 120;
 constexpr int kSpectrogramRows = 34;
 constexpr int kWaterfallRows = 90;
-constexpr double kSpectrumSpanHz = 20000.0;
 constexpr double kTwoPi = 6.28318530717958647692;
 
 inline double Clamp01(double value) {
   return std::max(0.0, std::min(1.0, value));
+}
+
+QString FormatFrequencyLabel(double hz) {
+  const double abs_hz = std::abs(hz);
+  if (abs_hz >= 1e6) {
+    return QString("%1M").arg(hz / 1e6, 0, 'f', 3);
+  }
+  if (abs_hz >= 1e3) {
+    return QString("%1k").arg(hz / 1e3, 0, 'f', 1);
+  }
+  return QString::number(hz, 'f', 0);
 }
 
 }  // namespace
@@ -45,6 +56,45 @@ void SignalVisualizationWidget::SetReceiverFilter(int receiver_filter_id) {
   receiver_filter_id_ = receiver_filter_id;
   update();
 }
+
+void SignalVisualizationWidget::SetVisualizationSettings(int fft_size, double frequency_start_hz,
+                                                         double frequency_end_hz) {
+  const int normalized_fft = NormalizeFftSize(fft_size);
+  const int new_bins = SpectrumBinsFromFftSize(normalized_fft);
+  double start_hz = frequency_start_hz;
+  double end_hz = frequency_end_hz;
+  if (start_hz > end_hz) {
+    std::swap(start_hz, end_hz);
+  }
+  if (end_hz - start_hz < 1.0) {
+    end_hz = start_hz + 1.0;
+  }
+
+  const bool fft_changed = normalized_fft != fft_size_ || new_bins != spectrum_bins_;
+  const bool range_changed = std::abs(start_hz - frequency_start_hz_) >= 1.0 ||
+                             std::abs(end_hz - frequency_end_hz_) >= 1.0;
+  if (!fft_changed && !range_changed) {
+    return;
+  }
+
+  fft_size_ = normalized_fft;
+  spectrum_bins_ = new_bins;
+  frequency_start_hz_ = start_hz;
+  frequency_end_hz_ = end_hz;
+
+  if (fft_changed) {
+    for (auto it = states_.begin(); it != states_.end(); ++it) {
+      ReinitializeState(&it.value());
+    }
+  }
+  update();
+}
+
+int SignalVisualizationWidget::FftSize() const { return fft_size_; }
+
+double SignalVisualizationWidget::FrequencyStartHz() const { return frequency_start_hz_; }
+
+double SignalVisualizationWidget::FrequencyEndHz() const { return frequency_end_hz_; }
 
 void SignalVisualizationWidget::PushSample(uint32_t receiver_id, double frequency_hz, double intensity) {
   ReceiverState& state = states_[receiver_id];
@@ -83,8 +133,10 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
   };
 
   draw_panel(waveform_rect, "Signal Waveform");
-  draw_panel(spectrogram_rect, "Spectrogram (Freq vs dB)");
-  draw_panel(waterfall_rect, "Waterfall");
+  draw_panel(spectrogram_rect, QString("Spectrogram (FFT %1)").arg(fft_size_));
+  draw_panel(waterfall_rect, QString("Waterfall (%1 - %2)")
+                                 .arg(FormatFrequencyLabel(frequency_start_hz_))
+                                 .arg(FormatFrequencyLabel(frequency_end_hz_)));
 
   const bool needs_selection = RequireExplicitSelection();
   if (needs_selection) {
@@ -97,7 +149,8 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
   const ReceiverState display = BuildDisplayState();
 
   DrawWaveform(&painter, waveform_rect.adjusted(8, 30, -8, -8), display.waveform);
-  DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum);
+  DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
+                    frequency_start_hz_, frequency_end_hz_);
   DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true);
 }
 
@@ -108,16 +161,60 @@ void SignalVisualizationWidget::OnFrameTick() {
   update();
 }
 
-void SignalVisualizationWidget::EnsureState(ReceiverState* state) {
+void SignalVisualizationWidget::EnsureState(ReceiverState* state) const {
   if (state == nullptr) {
     return;
   }
-  if (state->waveform.isEmpty()) {
+  if (state->waveform.size() != kWaveformPoints) {
     state->waveform = QVector<double>(kWaveformPoints, 0.5);
   }
-  if (state->spectrum.isEmpty()) {
-    state->spectrum = QVector<double>(kSpectrumBins, 0.0);
+  if (state->spectrum.size() != spectrum_bins_) {
+    state->spectrum = QVector<double>(spectrum_bins_, 0.0);
+    state->spectrogram_rows.clear();
+    state->waterfall_rows.clear();
   }
+
+  for (const QVector<double>& row : std::as_const(state->spectrogram_rows)) {
+    if (row.size() != spectrum_bins_) {
+      state->spectrogram_rows.clear();
+      break;
+    }
+  }
+  for (const QVector<double>& row : std::as_const(state->waterfall_rows)) {
+    if (row.size() != spectrum_bins_) {
+      state->waterfall_rows.clear();
+      break;
+    }
+  }
+}
+
+void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
+  if (state == nullptr) {
+    return;
+  }
+  state->waveform = QVector<double>(kWaveformPoints, 0.5);
+  state->spectrum = QVector<double>(spectrum_bins_, 0.0);
+  state->spectrogram_rows.clear();
+  state->waterfall_rows.clear();
+}
+
+int SignalVisualizationWidget::NormalizeFftSize(int fft_size) {
+  static constexpr std::array<int, 7> kAllowedFftSizes = {64, 128, 256, 512, 1024, 2048, 4096};
+  int best = kAllowedFftSizes.front();
+  int best_distance = std::abs(fft_size - best);
+  for (const int candidate : kAllowedFftSizes) {
+    const int distance = std::abs(fft_size - candidate);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+int SignalVisualizationWidget::SpectrumBinsFromFftSize(int fft_size) {
+  const int normalized_fft = NormalizeFftSize(fft_size);
+  return std::max(32, normalized_fft / 2);
 }
 
 void SignalVisualizationWidget::PushRow(QVector<QVector<double>>* rows, const QVector<double>& row,
@@ -182,7 +279,8 @@ void SignalVisualizationWidget::DrawWaveform(QPainter* painter, const QRect& are
 }
 
 void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect& area,
-                                                  const QVector<double>& spectrum) {
+                                                  const QVector<double>& spectrum, double frequency_start_hz,
+                                                  double frequency_end_hz) {
   if (painter == nullptr || spectrum.isEmpty()) {
     return;
   }
@@ -216,19 +314,20 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
     painter->setPen(QPen(QColor(48, 58, 78), 1));
   }
 
-  const int freq_ticks_khz[] = {0, 5, 10, 15, 20};
-  for (const int tick_khz : freq_ticks_khz) {
-    const double t = static_cast<double>(tick_khz) / 20.0;
+  const double span_hz = std::max(1.0, frequency_end_hz - frequency_start_hz);
+  for (int tick = 0; tick <= 4; ++tick) {
+    const double t = static_cast<double>(tick) / 4.0;
+    const double tick_hz = frequency_start_hz + t * span_hz;
     const int x = plot.left() + static_cast<int>(t * (plot.width() - 1));
     painter->drawLine(x, plot.top(), x, plot.bottom());
     painter->setPen(QColor(160, 176, 200));
-    painter->drawText(x - 14, area.bottom() - 4, QString("%1k").arg(tick_khz));
+    painter->drawText(x - 24, area.bottom() - 4, FormatFrequencyLabel(tick_hz));
     painter->setPen(QPen(QColor(48, 58, 78), 1));
   }
 
   painter->setPen(QColor(178, 192, 214));
   painter->drawText(area.left() + 2, plot.top() - 2, "dB");
-  painter->drawText(plot.right() - 56, area.bottom() - 4, "Freq (kHz)");
+  painter->drawText(plot.right() - 64, area.bottom() - 4, "Freq (Hz)");
 
   QPainterPath path;
   for (int i = 0; i < spectrum.size(); ++i) {
@@ -299,12 +398,16 @@ SignalVisualizationWidget::ReceiverState SignalVisualizationWidget::BuildDisplay
   if (receiver_filter_id_ >= 0) {
     const uint32_t id = static_cast<uint32_t>(receiver_filter_id_);
     if (states_.contains(id)) {
-      return states_.value(id);
+      ReceiverState selected = states_.value(id);
+      EnsureState(&selected);
+      return selected;
     }
   }
 
   if (known_receivers_.size() == 1 && states_.contains(known_receivers_[0])) {
-    return states_.value(known_receivers_[0]);
+    ReceiverState selected = states_.value(known_receivers_[0]);
+    EnsureState(&selected);
+    return selected;
   }
 
   const auto state_values = states_.values();
@@ -350,22 +453,30 @@ void SignalVisualizationWidget::BlendSampleIntoState(ReceiverState* state, doubl
   }
 
   double normalized_frequency = 0.5;
+  bool frequency_in_range = false;
+  const double span_hz = std::max(1.0, frequency_end_hz_ - frequency_start_hz_);
   if (state->last_frequency_hz > 0.0) {
-    normalized_frequency = std::fmod(state->last_frequency_hz, kSpectrumSpanHz) / kSpectrumSpanHz;
+    const double mapped_frequency = (state->last_frequency_hz - frequency_start_hz_) / span_hz;
+    frequency_in_range = mapped_frequency >= 0.0 && mapped_frequency <= 1.0;
+    if (frequency_in_range) {
+      normalized_frequency = Clamp01(mapped_frequency);
+    }
   }
 
   for (double& bin : state->spectrum) {
     bin *= 0.9;
   }
 
-  const double sigma = 0.045;
-  for (int i = 0; i < state->spectrum.size(); ++i) {
-    const double x = (state->spectrum.size() <= 1)
-                         ? 0.0
-                         : static_cast<double>(i) / static_cast<double>(state->spectrum.size() - 1);
-    const double dist = x - normalized_frequency;
-    const double gaussian = std::exp(-(dist * dist) / (2.0 * sigma * sigma));
-    state->spectrum[i] = std::max(state->spectrum[i], gaussian * normalized_intensity);
+  if (frequency_in_range) {
+    const double sigma = 0.045;
+    for (int i = 0; i < state->spectrum.size(); ++i) {
+      const double x = (state->spectrum.size() <= 1)
+                           ? 0.0
+                           : static_cast<double>(i) / static_cast<double>(state->spectrum.size() - 1);
+      const double dist = x - normalized_frequency;
+      const double gaussian = std::exp(-(dist * dist) / (2.0 * sigma * sigma));
+      state->spectrum[i] = std::max(state->spectrum[i], gaussian * normalized_intensity);
+    }
   }
 
   const int samples_to_add = 4;

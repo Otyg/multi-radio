@@ -1,8 +1,12 @@
 #include "main_window.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHeaderView>
@@ -90,13 +94,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   minutes_filter_spin_ = new QSpinBox(filter_group);
   minutes_filter_spin_->setRange(1, 240);
   minutes_filter_spin_->setValue(30);
+  auto* visualization_settings_button = new QPushButton("Visualization settings...", filter_group);
 
   filter_layout->addRow("Signal", signal_filter_combo_);
   filter_layout->addRow("Receiver", receiver_filter_combo_);
   filter_layout->addRow("Last minutes", minutes_filter_spin_);
+  filter_layout->addRow(visualization_settings_button);
 
   top_layout->addWidget(control_group, 2);
   top_layout->addWidget(filter_group, 1);
+
+  signal_visualization_ = new SignalVisualizationWidget(central);
 
   decoded_table_ = new QTableWidget(0, 5, central);
   decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload"});
@@ -111,6 +119,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   splitter->setSizes({450, 250});
 
   root_layout->addLayout(top_layout);
+  root_layout->addWidget(signal_visualization_);
   root_layout->addWidget(splitter);
 
   setCentralWidget(central);
@@ -119,6 +128,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(start_button, &QPushButton::clicked, this, &MainWindow::StartSelectedReceiver);
   connect(stop_button, &QPushButton::clicked, this, &MainWindow::StopSelectedReceiver);
   connect(apply_button, &QPushButton::clicked, this, &MainWindow::ApplyModeAndConfig);
+  connect(visualization_settings_button, &QPushButton::clicked, this,
+          &MainWindow::OpenVisualizationSettingsDialog);
 
   connect(signal_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
     decoded_table_->setRowCount(0);
@@ -131,6 +142,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
     }
+    signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
   });
   connect(minutes_filter_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
     decoded_table_->setRowCount(0);
@@ -160,16 +172,22 @@ void MainWindow::RefreshReceivers() {
   receiver_combo_->clear();
   receiver_filter_combo_->clear();
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
+  std::vector<uint32_t> receiver_ids;
+  receiver_ids.reserve(receivers.size());
 
   for (const auto& receiver : receivers) {
     const QString label = QString("#%1 %2 (%3)")
                               .arg(receiver.receiver_id())
                               .arg(QString::fromStdString(receiver.serial()))
                               .arg(receiver.running() ? "running" : "stopped");
+    receiver_ids.push_back(receiver.receiver_id());
     receiver_combo_->addItem(label, QVariant::fromValue<int>(receiver.receiver_id()));
     receiver_filter_combo_->addItem(QString("#%1").arg(receiver.receiver_id()),
                                     QVariant::fromValue<int>(receiver.receiver_id()));
   }
+
+  signal_visualization_->SetKnownReceivers(receiver_ids);
+  signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
 
   AppendLog(QString("Refreshed %1 receivers").arg(receivers.size()));
 }
@@ -240,6 +258,9 @@ void MainWindow::ApplyModeAndConfig() {
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
                                  const QString& message, quint64 unix_ms) {
+  if (event_kind == static_cast<int>(v1::EVENT_KIND_TUNE_HOP) && tuned_frequency_hz > 0.0) {
+    signal_visualization_->PushSample(receiver_id, tuned_frequency_hz, 0.35);
+  }
   AppendLog(QString("[%1] RX%2 kind=%3 f=%4 %5")
                 .arg(ToLocalTime(unix_ms))
                 .arg(receiver_id)
@@ -249,13 +270,41 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
 }
 
 void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
-                                  const QString& payload, const QVariantMap& /*fields*/, quint64 unix_ms) {
+                                  const QString& payload, const QVariantMap& fields, quint64 unix_ms) {
   MessageRow row;
   row.timestamp = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(unix_ms)).toLocalTime();
   row.receiver_id = receiver_id;
   row.signal_type = signal_type;
   row.frequency_hz = frequency_hz;
   row.payload = payload;
+
+  auto parse_field_double = [&fields](const QString& key, double* value) -> bool {
+    if (!fields.contains(key) || value == nullptr) {
+      return false;
+    }
+    bool ok = false;
+    const QVariant raw = fields.value(key);
+    const double direct = raw.toDouble(&ok);
+    if (ok) {
+      *value = direct;
+      return true;
+    }
+    const double from_string = raw.toString().toDouble(&ok);
+    if (ok) {
+      *value = from_string;
+      return true;
+    }
+    return false;
+  };
+
+  double visualization_frequency_hz = frequency_hz;
+  double audio_peak_hz = 0.0;
+  if (parse_field_double("audio_peak_hz", &audio_peak_hz)) {
+    visualization_frequency_hz = audio_peak_hz;
+  }
+
+  signal_visualization_->PushSample(receiver_id, visualization_frequency_hz,
+                                    EstimateVisualizationIntensity(signal_type, fields));
 
   all_rows_.push_back(row);
   AddMessageRow(row);
@@ -278,6 +327,59 @@ bool MainWindow::CurrentReceiverId(uint32_t* receiver_id) const {
 
 void MainWindow::AppendLog(const QString& line) {
   event_log_->appendPlainText(line);
+}
+
+void MainWindow::OpenVisualizationSettingsDialog() {
+  QDialog dialog(this);
+  dialog.setWindowTitle("Visualization settings");
+
+  auto* layout = new QFormLayout(&dialog);
+  auto* fft_combo = new QComboBox(&dialog);
+  const int fft_sizes[] = {64, 128, 256, 512, 1024, 2048, 4096};
+  for (const int fft_size : fft_sizes) {
+    fft_combo->addItem(QString::number(fft_size), QVariant::fromValue(fft_size));
+  }
+  const int current_fft = signal_visualization_->FftSize();
+  const int fft_index = fft_combo->findData(QVariant::fromValue(current_fft));
+  if (fft_index >= 0) {
+    fft_combo->setCurrentIndex(fft_index);
+  }
+
+  auto* start_hz_spin = new QDoubleSpinBox(&dialog);
+  start_hz_spin->setDecimals(0);
+  start_hz_spin->setRange(0.0, 6000000000.0);
+  start_hz_spin->setSingleStep(25000.0);
+  start_hz_spin->setSuffix(" Hz");
+  start_hz_spin->setValue(signal_visualization_->FrequencyStartHz());
+
+  auto* end_hz_spin = new QDoubleSpinBox(&dialog);
+  end_hz_spin->setDecimals(0);
+  end_hz_spin->setRange(0.0, 6000000000.0);
+  end_hz_spin->setSingleStep(25000.0);
+  end_hz_spin->setSuffix(" Hz");
+  end_hz_spin->setValue(signal_visualization_->FrequencyEndHz());
+
+  layout->addRow("FFT size", fft_combo);
+  layout->addRow("Frequency start", start_hz_spin);
+  layout->addRow("Frequency end", end_hz_spin);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  layout->addRow(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  const int fft_size = fft_combo->currentData().toInt();
+  const double start_hz = start_hz_spin->value();
+  const double end_hz = end_hz_spin->value();
+  signal_visualization_->SetVisualizationSettings(fft_size, start_hz, end_hz);
+  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz")
+                .arg(fft_size)
+                .arg(start_hz, 0, 'f', 0)
+                .arg(end_hz, 0, 'f', 0));
 }
 
 void MainWindow::AddMessageRow(const MessageRow& row) {
@@ -308,6 +410,56 @@ bool MainWindow::PassesFilter(const MessageRow& row) const {
   const int minutes = minutes_filter_spin_->value();
   const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-minutes * 60);
   return row.timestamp >= cutoff;
+}
+
+double MainWindow::EstimateVisualizationIntensity(const QString& signal_type,
+                                                  const QVariantMap& fields) const {
+  auto read_numeric = [&fields](const QString& key, double* value) -> bool {
+    if (!fields.contains(key) || value == nullptr) {
+      return false;
+    }
+    bool ok = false;
+    const QVariant raw_value = fields.value(key);
+    const double parsed = raw_value.toDouble(&ok);
+    if (ok) {
+      *value = parsed;
+      return true;
+    }
+    const double from_string = raw_value.toString().toDouble(&ok);
+    if (ok) {
+      *value = from_string;
+      return true;
+    }
+    return false;
+  };
+
+  double value = 0.0;
+  if (read_numeric("audio_peak_strength", &value)) {
+    return std::clamp(value, 0.05, 1.0);
+  }
+  if (read_numeric("snr_db", &value) || read_numeric("snr", &value)) {
+    return std::clamp((value + 5.0) / 35.0, 0.05, 1.0);
+  }
+  if (read_numeric("rssi_dbm", &value) || read_numeric("rssi", &value)) {
+    return std::clamp((value + 120.0) / 90.0, 0.05, 1.0);
+  }
+  if (read_numeric("power_dbfs", &value) || read_numeric("power_db", &value)) {
+    return std::clamp((value + 120.0) / 120.0, 0.05, 1.0);
+  }
+  if (read_numeric("confidence", &value)) {
+    return std::clamp(value, 0.05, 1.0);
+  }
+
+  if (signal_type == "SIGNAL_TYPE_ADSB") {
+    return 0.82;
+  }
+  if (signal_type == "SIGNAL_TYPE_DSC") {
+    return 0.72;
+  }
+  if (signal_type == "SIGNAL_TYPE_AIS") {
+    return 0.66;
+  }
+  return 0.6;
 }
 
 }  // namespace multi_radio
