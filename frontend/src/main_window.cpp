@@ -342,13 +342,52 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
 }
 
 void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
-                                  const QString& payload, const QVariantMap& /*fields*/, quint64 unix_ms) {
+                                  const QString& payload, const QVariantMap& fields, quint64 unix_ms) {
   MessageRow row;
   row.timestamp = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(unix_ms)).toLocalTime();
   row.receiver_id = receiver_id;
   row.signal_type = signal_type;
   row.frequency_hz = frequency_hz;
   row.payload = payload;
+
+  auto field_text = [&fields](const QString& key) -> QString {
+    if (!fields.contains(key)) {
+      return {};
+    }
+    return fields.value(key).toString();
+  };
+
+  QString summary = QString("[%1] RX%2 %3 f=%4")
+                        .arg(ToLocalTime(unix_ms))
+                        .arg(receiver_id)
+                        .arg(signal_type)
+                        .arg(frequency_hz, 0, 'f', 0);
+  const QString mmsi = field_text("mmsi");
+  const QString msg_type = field_text("msg_type");
+  const QString channel = field_text("channel");
+  if (!mmsi.isEmpty()) {
+    summary += QString(" mmsi=%1").arg(mmsi);
+  }
+  if (!msg_type.isEmpty()) {
+    summary += QString(" type=%1").arg(msg_type);
+  }
+  if (!channel.isEmpty()) {
+    summary += QString(" ch=%1").arg(channel);
+  }
+  summary += QString(" payload=%1").arg(payload.left(96));
+  AppendLog(summary);
+
+  const QString metric_blocks = field_text("metric_blocks");
+  if (!metric_blocks.isEmpty()) {
+    AppendLog(QString("AIS metrics: blocks=%1 flags=%2 candidates=%3 crc_ok=%4 crc_fail=%5 dup=%6 emitted=%7")
+                  .arg(metric_blocks)
+                  .arg(field_text("metric_flags"))
+                  .arg(field_text("metric_candidates"))
+                  .arg(field_text("metric_crc_ok"))
+                  .arg(field_text("metric_crc_fail"))
+                  .arg(field_text("metric_duplicates"))
+                  .arg(field_text("metric_emitted")));
+  }
 
   all_rows_.push_back(row);
   AddMessageRow(row);

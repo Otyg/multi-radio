@@ -1,6 +1,7 @@
 #include "multi_radio/plugin_api.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -28,8 +29,26 @@ struct RecentFrame {
 
 uint64_t g_sequence = 0;
 std::deque<RecentFrame> g_recent_frames;
+std::atomic<uint64_t> g_metric_blocks{0};
+std::atomic<uint64_t> g_metric_flags{0};
+std::atomic<uint64_t> g_metric_candidates{0};
+std::atomic<uint64_t> g_metric_crc_ok{0};
+std::atomic<uint64_t> g_metric_crc_fail{0};
+std::atomic<uint64_t> g_metric_duplicates{0};
+std::atomic<uint64_t> g_metric_emitted{0};
 
-int Init(const char* /*config_json*/) { return 0; }
+int Init(const char* /*config_json*/) {
+  g_recent_frames.clear();
+  g_sequence = 0;
+  g_metric_blocks.store(0, std::memory_order_relaxed);
+  g_metric_flags.store(0, std::memory_order_relaxed);
+  g_metric_candidates.store(0, std::memory_order_relaxed);
+  g_metric_crc_ok.store(0, std::memory_order_relaxed);
+  g_metric_crc_fail.store(0, std::memory_order_relaxed);
+  g_metric_duplicates.store(0, std::memory_order_relaxed);
+  g_metric_emitted.store(0, std::memory_order_relaxed);
+  return 0;
+}
 
 bool IsNearFrequency(uint32_t value, uint32_t target, uint32_t tolerance) {
   const int64_t delta = static_cast<int64_t>(value) - static_cast<int64_t>(target);
@@ -350,6 +369,7 @@ bool IsDuplicateFrame(uint64_t hash) {
 
   for (const RecentFrame& entry : g_recent_frames) {
     if (entry.hash == hash) {
+      g_metric_duplicates.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
   }
@@ -436,9 +456,18 @@ void EmitAisMessage(const std::vector<uint8_t>& message_bytes, uint32_t message_
     return;
   }
 
+  const uint64_t emitted_now = g_metric_emitted.fetch_add(1, std::memory_order_relaxed) + 1;
+
   std::ostringstream fields_json;
   fields_json << "{\"mmsi\":\"" << mmsi << "\",\"msg_type\":\"" << message_type << "\",\"channel\":\""
-              << (channel_a ? "AIS1" : "AIS2") << "\",\"decoder\":\"gmsk\"}";
+              << (channel_a ? "AIS1" : "AIS2") << "\",\"decoder\":\"gmsk\""
+              << ",\"metric_blocks\":\"" << g_metric_blocks.load(std::memory_order_relaxed) << "\""
+              << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
+              << ",\"metric_candidates\":\"" << g_metric_candidates.load(std::memory_order_relaxed) << "\""
+              << ",\"metric_crc_ok\":\"" << g_metric_crc_ok.load(std::memory_order_relaxed) << "\""
+              << ",\"metric_crc_fail\":\"" << g_metric_crc_fail.load(std::memory_order_relaxed) << "\""
+              << ",\"metric_duplicates\":\"" << g_metric_duplicates.load(std::memory_order_relaxed) << "\""
+              << ",\"metric_emitted\":\"" << emitted_now << "\"}";
 
   const double frequency_hz = static_cast<double>(channel_a ? kAis1Hz : kAis2Hz);
   emit_fn("AIS", sentence.c_str(), frequency_hz, 0, fields_json.str().c_str(), user_data);
@@ -454,6 +483,7 @@ void DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
     if (!IsFlagAt(bits, start)) {
       continue;
     }
+    g_metric_flags.fetch_add(1, std::memory_order_relaxed);
     for (size_t end = start + 8; end + 8 <= bits.size(); ++end) {
       if (!IsFlagAt(bits, end)) {
         continue;
@@ -468,8 +498,12 @@ void DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
       std::vector<uint8_t> message_bytes;
       uint32_t message_type = 0;
       uint32_t mmsi = 0;
+      g_metric_candidates.fetch_add(1, std::memory_order_relaxed);
       if (TryDecodeFrame(stuffed, &message_bytes, &message_type, &mmsi)) {
+        g_metric_crc_ok.fetch_add(1, std::memory_order_relaxed);
         EmitAisMessage(message_bytes, message_type, mmsi, channel_a, emit_fn, user_data);
+      } else {
+        g_metric_crc_fail.fetch_add(1, std::memory_order_relaxed);
       }
       break;
     }
@@ -486,6 +520,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   if (!on_ais1 && !on_ais2) {
     return 0;
   }
+  g_metric_blocks.fetch_add(1, std::memory_order_relaxed);
 
   if (iq_view->sample_rate_hz == 0 || iq_view->sample_count < 512) {
     return 0;
@@ -531,6 +566,13 @@ int Flush(multi_radio_emit_message_fn /*emit_fn*/, void* /*user_data*/) { return
 void Shutdown() {
   g_recent_frames.clear();
   g_sequence = 0;
+  g_metric_blocks.store(0, std::memory_order_relaxed);
+  g_metric_flags.store(0, std::memory_order_relaxed);
+  g_metric_candidates.store(0, std::memory_order_relaxed);
+  g_metric_crc_ok.store(0, std::memory_order_relaxed);
+  g_metric_crc_fail.store(0, std::memory_order_relaxed);
+  g_metric_duplicates.store(0, std::memory_order_relaxed);
+  g_metric_emitted.store(0, std::memory_order_relaxed);
 }
 
 const multi_radio_plugin_descriptor kDescriptor = {
