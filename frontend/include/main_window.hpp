@@ -48,6 +48,7 @@ class MainWindow : public QMainWindow {
     QString signal_type;
     double frequency_hz = 0.0;
     QString payload;
+    QString decoded_summary;
   };
   struct AisCrcSummaryState {
     quint64 last_log_unix_ms = 0;

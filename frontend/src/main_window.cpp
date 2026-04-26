@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <sstream>
 
 #include <QDialog>
@@ -90,6 +91,361 @@ bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, doubl
   *waveform = std::move(parsed_waveform);
   *spectrum = std::move(parsed_spectrum);
   return true;
+}
+
+struct ParsedAisNmeaSentence {
+  std::vector<int> bits;
+  QString channel;
+};
+
+int DecodeAisSixBitValue(QChar c) {
+  const int ascii = c.unicode();
+  if (ascii < 48 || ascii > 119) {
+    return -1;
+  }
+  int value = ascii - 48;
+  if (value > 40) {
+    value -= 8;
+  }
+  if (value < 0 || value > 63) {
+    return -1;
+  }
+  return value;
+}
+
+bool ReadUnsignedBits(const std::vector<int>& bits, int start, int length, uint32_t* out) {
+  if (out == nullptr || start < 0 || length <= 0 || length > 32) {
+    return false;
+  }
+  const size_t begin = static_cast<size_t>(start);
+  const size_t end = begin + static_cast<size_t>(length);
+  if (end > bits.size()) {
+    return false;
+  }
+  uint32_t value = 0;
+  for (size_t idx = begin; idx < end; ++idx) {
+    value = (value << 1U) | static_cast<uint32_t>(bits[idx] != 0 ? 1 : 0);
+  }
+  *out = value;
+  return true;
+}
+
+bool ReadSignedBits(const std::vector<int>& bits, int start, int length, int32_t* out) {
+  if (out == nullptr || length <= 0 || length >= 32) {
+    return false;
+  }
+  uint32_t raw = 0;
+  if (!ReadUnsignedBits(bits, start, length, &raw)) {
+    return false;
+  }
+  const uint32_t sign_bit = 1U << static_cast<uint32_t>(length - 1);
+  if ((raw & sign_bit) == 0U) {
+    *out = static_cast<int32_t>(raw);
+    return true;
+  }
+  const uint32_t mask = (1U << static_cast<uint32_t>(length)) - 1U;
+  *out = static_cast<int32_t>(raw | ~mask);
+  return true;
+}
+
+QString DecodeAisSixBitText(const std::vector<int>& bits, int start, int length) {
+  if (start < 0 || length <= 0 || (length % 6) != 0) {
+    return {};
+  }
+  if (static_cast<size_t>(start + length) > bits.size()) {
+    return {};
+  }
+  static const char* kAisCharset =
+      "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?";
+  QString out;
+  out.reserve(length / 6);
+  for (int i = 0; i < length; i += 6) {
+    uint32_t value = 0;
+    if (!ReadUnsignedBits(bits, start + i, 6, &value)) {
+      return {};
+    }
+    out.append(QChar::fromLatin1(kAisCharset[value]));
+  }
+  out.replace('@', ' ');
+  return out.trimmed();
+}
+
+std::optional<double> DecodeLonDeg(const std::vector<int>& bits, int start, int length) {
+  int32_t raw = 0;
+  if (!ReadSignedBits(bits, start, length, &raw)) {
+    return std::nullopt;
+  }
+  const double degrees = static_cast<double>(raw) / 600000.0;
+  if (degrees < -180.0 || degrees > 180.0) {
+    return std::nullopt;
+  }
+  return degrees;
+}
+
+std::optional<double> DecodeLatDeg(const std::vector<int>& bits, int start, int length) {
+  int32_t raw = 0;
+  if (!ReadSignedBits(bits, start, length, &raw)) {
+    return std::nullopt;
+  }
+  const double degrees = static_cast<double>(raw) / 600000.0;
+  if (degrees < -90.0 || degrees > 90.0) {
+    return std::nullopt;
+  }
+  return degrees;
+}
+
+std::optional<double> DecodeTenths(const std::vector<int>& bits, int start, int length,
+                                   uint32_t unavailable) {
+  uint32_t raw = 0;
+  if (!ReadUnsignedBits(bits, start, length, &raw) || raw == unavailable) {
+    return std::nullopt;
+  }
+  return static_cast<double>(raw) / 10.0;
+}
+
+std::optional<int> DecodeUnsignedMaybe(const std::vector<int>& bits, int start, int length,
+                                       uint32_t unavailable) {
+  uint32_t raw = 0;
+  if (!ReadUnsignedBits(bits, start, length, &raw) || raw == unavailable) {
+    return std::nullopt;
+  }
+  return static_cast<int>(raw);
+}
+
+bool ParseAisNmeaSentence(const QString& sentence, ParsedAisNmeaSentence* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  const QString trimmed = sentence.trimmed();
+  if (trimmed.isEmpty()) {
+    return false;
+  }
+
+  const int star = trimmed.indexOf('*');
+  QString body = (star >= 0) ? trimmed.left(star) : trimmed;
+  if (body.startsWith('!') || body.startsWith('$')) {
+    body = body.mid(1);
+  }
+  const QStringList parts = body.split(',');
+  if (parts.size() < 7) {
+    return false;
+  }
+  if (!(parts[0].endsWith("VDM") || parts[0].endsWith("VDO"))) {
+    return false;
+  }
+  bool fragments_ok = false;
+  const int fragments = parts[1].toInt(&fragments_ok);
+  bool fragment_no_ok = false;
+  const int fragment_no = parts[2].toInt(&fragment_no_ok);
+  if (!fragments_ok || !fragment_no_ok || fragments <= 0 || fragment_no <= 0 || fragments != 1 ||
+      fragment_no != 1) {
+    return false;
+  }
+
+  bool fill_ok = false;
+  const int fill_bits = parts[6].toInt(&fill_ok);
+  if (!fill_ok || fill_bits < 0 || fill_bits > 5) {
+    return false;
+  }
+  const QString sixbit_payload = parts[5];
+  if (sixbit_payload.isEmpty()) {
+    return false;
+  }
+
+  std::vector<int> bits;
+  bits.reserve(static_cast<size_t>(sixbit_payload.size()) * 6U);
+  for (QChar c : sixbit_payload) {
+    const int value = DecodeAisSixBitValue(c);
+    if (value < 0) {
+      return false;
+    }
+    for (int bit = 5; bit >= 0; --bit) {
+      bits.push_back((value >> bit) & 1);
+    }
+  }
+  if (fill_bits > static_cast<int>(bits.size())) {
+    return false;
+  }
+  if (fill_bits > 0) {
+    bits.resize(bits.size() - static_cast<size_t>(fill_bits));
+  }
+
+  out->bits = std::move(bits);
+  out->channel = parts[4].trimmed();
+  return !out->bits.empty();
+}
+
+QString NavigationStatusToString(uint32_t status) {
+  switch (status) {
+    case 0:
+      return "under_way";
+    case 1:
+      return "at_anchor";
+    case 2:
+      return "not_under_command";
+    case 3:
+      return "restricted_maneuverability";
+    case 4:
+      return "constrained_by_draught";
+    case 5:
+      return "moored";
+    case 6:
+      return "aground";
+    case 7:
+      return "fishing";
+    case 8:
+      return "under_way_sailing";
+    case 15:
+      return "not_defined";
+    default:
+      return QString("status_%1").arg(status);
+  }
+}
+
+QString BuildAisDecodedSummary(const QString& sentence, const QVariantMap& fields) {
+  ParsedAisNmeaSentence parsed;
+  if (!ParseAisNmeaSentence(sentence, &parsed)) {
+    return {};
+  }
+
+  auto field_text = [&fields](const QString& key) -> QString {
+    if (!fields.contains(key)) {
+      return {};
+    }
+    return fields.value(key).toString();
+  };
+
+  uint32_t message_type = 0;
+  bool type_ok = false;
+  const QString msg_type_text = field_text("msg_type");
+  if (!msg_type_text.isEmpty()) {
+    message_type = msg_type_text.toUInt(&type_ok);
+  }
+  if (!type_ok && !ReadUnsignedBits(parsed.bits, 0, 6, &message_type)) {
+    return {};
+  }
+
+  uint32_t mmsi = 0;
+  bool mmsi_ok = false;
+  const QString mmsi_text = field_text("mmsi");
+  if (!mmsi_text.isEmpty()) {
+    mmsi = mmsi_text.toUInt(&mmsi_ok);
+  }
+  if (!mmsi_ok) {
+    ReadUnsignedBits(parsed.bits, 8, 30, &mmsi);
+  }
+
+  QStringList summary_parts;
+  summary_parts << QString("type=%1").arg(message_type);
+  if (mmsi > 0) {
+    summary_parts << QString("mmsi=%1").arg(mmsi);
+  }
+  if (!parsed.channel.isEmpty()) {
+    summary_parts << QString("radio_ch=%1").arg(parsed.channel);
+  }
+
+  auto append_double = [&summary_parts](const QString& key, const std::optional<double>& value,
+                                        int precision) {
+    if (!value.has_value()) {
+      return;
+    }
+    summary_parts << QString("%1=%2").arg(key).arg(QString::number(*value, 'f', precision));
+  };
+  auto append_int = [&summary_parts](const QString& key, const std::optional<int>& value) {
+    if (!value.has_value()) {
+      return;
+    }
+    summary_parts << QString("%1=%2").arg(key).arg(*value);
+  };
+
+  if (message_type >= 1 && message_type <= 3) {
+    uint32_t nav_status = 0;
+    if (ReadUnsignedBits(parsed.bits, 38, 4, &nav_status)) {
+      summary_parts << QString("nav=%1").arg(NavigationStatusToString(nav_status));
+    }
+    append_double("sog_kn", DecodeTenths(parsed.bits, 50, 10, 1023), 1);
+    append_double("lon", DecodeLonDeg(parsed.bits, 61, 28), 5);
+    append_double("lat", DecodeLatDeg(parsed.bits, 89, 27), 5);
+    append_double("cog_deg", DecodeTenths(parsed.bits, 116, 12, 3600), 1);
+    append_int("hdg_deg", DecodeUnsignedMaybe(parsed.bits, 128, 9, 511));
+  } else if (message_type == 5) {
+    uint32_t imo = 0;
+    if (ReadUnsignedBits(parsed.bits, 40, 30, &imo) && imo > 0) {
+      summary_parts << QString("imo=%1").arg(imo);
+    }
+    const QString call_sign = DecodeAisSixBitText(parsed.bits, 70, 42);
+    if (!call_sign.isEmpty()) {
+      summary_parts << QString("callsign=%1").arg(call_sign);
+    }
+    const QString vessel_name = DecodeAisSixBitText(parsed.bits, 112, 120);
+    if (!vessel_name.isEmpty()) {
+      summary_parts << QString("name=%1").arg(vessel_name);
+    }
+    uint32_t ship_type = 0;
+    if (ReadUnsignedBits(parsed.bits, 232, 8, &ship_type) && ship_type > 0) {
+      summary_parts << QString("ship_type=%1").arg(ship_type);
+    }
+    uint32_t to_bow = 0;
+    uint32_t to_stern = 0;
+    uint32_t to_port = 0;
+    uint32_t to_starboard = 0;
+    if (ReadUnsignedBits(parsed.bits, 240, 9, &to_bow) &&
+        ReadUnsignedBits(parsed.bits, 249, 9, &to_stern) &&
+        ReadUnsignedBits(parsed.bits, 258, 6, &to_port) &&
+        ReadUnsignedBits(parsed.bits, 264, 6, &to_starboard)) {
+      summary_parts << QString("dim_m=%1/%2/%3/%4").arg(to_bow).arg(to_stern).arg(to_port).arg(to_starboard);
+    }
+    const QString destination = DecodeAisSixBitText(parsed.bits, 302, 120);
+    if (!destination.isEmpty()) {
+      summary_parts << QString("dest=%1").arg(destination);
+    }
+  } else if (message_type == 18) {
+    append_double("sog_kn", DecodeTenths(parsed.bits, 46, 10, 1023), 1);
+    append_double("lon", DecodeLonDeg(parsed.bits, 57, 28), 5);
+    append_double("lat", DecodeLatDeg(parsed.bits, 85, 27), 5);
+    append_double("cog_deg", DecodeTenths(parsed.bits, 112, 12, 3600), 1);
+    append_int("hdg_deg", DecodeUnsignedMaybe(parsed.bits, 124, 9, 511));
+  } else if (message_type == 19) {
+    append_double("sog_kn", DecodeTenths(parsed.bits, 46, 10, 1023), 1);
+    append_double("lon", DecodeLonDeg(parsed.bits, 57, 28), 5);
+    append_double("lat", DecodeLatDeg(parsed.bits, 85, 27), 5);
+    append_double("cog_deg", DecodeTenths(parsed.bits, 112, 12, 3600), 1);
+    append_int("hdg_deg", DecodeUnsignedMaybe(parsed.bits, 124, 9, 511));
+    const QString vessel_name = DecodeAisSixBitText(parsed.bits, 143, 120);
+    if (!vessel_name.isEmpty()) {
+      summary_parts << QString("name=%1").arg(vessel_name);
+    }
+    uint32_t ship_type = 0;
+    if (ReadUnsignedBits(parsed.bits, 263, 8, &ship_type) && ship_type > 0) {
+      summary_parts << QString("ship_type=%1").arg(ship_type);
+    }
+  } else if (message_type == 24) {
+    uint32_t part_no = 0;
+    if (ReadUnsignedBits(parsed.bits, 38, 2, &part_no)) {
+      summary_parts << QString("part=%1").arg(part_no);
+      if (part_no == 0) {
+        const QString vessel_name = DecodeAisSixBitText(parsed.bits, 40, 120);
+        if (!vessel_name.isEmpty()) {
+          summary_parts << QString("name=%1").arg(vessel_name);
+        }
+      } else if (part_no == 1) {
+        uint32_t ship_type = 0;
+        if (ReadUnsignedBits(parsed.bits, 40, 8, &ship_type) && ship_type > 0) {
+          summary_parts << QString("ship_type=%1").arg(ship_type);
+        }
+        const QString vendor = DecodeAisSixBitText(parsed.bits, 48, 42);
+        if (!vendor.isEmpty()) {
+          summary_parts << QString("vendor=%1").arg(vendor);
+        }
+        const QString call_sign = DecodeAisSixBitText(parsed.bits, 90, 42);
+        if (!call_sign.isEmpty()) {
+          summary_parts << QString("callsign=%1").arg(call_sign);
+        }
+      }
+    }
+  }
+
+  return summary_parts.join(" ");
 }
 
 }  // namespace
@@ -203,8 +559,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   signal_visualization_ = new SignalVisualizationWidget(central);
 
-  decoded_table_ = new QTableWidget(0, 5, central);
-  decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload"});
+  decoded_table_ = new QTableWidget(0, 6, central);
+  decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload", "Decoded"});
   decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
 
   event_log_ = new QPlainTextEdit(central);
@@ -395,6 +751,9 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   row.signal_type = signal_type;
   row.frequency_hz = frequency_hz;
   row.payload = payload;
+  if (signal_type == "SIGNAL_TYPE_AIS") {
+    row.decoded_summary = BuildAisDecodedSummary(payload, fields);
+  }
 
   auto field_text = [&fields](const QString& key) -> QString {
     if (!fields.contains(key)) {
@@ -521,6 +880,9 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   if (!channel.isEmpty()) {
     summary += QString(" ch=%1").arg(channel);
   }
+  if (!row.decoded_summary.isEmpty()) {
+    summary += QString(" decoded=%1").arg(row.decoded_summary);
+  }
   summary += QString(" payload=%1").arg(payload.left(96));
   AppendLog(summary);
 
@@ -625,6 +987,7 @@ void MainWindow::AddMessageRow(const MessageRow& row) {
   decoded_table_->setItem(current, 2, new QTableWidgetItem(row.signal_type));
   decoded_table_->setItem(current, 3, new QTableWidgetItem(QString::number(row.frequency_hz, 'f', 0)));
   decoded_table_->setItem(current, 4, new QTableWidgetItem(row.payload));
+  decoded_table_->setItem(current, 5, new QTableWidgetItem(row.decoded_summary));
 }
 
 bool MainWindow::PassesFilter(const MessageRow& row) const {
