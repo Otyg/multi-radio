@@ -80,6 +80,7 @@ class MainWindow : public QMainWindow {
   QCheckBox* ais_baud_trim_checkbox_ = nullptr;
 
   QComboBox* signal_filter_combo_ = nullptr;
+  QComboBox* spectrum_source_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
   QLabel* ais_autotune_indicator_ = nullptr;

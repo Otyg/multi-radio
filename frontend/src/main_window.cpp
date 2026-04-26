@@ -49,8 +49,14 @@ bool ParseSeries(const QString& value, std::vector<double>* out) {
 }
 
 bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, double* peak_strength,
-                                  std::vector<double>* waveform, std::vector<double>* spectrum) {
+                                  std::vector<double>* waveform, std::vector<double>* spectrum,
+                                  SignalVisualizationWidget::SpectrumSource* source,
+                                  double* frame_frequency_start_hz,
+                                  double* frame_frequency_end_hz) {
   if (peak_hz == nullptr || peak_strength == nullptr || waveform == nullptr || spectrum == nullptr) {
+    return false;
+  }
+  if (source == nullptr || frame_frequency_start_hz == nullptr || frame_frequency_end_hz == nullptr) {
     return false;
   }
   if (!message.startsWith("VIZ_FRAME ")) {
@@ -66,16 +72,33 @@ bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, doubl
   bool peak_strength_ok = false;
   bool waveform_ok = false;
   bool spectrum_ok = false;
+  bool frequency_start_ok = false;
+  bool frequency_end_ok = false;
   double parsed_peak_hz = 0.0;
   double parsed_peak_strength = 0.0;
+  double parsed_frequency_start_hz = 0.0;
+  double parsed_frequency_end_hz = 20000.0;
   std::vector<double> parsed_waveform;
   std::vector<double> parsed_spectrum;
+  SignalVisualizationWidget::SpectrumSource parsed_source =
+      SignalVisualizationWidget::SpectrumSource::kDemodulated;
   for (int i = 1; i < tokens.size(); ++i) {
     const QString token = tokens[i];
     if (token.startsWith("peak_hz=")) {
       parsed_peak_hz = token.mid(8).toDouble(&peak_hz_ok);
     } else if (token.startsWith("peak_strength=")) {
       parsed_peak_strength = token.mid(14).toDouble(&peak_strength_ok);
+    } else if (token.startsWith("source=")) {
+      const QString source_value = token.mid(7).trimmed().toLower();
+      if (source_value == "receiver") {
+        parsed_source = SignalVisualizationWidget::SpectrumSource::kReceiverInput;
+      } else {
+        parsed_source = SignalVisualizationWidget::SpectrumSource::kDemodulated;
+      }
+    } else if (token.startsWith("start_hz=")) {
+      parsed_frequency_start_hz = token.mid(9).toDouble(&frequency_start_ok);
+    } else if (token.startsWith("end_hz=")) {
+      parsed_frequency_end_hz = token.mid(7).toDouble(&frequency_end_ok);
     } else if (token.startsWith("waveform=")) {
       waveform_ok = ParseSeries(token.mid(9), &parsed_waveform);
     } else if (token.startsWith("spectrum=")) {
@@ -90,6 +113,14 @@ bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, doubl
   *peak_strength = std::clamp(parsed_peak_strength, 0.0, 1.0);
   *waveform = std::move(parsed_waveform);
   *spectrum = std::move(parsed_spectrum);
+  *source = parsed_source;
+  if (frequency_start_ok && frequency_end_ok && parsed_frequency_end_hz > parsed_frequency_start_hz) {
+    *frame_frequency_start_hz = parsed_frequency_start_hz;
+    *frame_frequency_end_hz = parsed_frequency_end_hz;
+  } else {
+    *frame_frequency_start_hz = 0.0;
+    *frame_frequency_end_hz = 20000.0;
+  }
   return true;
 }
 
@@ -535,6 +566,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   signal_filter_combo_->addItem("SIGNAL_TYPE_AIS");
   signal_filter_combo_->addItem("SIGNAL_TYPE_ADSB");
   signal_filter_combo_->addItem("SIGNAL_TYPE_DSC");
+  spectrum_source_combo_ = new QComboBox(filter_group);
+  spectrum_source_combo_->addItem("Demodulated", QVariant::fromValue(0));
+  spectrum_source_combo_->addItem("Receiver spectrum", QVariant::fromValue(1));
 
   receiver_filter_combo_ = new QComboBox(filter_group);
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
@@ -549,6 +583,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* visualization_settings_button = new QPushButton("Visualization settings...", filter_group);
 
   filter_layout->addRow("Signal", signal_filter_combo_);
+  filter_layout->addRow("Spectrum view", spectrum_source_combo_);
   filter_layout->addRow("Receiver", receiver_filter_combo_);
   filter_layout->addRow("Last minutes", minutes_filter_spin_);
   filter_layout->addRow("AIS autotune", ais_autotune_indicator_);
@@ -596,6 +631,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       AddMessageRow(row);
     }
     signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
+  });
+  connect(spectrum_source_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+    const int selected = spectrum_source_combo_->currentData().toInt();
+    const auto source =
+        (selected == 1) ? SignalVisualizationWidget::SpectrumSource::kReceiverInput
+                        : SignalVisualizationWidget::SpectrumSource::kDemodulated;
+    signal_visualization_->SetSpectrumSource(source);
+    AppendLog(QString("Visualization spectrum source: %1")
+                  .arg(source == SignalVisualizationWidget::SpectrumSource::kReceiverInput
+                           ? "receiver"
+                           : "demodulated"));
   });
   connect(minutes_filter_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
     decoded_table_->setRowCount(0);
@@ -728,10 +774,17 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
 
   double peak_hz = 0.0;
   double peak_strength = 0.0;
+  double frame_frequency_start_hz = 0.0;
+  double frame_frequency_end_hz = 20000.0;
   std::vector<double> waveform;
   std::vector<double> spectrum;
-  if (ParseVisualizationFrameEvent(message, &peak_hz, &peak_strength, &waveform, &spectrum)) {
-    signal_visualization_->PushVisualizationFrame(receiver_id, waveform, spectrum, peak_hz, peak_strength);
+  SignalVisualizationWidget::SpectrumSource source =
+      SignalVisualizationWidget::SpectrumSource::kDemodulated;
+  if (ParseVisualizationFrameEvent(message, &peak_hz, &peak_strength, &waveform, &spectrum, &source,
+                                   &frame_frequency_start_hz, &frame_frequency_end_hz)) {
+    signal_visualization_->PushVisualizationFrame(receiver_id, waveform, spectrum, peak_hz, peak_strength,
+                                                  source, frame_frequency_start_hz,
+                                                  frame_frequency_end_hz);
     return;
   }
 

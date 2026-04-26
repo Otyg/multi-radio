@@ -18,17 +18,25 @@ class SignalVisualizationWidget : public QWidget {
   Q_OBJECT
 
  public:
+  enum class SpectrumSource {
+    kDemodulated = 0,
+    kReceiverInput = 1,
+  };
+
   explicit SignalVisualizationWidget(QWidget* parent = nullptr);
 
   void SetKnownReceivers(const std::vector<uint32_t>& receiver_ids);
   void SetReceiverFilter(int receiver_filter_id);
   void SetVisualizationSettings(int fft_size, double frequency_start_hz, double frequency_end_hz);
+  void SetSpectrumSource(SpectrumSource source);
+  SpectrumSource CurrentSpectrumSource() const;
   int FftSize() const;
   double FrequencyStartHz() const;
   double FrequencyEndHz() const;
   void PushVisualizationFrame(uint32_t receiver_id, const std::vector<double>& waveform,
-                              const std::vector<double>& spectrum, double peak_frequency_hz,
-                              double peak_intensity);
+                              const std::vector<double>& spectrum, double peak_frequency_hz, double peak_intensity,
+                              SpectrumSource source, double frame_frequency_start_hz,
+                              double frame_frequency_end_hz);
   void PushSample(uint32_t receiver_id, double frequency_hz, double intensity);
 
  protected:
@@ -38,6 +46,16 @@ class SignalVisualizationWidget : public QWidget {
   void OnFrameTick();
 
  private:
+  struct DisplayState {
+    QVector<double> waveform;
+    QVector<double> spectrum;
+    QVector<QVector<double>> spectrogram_rows;
+    QVector<QVector<double>> waterfall_rows;
+    double signal_level = 0.0;
+    double signal_peak_hold = 0.0;
+    double frequency_start_hz = 0.0;
+    double frequency_end_hz = 20000.0;
+  };
   struct ReceiverState {
     QVector<double> waveform;
     QVector<double> spectrum;
@@ -46,6 +64,12 @@ class SignalVisualizationWidget : public QWidget {
     double last_frequency_hz = 0.0;
     double signal_level = 0.0;
     double signal_peak_hold = 0.0;
+    QVector<double> receiver_spectrum;
+    QVector<QVector<double>> receiver_spectrogram_rows;
+    QVector<QVector<double>> receiver_waterfall_rows;
+    double receiver_frequency_start_hz = 0.0;
+    double receiver_frequency_end_hz = 20000.0;
+    bool receiver_frequency_range_valid = false;
   };
 
   void EnsureState(ReceiverState* state) const;
@@ -64,12 +88,15 @@ class SignalVisualizationWidget : public QWidget {
                           bool newest_at_top, bool rainbow_colors);
 
   bool RequireExplicitSelection() const;
-  ReceiverState BuildDisplayState() const;
+  DisplayState BuildDisplayState() const;
 
   void BlendSampleIntoState(ReceiverState* state, double frequency_hz, double intensity);
   void BlendFrameIntoState(ReceiverState* state, const std::vector<double>& waveform,
                            const std::vector<double>& spectrum, double peak_frequency_hz,
                            double peak_intensity);
+  void BlendReceiverSpectrumIntoState(ReceiverState* state, const std::vector<double>& spectrum,
+                                      double peak_frequency_hz, double peak_intensity,
+                                      double frame_frequency_start_hz, double frame_frequency_end_hz);
   void DecayState(ReceiverState* state, double decay_factor);
 
   QHash<uint32_t, ReceiverState> states_;
@@ -79,6 +106,7 @@ class SignalVisualizationWidget : public QWidget {
   int spectrum_bins_ = 128;
   double frequency_start_hz_ = 0.0;
   double frequency_end_hz_ = 20000.0;
+  SpectrumSource spectrum_source_ = SpectrumSource::kDemodulated;
   QTimer frame_timer_;
 };
 

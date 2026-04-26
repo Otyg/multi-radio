@@ -212,6 +212,99 @@ bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* 
   return true;
 }
 
+bool BuildReceiverSpectrumFrame(const IQSampleBlock& iq, double tuned_frequency_hz,
+                                uint32_t channel_bandwidth_hz, std::vector<double>* waveform,
+                                std::vector<double>* spectrum, double* peak_hz, double* peak_strength,
+                                double* start_hz, double* end_hz) {
+  if (waveform == nullptr || spectrum == nullptr || peak_hz == nullptr || peak_strength == nullptr ||
+      start_hz == nullptr || end_hz == nullptr) {
+    return false;
+  }
+  if (iq.sample_rate_hz == 0 || iq.interleaved_iq.size() < 4) {
+    return false;
+  }
+
+  const size_t available_samples = iq.interleaved_iq.size() / 2;
+  const size_t sample_count = std::min(available_samples, static_cast<size_t>(4096));
+  if (sample_count < 64) {
+    return false;
+  }
+
+  const double sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
+  double half_span_hz = channel_bandwidth_hz > 0 ? static_cast<double>(channel_bandwidth_hz)
+                                                  : sample_rate_hz * 0.5;
+  half_span_hz = std::clamp(half_span_hz, 1000.0, std::max(1000.0, sample_rate_hz * 0.5 - 1.0));
+  const double min_offset_hz = -half_span_hz;
+  const double max_offset_hz = half_span_hz;
+  *start_hz = tuned_frequency_hz + min_offset_hz;
+  *end_hz = tuned_frequency_hz + max_offset_hz;
+
+  spectrum->assign(kSpectrumBins, 0.0);
+  double max_power = 0.0;
+  int peak_bin = 0;
+  for (int bin = 0; bin < kSpectrumBins; ++bin) {
+    const double t = (kSpectrumBins <= 1) ? 0.0
+                                          : static_cast<double>(bin) /
+                                                static_cast<double>(kSpectrumBins - 1);
+    const double candidate_offset_hz = min_offset_hz + t * (max_offset_hz - min_offset_hz);
+    const double omega = 2.0 * kPi * candidate_offset_hz / sample_rate_hz;
+    const double cos_step = std::cos(omega);
+    const double sin_step = std::sin(omega);
+    double osc_i = 1.0;
+    double osc_q = 0.0;
+    double sum_re = 0.0;
+    double sum_im = 0.0;
+    for (size_t n = 0; n < sample_count; ++n) {
+      const double in_i = static_cast<double>(iq.interleaved_iq[n * 2]);
+      const double in_q = static_cast<double>(iq.interleaved_iq[n * 2 + 1]);
+      sum_re += in_i * osc_i + in_q * osc_q;
+      sum_im += in_q * osc_i - in_i * osc_q;
+      const double next_osc_i = osc_i * cos_step - osc_q * sin_step;
+      const double next_osc_q = osc_i * sin_step + osc_q * cos_step;
+      osc_i = next_osc_i;
+      osc_q = next_osc_q;
+    }
+    const double power = sum_re * sum_re + sum_im * sum_im;
+    (*spectrum)[static_cast<size_t>(bin)] = std::max(0.0, power);
+    if (power > max_power) {
+      max_power = power;
+      peak_bin = bin;
+    }
+  }
+
+  if (max_power <= 0.0) {
+    return false;
+  }
+  for (double& value : *spectrum) {
+    value = std::clamp(value / max_power, 0.0, 1.0);
+  }
+
+  const double peak_t = (kSpectrumBins <= 1) ? 0.0
+                                             : static_cast<double>(peak_bin) /
+                                                   static_cast<double>(kSpectrumBins - 1);
+  const double peak_offset_hz = min_offset_hz + peak_t * (max_offset_hz - min_offset_hz);
+  *peak_hz = tuned_frequency_hz + peak_offset_hz;
+  *peak_strength = (*spectrum)[static_cast<size_t>(peak_bin)];
+
+  waveform->assign(kWaveformPoints, 0.5);
+  double max_magnitude = 0.0;
+  for (size_t n = 0; n < sample_count; ++n) {
+    const double in_i = static_cast<double>(iq.interleaved_iq[n * 2]);
+    const double in_q = static_cast<double>(iq.interleaved_iq[n * 2 + 1]);
+    max_magnitude = std::max(max_magnitude, std::sqrt(in_i * in_i + in_q * in_q));
+  }
+  const double normalize = max_magnitude > 1e-6 ? max_magnitude : 1.0;
+  for (int i = 0; i < kWaveformPoints; ++i) {
+    const size_t idx = static_cast<size_t>((static_cast<double>(i) * (sample_count - 1)) /
+                                           static_cast<double>(kWaveformPoints - 1));
+    const double in_i = static_cast<double>(iq.interleaved_iq[idx * 2]);
+    const double in_q = static_cast<double>(iq.interleaved_iq[idx * 2 + 1]);
+    const double magnitude = std::sqrt(in_i * in_i + in_q * in_q) / normalize;
+    (*waveform)[static_cast<size_t>(i)] = std::clamp(magnitude, 0.0, 1.0);
+  }
+  return true;
+}
+
 }  // namespace
 
 ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
@@ -423,6 +516,17 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
+      double receiver_peak_hz = 0.0;
+      double receiver_peak_strength = 0.0;
+      double receiver_start_hz = 0.0;
+      double receiver_end_hz = 0.0;
+      std::vector<double> receiver_waveform;
+      std::vector<double> receiver_spectrum;
+      const bool have_receiver_frame =
+          BuildReceiverSpectrumFrame(iq, tuned_frequency_hz, channel_bandwidth_hz, &receiver_waveform,
+                                     &receiver_spectrum, &receiver_peak_hz, &receiver_peak_strength,
+                                     &receiver_start_hz, &receiver_end_hz);
+
       iq.ais_autotune_enabled = ais_autotune_enabled;
       iq.ais_baud_trim_enabled = ais_baud_trim_enabled;
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
@@ -451,13 +555,30 @@ void ReceiverWorker::RunLoop() {
       });
 
       const auto now = std::chrono::steady_clock::now();
-      if (have_demod_frame && now >= next_viz_emit) {
-        std::ostringstream viz_message;
-        viz_message << "VIZ_FRAME peak_hz=" << FormatDouble(demod_peak_hz, 1)
-                    << " peak_strength=" << FormatDouble(demod_peak_strength, 3)
-                    << " waveform=" << FormatSeries(demod_waveform, 4)
-                    << " spectrum=" << FormatSeries(demod_spectrum, 4);
-        PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+      if (now >= next_viz_emit) {
+        if (have_demod_frame) {
+          const double demod_start_hz = 0.0;
+          const double demod_end_hz =
+              std::max(1.0, std::min(20000.0, static_cast<double>(iq.sample_rate_hz) * 0.5 - 1.0));
+          std::ostringstream viz_message;
+          viz_message << "VIZ_FRAME source=demod start_hz=" << FormatDouble(demod_start_hz, 1)
+                      << " end_hz=" << FormatDouble(demod_end_hz, 1)
+                      << " peak_hz=" << FormatDouble(demod_peak_hz, 1)
+                      << " peak_strength=" << FormatDouble(demod_peak_strength, 3)
+                      << " waveform=" << FormatSeries(demod_waveform, 4)
+                      << " spectrum=" << FormatSeries(demod_spectrum, 4);
+          PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+        }
+        if (have_receiver_frame) {
+          std::ostringstream viz_message;
+          viz_message << "VIZ_FRAME source=receiver start_hz=" << FormatDouble(receiver_start_hz, 1)
+                      << " end_hz=" << FormatDouble(receiver_end_hz, 1)
+                      << " peak_hz=" << FormatDouble(receiver_peak_hz, 1)
+                      << " peak_strength=" << FormatDouble(receiver_peak_strength, 3)
+                      << " waveform=" << FormatSeries(receiver_waveform, 4)
+                      << " spectrum=" << FormatSeries(receiver_spectrum, 4);
+          PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+        }
         next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
       }
     }
