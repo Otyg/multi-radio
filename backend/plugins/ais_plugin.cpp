@@ -838,13 +838,27 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   }
 
   ChannelAutotuneState* autotune_state = on_ais1 ? &g_autotune_ais1 : &g_autotune_ais2;
+  const bool autotune_enabled = (iq_view->ais_autotune_enabled != 0);
+  const bool baud_tracking = (iq_view->ais_baud_trim_enabled != 0);
   const uint64_t crc_ok_channel_now =
       on_ais1 ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
               : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
   const uint64_t crc_fail_channel_now =
       on_ais1 ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
               : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
-  AdvanceAutotune(autotune_state, crc_ok_channel_now, crc_fail_channel_now);
+  if (autotune_enabled) {
+    AdvanceAutotune(autotune_state, crc_ok_channel_now, crc_fail_channel_now);
+  } else {
+    // Explicit manual mode: no hidden profile/AFC state carries over while disabled.
+    autotune_state->initialized = false;
+    autotune_state->locked = false;
+    autotune_state->active_profile = 0;
+    autotune_state->afc_offset_rad = 0.0;
+    autotune_state->afc_blocks_since_update = 0;
+    autotune_state->afc_mean_acc = 0.0;
+    autotune_state->afc_mean_count = 0;
+    autotune_state->scores = {};
+  }
 
   const size_t profile_idx = std::min(autotune_state->active_profile, kAutotuneProfiles.size() - 1);
   const AutotuneProfile& profile = kAutotuneProfiles[profile_idx];
@@ -855,7 +869,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   }
   block_mean /= static_cast<double>(discriminator_raw.size());
 
-  const bool afc_tracking = !autotune_state->locked;
+  const bool afc_tracking = autotune_enabled && !autotune_state->locked;
   const double alpha = afc_tracking ? std::clamp(profile.afc_alpha, 0.0, 1.0) : 0.0;
   bool afc_updated_this_block = false;
   if (afc_tracking) {
@@ -887,7 +901,13 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
 
   autotune_state->baud_estimate_hz =
       std::clamp(autotune_state->baud_estimate_hz, kMinBaudRate, kMaxBaudRate);
-  const bool baud_tracking = true;
+  if (!baud_tracking) {
+    // Explicit manual mode: keep nominal AIS symbol rate when trim is disabled.
+    autotune_state->baud_estimate_hz = kSymbolRate;
+    autotune_state->baud_blocks_since_update = 0;
+    autotune_state->baud_mean_acc = 0.0;
+    autotune_state->baud_mean_count = 0;
+  }
   const double timing_resampled_rate =
       autotune_state->baud_estimate_hz * static_cast<double>(kTimingSamplesPerSymbol);
   const double legacy_resampled_rate =
@@ -1012,10 +1032,17 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
 
   const uint64_t blocks = g_metric_blocks.load(std::memory_order_relaxed);
   if ((blocks % kMetricReportEveryBlocks) == 0) {
+    std::string decode_mode = "continuous_gmsk_gardner";
+    if (autotune_enabled) {
+      decode_mode += "_afc";
+    }
+    if (baud_tracking) {
+      decode_mode += "_baudtrim";
+    }
     std::ostringstream metrics_json;
     metrics_json << "{\"kind\":\"metric\""
                  << ",\"channel\":\"" << (on_ais1 ? "AIS1" : "AIS2") << "\""
-                 << ",\"metric_decode_mode\":\"continuous_gmsk_gardner_afc\""
+                 << ",\"metric_decode_mode\":\"" << decode_mode << "\""
                  << ",\"metric_blocks\":\"" << blocks << "\""
                  << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_candidates\":\"" << g_metric_candidates.load(std::memory_order_relaxed) << "\""
@@ -1049,6 +1076,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_timing_symbols\":\"" << timing.symbol_samples.size() << "\""
                  << ",\"metric_timing_avg_abs_error\":\"" << timing.avg_abs_error << "\""
                  << ",\"metric_timing_lock\":\"" << (timing_ready ? "1" : "0") << "\""
+                 << ",\"metric_autotune_enabled\":\"" << (autotune_enabled ? "1" : "0") << "\""
                  << ",\"metric_autotune_profile\":\"" << profile_idx << "\""
                  << ",\"metric_autotune_profile_name\":\"" << profile.name << "\""
                  << ",\"metric_autotune_locked\":\"" << (autotune_state->locked ? "1" : "0") << "\""
@@ -1091,7 +1119,7 @@ void Shutdown() {
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.10.0",
+    .plugin_version = "0.11.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -74,6 +75,8 @@ class MainWindow : public QMainWindow {
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;
   QSpinBox* hardware_bandwidth_spin_ = nullptr;
+  QCheckBox* ais_autotune_checkbox_ = nullptr;
+  QCheckBox* ais_baud_trim_checkbox_ = nullptr;
 
   QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;

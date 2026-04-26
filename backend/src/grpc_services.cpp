@@ -84,6 +84,8 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.sample_rate_hz = config.sample_rate_hz();
   out.channel_bandwidth_hz = config.channel_bandwidth_hz();
   out.hardware_bandwidth_hz = config.hardware_bandwidth_hz();
+  out.ais_autotune_enabled = config.ais_autotune_enabled();
+  out.ais_baud_trim_enabled = config.ais_baud_trim_enabled();
   return out;
 }
 
@@ -96,6 +98,8 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_sample_rate_hz(config.sample_rate_hz);
   out->set_channel_bandwidth_hz(config.channel_bandwidth_hz);
   out->set_hardware_bandwidth_hz(config.hardware_bandwidth_hz);
+  out->set_ais_autotune_enabled(config.ais_autotune_enabled);
+  out->set_ais_baud_trim_enabled(config.ais_baud_trim_enabled);
   out->clear_frequency_list_hz();
   for (double frequency : config.frequency_list_hz) {
     out->add_frequency_list_hz(frequency);

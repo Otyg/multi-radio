@@ -140,6 +140,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   hardware_bandwidth_spin_->setValue(0);
   hardware_bandwidth_spin_->setSuffix(" Hz");
   hardware_bandwidth_spin_->setSpecialValueText("Auto");
+  ais_autotune_checkbox_ = new QCheckBox("Enabled", control_group);
+  ais_autotune_checkbox_->setChecked(true);
+  ais_baud_trim_checkbox_ = new QCheckBox("Enabled", control_group);
+  ais_baud_trim_checkbox_->setChecked(true);
 
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
@@ -164,6 +168,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   control_layout->addRow("Sample rate", sample_rate_spin_);
   control_layout->addRow("Channel bandwidth", channel_bandwidth_spin_);
   control_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
+  control_layout->addRow("AIS autotune", ais_autotune_checkbox_);
+  control_layout->addRow("AIS baud trim", ais_baud_trim_checkbox_);
   control_layout->addRow(button_row);
 
   auto* filter_group = new QGroupBox("Message Filters", central);
@@ -336,6 +342,8 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
   config.set_channel_bandwidth_hz(static_cast<uint32_t>(channel_bandwidth_spin_->value()));
   config.set_hardware_bandwidth_hz(static_cast<uint32_t>(hardware_bandwidth_spin_->value()));
+  config.set_ais_autotune_enabled(ais_autotune_checkbox_->isChecked());
+  config.set_ais_baud_trim_enabled(ais_baud_trim_checkbox_->isChecked());
 
   const auto list_tokens = list_frequencies_edit_->text().split(',', Qt::SkipEmptyParts);
   for (const auto& token : list_tokens) {
@@ -347,11 +355,13 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz)")
+  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, autotune=%5, baud-trim=%6)")
                 .arg(receiver_id)
                 .arg(sample_rate_spin_->value())
                 .arg(channel_bandwidth_spin_->value())
-                .arg(hardware_bandwidth_spin_->value()));
+                .arg(hardware_bandwidth_spin_->value())
+                .arg(ais_autotune_checkbox_->isChecked() ? "on" : "off")
+                .arg(ais_baud_trim_checkbox_->isChecked() ? "on" : "off"));
 }
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
@@ -395,29 +405,39 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString kind = field_text("kind");
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
+    const QString autotune_enabled = field_text("metric_autotune_enabled");
     const QString profile_name = field_text("metric_autotune_profile_name");
     const QString locked = field_text("metric_autotune_locked");
     const QString afc_tracking = field_text("metric_afc_tracking");
     const QString channel = field_text("channel");
+    const bool autotune_is_enabled = (autotune_enabled != "0");
     if (ais_autotune_indicator_ != nullptr) {
-      const bool is_locked = (locked == "1");
-      const bool afc_is_tracking = (afc_tracking == "1");
-      const QString status = is_locked ? "profile locked" : "probing";
-      const QString afc_mode = afc_is_tracking ? "AFC track" : "AFC hold";
-      ais_autotune_indicator_->setText(
-          QString("AUTOTUNE: %1, %2 (%3, %4)")
-              .arg(status)
-              .arg(afc_mode)
-              .arg(profile_name.isEmpty() ? "n/a" : profile_name)
-              .arg(channel.isEmpty() ? "n/a" : channel));
-      if (is_locked) {
+      if (!autotune_is_enabled) {
+        ais_autotune_indicator_->setText(
+            QString("AUTOTUNE: disabled (%1)").arg(channel.isEmpty() ? "n/a" : channel));
         ais_autotune_indicator_->setStyleSheet(
-            "QLabel { font-weight: 600; color: #215732; background: #e8f6ec; border: 1px solid #9fd5ad; "
+            "QLabel { font-weight: 600; color: #444; background: #efefef; border: 1px solid #c9c9c9; "
             "padding: 4px 8px; border-radius: 4px; }");
       } else {
-        ais_autotune_indicator_->setStyleSheet(
-            "QLabel { font-weight: 600; color: #8a6d3b; background: #fcf8e3; border: 1px solid #f1da9a; "
-            "padding: 4px 8px; border-radius: 4px; }");
+        const bool is_locked = (locked == "1");
+        const bool afc_is_tracking = (afc_tracking == "1");
+        const QString status = is_locked ? "profile locked" : "probing";
+        const QString afc_mode = afc_is_tracking ? "AFC track" : "AFC hold";
+        ais_autotune_indicator_->setText(
+            QString("AUTOTUNE: %1, %2 (%3, %4)")
+                .arg(status)
+                .arg(afc_mode)
+                .arg(profile_name.isEmpty() ? "n/a" : profile_name)
+                .arg(channel.isEmpty() ? "n/a" : channel));
+        if (is_locked) {
+          ais_autotune_indicator_->setStyleSheet(
+              "QLabel { font-weight: 600; color: #215732; background: #e8f6ec; border: 1px solid #9fd5ad; "
+              "padding: 4px 8px; border-radius: 4px; }");
+        } else {
+          ais_autotune_indicator_->setStyleSheet(
+              "QLabel { font-weight: 600; color: #8a6d3b; background: #fcf8e3; border: 1px solid #f1da9a; "
+              "padding: 4px 8px; border-radius: 4px; }");
+        }
       }
     }
     auto parse_u64 = [&field_text](const QString& key, quint64 fallback = 0) -> quint64 {
@@ -431,7 +451,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     const quint64 crc_fail_total =
         parse_u64("metric_crc_fail_channel", parse_u64("metric_crc_fail", 0));
     const quint64 emitted_total = parse_u64("metric_emitted", 0);
-    const bool is_locked = (locked == "1");
+    const bool is_locked = autotune_is_enabled && (locked == "1");
     const quint64 interval_ms = is_locked ? 10000 : 30000;
 
     AisCrcSummaryState& summary = ais_crc_summary_by_channel_[channel_key];
@@ -450,12 +470,13 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                                : static_cast<double>(crc_ok_total) /
                                      static_cast<double>(crc_ok_total + crc_fail_total);
 
-      AppendLog(QString("[%1] RX%2 AIS CRC summary ch=%3 auto=%4/%5 afc=%6 offset=%7Hz baud=%8Hz(track=%9) path=%10 ok=%11 (+%12) fail=%13 (+%14) emitted=%15 (+%16) ok_ratio=%17")
+      AppendLog(QString("[%1] RX%2 AIS CRC summary ch=%3 auto=%4/%5/%6 afc=%7 offset=%8Hz baud=%9Hz(track=%10) path=%11 ok=%12 (+%13) fail=%14 (+%15) emitted=%16 (+%17) ok_ratio=%18")
                     .arg(ToLocalTime(unix_ms))
                     .arg(receiver_id)
                     .arg(channel_key)
+                    .arg(autotune_is_enabled ? "on" : "off")
                     .arg(profile_name.isEmpty() ? "n/a" : profile_name)
-                    .arg(locked == "1" ? "locked" : "probing")
+                    .arg(autotune_is_enabled ? (locked == "1" ? "locked" : "probing") : "manual")
                     .arg(afc_tracking == "1" ? "track" : "hold")
                     .arg(field_text("metric_afc_offset_hz"))
                     .arg(field_text("metric_baud_estimate_hz"))

@@ -230,6 +230,8 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
   mode_config_.sample_rate_hz = kDefaultSampleRateHz;
   mode_config_.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
   mode_config_.hardware_bandwidth_hz = 0;
+  mode_config_.ais_autotune_enabled = true;
+  mode_config_.ais_baud_trim_enabled = true;
   mode_config_ = NormalizeModeConfig(mode_config_);
   scheduler_.Configure(mode_, mode_config_);
 }
@@ -334,6 +336,8 @@ void ReceiverWorker::RunLoop() {
     uint32_t desired_sample_rate_hz = kDefaultSampleRateHz;
     uint32_t channel_bandwidth_hz = kDefaultChannelBandwidthHz;
     uint32_t desired_hardware_bandwidth_hz = 0;
+    bool ais_autotune_enabled = true;
+    bool ais_baud_trim_enabled = true;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode_config_ = NormalizeModeConfig(mode_config_);
@@ -342,6 +346,8 @@ void ReceiverWorker::RunLoop() {
       desired_sample_rate_hz = mode_config_.sample_rate_hz;
       channel_bandwidth_hz = mode_config_.channel_bandwidth_hz;
       desired_hardware_bandwidth_hz = mode_config_.hardware_bandwidth_hz;
+      ais_autotune_enabled = mode_config_.ais_autotune_enabled;
+      ais_baud_trim_enabled = mode_config_.ais_baud_trim_enabled;
     }
 
     std::string error;
@@ -417,6 +423,8 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
+      iq.ais_autotune_enabled = ais_autotune_enabled;
+      iq.ais_baud_trim_enabled = ais_baud_trim_enabled;
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
 
       double demod_peak_hz = 0.0;
