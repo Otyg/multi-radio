@@ -230,8 +230,8 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
   mode_config_.sample_rate_hz = kDefaultSampleRateHz;
   mode_config_.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
   mode_config_.hardware_bandwidth_hz = 0;
-  mode_config_.ais_autotune_enabled = true;
-  mode_config_.ais_baud_trim_enabled = true;
+  mode_config_.ais_autotune_enabled = false;
+  mode_config_.ais_baud_trim_enabled = false;
   mode_config_ = NormalizeModeConfig(mode_config_);
   scheduler_.Configure(mode_, mode_config_);
 }
@@ -336,8 +336,8 @@ void ReceiverWorker::RunLoop() {
     uint32_t desired_sample_rate_hz = kDefaultSampleRateHz;
     uint32_t channel_bandwidth_hz = kDefaultChannelBandwidthHz;
     uint32_t desired_hardware_bandwidth_hz = 0;
-    bool ais_autotune_enabled = true;
-    bool ais_baud_trim_enabled = true;
+    bool ais_autotune_enabled = false;
+    bool ais_baud_trim_enabled = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode_config_ = NormalizeModeConfig(mode_config_);

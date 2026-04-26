@@ -388,7 +388,7 @@ ServerApp::ServerApp(ServerConfig config)
       event_bus_(std::make_shared<EventBus>()),
       logger_(std::make_shared<JsonlLogger>(config_.log_dir, "radio_events", config_.log_max_bytes,
                                             config_.log_max_files)),
-      plugin_host_(std::make_shared<PluginHost>(config_.plugin_dir)) {}
+      plugin_host_(std::make_shared<PluginHost>(config_.plugin_dir, config_.log_dir / "plugin_state")) {}
 
 ServerApp::~ServerApp() { Shutdown(); }
 

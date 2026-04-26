@@ -15,6 +15,8 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
 - Event + decoded message telemetry streaming.
 - In-memory event bus and rotating JSONL log persistence.
 - Qt6 client (receiver control + live table/log with filters by signal/receiver/time).
+- AIS decoder warm-start persistence (shared AFC bootstrap + profile lock) saved under
+  `MR_LOG_DIR/plugin_state/ais_warm_start_state.v1` to reduce startup warmup.
 
 ## Repository structure
 

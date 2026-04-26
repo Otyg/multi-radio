@@ -23,7 +23,7 @@ class PluginHost {
  public:
   using MessageCallback = std::function<void(const PluginMessage&)>;
 
-  explicit PluginHost(std::filesystem::path plugin_dir);
+  explicit PluginHost(std::filesystem::path plugin_dir, std::filesystem::path state_dir = {});
   ~PluginHost();
 
   bool LoadAll(std::string* error);
@@ -48,6 +48,7 @@ class PluginHost {
   const LoadedPlugin* FindPluginByName(const std::string& name) const;
 
   std::filesystem::path plugin_dir_;
+  std::filesystem::path state_dir_;
   mutable std::mutex mu_;
   std::vector<LoadedPlugin> plugins_;
 };

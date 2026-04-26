@@ -497,9 +497,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   hardware_bandwidth_spin_->setSuffix(" Hz");
   hardware_bandwidth_spin_->setSpecialValueText("Auto");
   ais_autotune_checkbox_ = new QCheckBox("Enabled", control_group);
-  ais_autotune_checkbox_->setChecked(true);
+  ais_autotune_checkbox_->setChecked(false);
   ais_baud_trim_checkbox_ = new QCheckBox("Enabled", control_group);
-  ais_baud_trim_checkbox_->setChecked(true);
+  ais_baud_trim_checkbox_->setChecked(false);
 
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);

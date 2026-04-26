@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <sstream>
+#include <string_view>
 
 namespace multi_radio {
 
@@ -57,13 +59,52 @@ std::map<std::string, std::string> ParseFlatJsonMap(const std::string& json) {
   return out;
 }
 
+std::string JsonEscape(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size() + 16);
+  for (char c : value) {
+    switch (c) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        escaped.push_back(c);
+        break;
+    }
+  }
+  return escaped;
+}
+
+std::string BuildInitConfigJson(const std::filesystem::path& state_dir, const std::string& plugin_name) {
+  std::ostringstream json;
+  json << "{\"plugin_name\":\"" << JsonEscape(plugin_name) << "\"";
+  if (!state_dir.empty()) {
+    json << ",\"state_dir\":\"" << JsonEscape(state_dir.string()) << "\"";
+  }
+  json << "}";
+  return json.str();
+}
+
 struct EmitContext {
   PluginHost::MessageCallback callback;
 };
 
 }  // namespace
 
-PluginHost::PluginHost(std::filesystem::path plugin_dir) : plugin_dir_(std::move(plugin_dir)) {}
+PluginHost::PluginHost(std::filesystem::path plugin_dir, std::filesystem::path state_dir)
+    : plugin_dir_(std::move(plugin_dir)), state_dir_(std::move(state_dir)) {}
 
 PluginHost::~PluginHost() {
   std::lock_guard<std::mutex> lock(mu_);
@@ -131,7 +172,10 @@ bool PluginHost::LoadAll(std::string* error) {
     }
 
     if (descriptor->init != nullptr) {
-      const int rc = descriptor->init("{}");
+      const std::string init_json = BuildInitConfigJson(state_dir_, descriptor->plugin_name == nullptr
+                                                                        ? std::string("unknown")
+                                                                        : std::string(descriptor->plugin_name));
+      const int rc = descriptor->init(init_json.c_str());
       if (rc != 0) {
         dlclose(handle);
         if (error != nullptr) {
