@@ -9,7 +9,7 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
   - `FIXED`
   - `SCAN_RANGE`
   - `SCAN_LIST`
-  - `AIR_MARINE_PLOT` (AIS1 `161.975 MHz`, AIS2 `162.025 MHz`, DSC `156.525 MHz`, ADS-B `1090 MHz`)
+  - `AIR_MARINE_PLOT` (center tune `162.000 MHz`, dual-channelized AIS1/AIS2 decode)
 - Multiple simultaneous receivers (one worker thread per receiver).
 - In-process plugin system (`.so`) with C ABI + API version check.
 - Event + decoded message telemetry streaming.

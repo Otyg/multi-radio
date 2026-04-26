@@ -45,9 +45,9 @@ int main() {
     ModeConfig config;
     scheduler.Configure(RadioMode::kAirMarinePlot, config);
 
-    assert(Eq(scheduler.NextFrequencyHz().value(), 161975000.0));
-    assert(Eq(scheduler.NextFrequencyHz().value(), 162025000.0));
-    assert(Eq(scheduler.NextFrequencyHz().value(), 161975000.0));
+    assert(Eq(scheduler.NextFrequencyHz().value(), 162000000.0));
+    assert(Eq(scheduler.NextFrequencyHz().value(), 162000000.0));
+    assert(Eq(scheduler.NextFrequencyHz().value(), 162000000.0));
   }
 
   return 0;

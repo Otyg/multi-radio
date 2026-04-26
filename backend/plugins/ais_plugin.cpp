@@ -20,7 +20,10 @@ namespace {
 
 constexpr uint32_t kAis1Hz = 161975000;
 constexpr uint32_t kAis2Hz = 162025000;
+constexpr uint32_t kAisMidHz = (kAis1Hz + kAis2Hz) / 2U;
+constexpr double kAisHalfSeparationHz = static_cast<double>(kAis2Hz - kAis1Hz) * 0.5;
 constexpr uint32_t kChannelToleranceHz = 2500;
+constexpr double kChannelMixLpfCutoffHz = 14000.0;
 constexpr double kSymbolRate = 9600.0;
 constexpr double kGmskModulationIndex = 0.5;
 constexpr double kGmskBt = 0.4;
@@ -507,6 +510,72 @@ std::vector<double> BuildFmDiscriminator(const multi_radio_iq_view* iq_view) {
 
     prev_i = cur_i;
     prev_q = cur_q;
+  }
+
+  return out;
+}
+
+std::vector<double> BuildFmDiscriminatorShifted(const multi_radio_iq_view* iq_view,
+                                                double target_offset_hz, double cutoff_hz) {
+  std::vector<double> out;
+  if (iq_view == nullptr || iq_view->interleaved_iq == nullptr || iq_view->sample_count < 2 ||
+      iq_view->sample_rate_hz == 0) {
+    return out;
+  }
+
+  const double sample_rate_hz = static_cast<double>(iq_view->sample_rate_hz);
+  const double normalized_cutoff =
+      std::clamp(cutoff_hz, 1.0, std::max(2.0, sample_rate_hz * 0.5 - 1.0));
+  const double alpha = std::clamp(
+      1.0 - std::exp((-2.0 * kPi * normalized_cutoff) / sample_rate_hz), 0.0001, 1.0);
+
+  const double phase_step = (-2.0 * kPi * target_offset_hz) / sample_rate_hz;
+  const double rot_cos = std::cos(phase_step);
+  const double rot_sin = std::sin(phase_step);
+  double osc_i = 1.0;
+  double osc_q = 0.0;
+
+  out.reserve(iq_view->sample_count - 1);
+
+  bool lpf_init = false;
+  double lpf_i = 0.0;
+  double lpf_q = 0.0;
+  bool have_prev = false;
+  double prev_i = 0.0;
+  double prev_q = 0.0;
+  for (size_t n = 0; n < iq_view->sample_count; ++n) {
+    const double in_i = static_cast<double>(iq_view->interleaved_iq[n * 2]);
+    const double in_q = static_cast<double>(iq_view->interleaved_iq[n * 2 + 1]);
+
+    // Frequency-translate desired channel to DC using a numerically-stable complex oscillator.
+    const double mix_i = in_i * osc_i - in_q * osc_q;
+    const double mix_q = in_i * osc_q + in_q * osc_i;
+    const double next_osc_i = osc_i * rot_cos - osc_q * rot_sin;
+    const double next_osc_q = osc_i * rot_sin + osc_q * rot_cos;
+    osc_i = next_osc_i;
+    osc_q = next_osc_q;
+
+    if (!lpf_init) {
+      lpf_i = mix_i;
+      lpf_q = mix_q;
+      lpf_init = true;
+    } else {
+      lpf_i += alpha * (mix_i - lpf_i);
+      lpf_q += alpha * (mix_q - lpf_q);
+    }
+
+    if (!have_prev) {
+      prev_i = lpf_i;
+      prev_q = lpf_q;
+      have_prev = true;
+      continue;
+    }
+
+    const double cross = prev_i * lpf_q - prev_q * lpf_i;
+    const double dot = prev_i * lpf_i + prev_q * lpf_q;
+    out.push_back(std::atan2(cross, dot));
+    prev_i = lpf_i;
+    prev_q = lpf_q;
   }
 
   return out;
@@ -1101,36 +1170,21 @@ bool DecodeAndEmitFromBits(const std::vector<int>& bits, bool channel_a, multi_r
   return emitted_any;
 }
 
-int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn emit_fn, void* user_data) {
-  if (iq_view == nullptr || emit_fn == nullptr) {
-    return -1;
-  }
-
-  const bool on_ais1 = IsNearFrequency(iq_view->center_frequency_hz, kAis1Hz, kChannelToleranceHz);
-  const bool on_ais2 = IsNearFrequency(iq_view->center_frequency_hz, kAis2Hz, kChannelToleranceHz);
-  if (!on_ais1 && !on_ais2) {
-    return 0;
-  }
-  g_metric_blocks.fetch_add(1, std::memory_order_relaxed);
-
-  if (iq_view->sample_rate_hz == 0 || iq_view->sample_count < 512) {
+int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<double>& discriminator_raw,
+                      bool channel_a, multi_radio_emit_message_fn emit_fn, void* user_data) {
+  if (iq_view == nullptr || emit_fn == nullptr || discriminator_raw.size() < 512) {
     return 0;
   }
 
-  const std::vector<double> discriminator_raw = BuildFmDiscriminator(iq_view);
-  if (discriminator_raw.size() < 512) {
-    return 0;
-  }
-
-  ChannelAutotuneState* autotune_state = on_ais1 ? &g_autotune_ais1 : &g_autotune_ais2;
+  ChannelAutotuneState* autotune_state = channel_a ? &g_autotune_ais1 : &g_autotune_ais2;
   const bool autotune_enabled = (iq_view->ais_autotune_enabled != 0);
   const bool baud_tracking = (iq_view->ais_baud_trim_enabled != 0);
   const uint64_t crc_ok_channel_now =
-      on_ais1 ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
-              : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
+      channel_a ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
+                : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
   const uint64_t crc_fail_channel_now =
-      on_ais1 ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
-              : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
+      channel_a ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
+                : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
   if (autotune_enabled) {
     AdvanceAutotune(autotune_state, crc_ok_channel_now, crc_fail_channel_now);
   } else {
@@ -1284,7 +1338,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
       }
       for (int initial_level : {0, 1}) {
         const std::vector<int> bits = NrziDecode(symbols, initial_level);
-        if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+        if (DecodeAndEmitFromBits(bits, channel_a, emit_fn, user_data)) {
           emitted_this_block = true;
           decode_path = "timing_gardner";
         }
@@ -1311,7 +1365,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
         }
         for (int initial_level : {0, 1}) {
           const std::vector<int> bits = NrziDecode(symbols, initial_level);
-          if (DecodeAndEmitFromBits(bits, on_ais1, emit_fn, user_data)) {
+          if (DecodeAndEmitFromBits(bits, channel_a, emit_fn, user_data)) {
             emitted_this_block = true;
             decode_path = "legacy_phase_scan";
           }
@@ -1329,11 +1383,11 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
   const double afc_global_offset_hz = g_global_afc.afc_offset_rad * rad_to_hz;
   const double afc_residual_offset_hz = autotune_state->afc_offset_rad * rad_to_hz;
   const uint64_t channel_crc_ok =
-      on_ais1 ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
-              : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
+      channel_a ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
+                : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
   const uint64_t channel_crc_fail =
-      on_ais1 ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
-              : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
+      channel_a ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
+                : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
 
   const uint64_t blocks = g_metric_blocks.load(std::memory_order_relaxed);
   if ((blocks % kMetricReportEveryBlocks) == 0) {
@@ -1346,7 +1400,7 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     }
     std::ostringstream metrics_json;
     metrics_json << "{\"kind\":\"metric\""
-                 << ",\"channel\":\"" << (on_ais1 ? "AIS1" : "AIS2") << "\""
+                 << ",\"channel\":\"" << (channel_a ? "AIS1" : "AIS2") << "\""
                  << ",\"metric_decode_mode\":\"" << decode_mode << "\""
                  << ",\"metric_blocks\":\"" << blocks << "\""
                  << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
@@ -1400,12 +1454,51 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
                  << ",\"metric_decode_attempted\":\"" << (decode_attempted ? "1" : "0") << "\""
                  << ",\"metric_debug_state\":\"" << debug_state << "\""
                  << ",\"metric_emitted_this_block\":\"" << (emitted_this_block ? "1" : "0") << "\"}";
-    const double frequency_hz = static_cast<double>(on_ais1 ? kAis1Hz : kAis2Hz);
+    const double frequency_hz = static_cast<double>(channel_a ? kAis1Hz : kAis2Hz);
     emit_fn("AIS", "[AIS_METRICS]", frequency_hz, 0, metrics_json.str().c_str(), user_data);
   }
 
-  MaybePersistWarmStart(blocks, /*force=*/false);
+  return 0;
+}
 
+int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn emit_fn, void* user_data) {
+  if (iq_view == nullptr || emit_fn == nullptr) {
+    return -1;
+  }
+
+  const bool on_ais1 = IsNearFrequency(iq_view->center_frequency_hz, kAis1Hz, kChannelToleranceHz);
+  const bool on_ais2 = IsNearFrequency(iq_view->center_frequency_hz, kAis2Hz, kChannelToleranceHz);
+  const bool on_ais_mid = IsNearFrequency(iq_view->center_frequency_hz, kAisMidHz, kChannelToleranceHz);
+  if (!on_ais1 && !on_ais2 && !on_ais_mid) {
+    return 0;
+  }
+  g_metric_blocks.fetch_add(1, std::memory_order_relaxed);
+
+  if (iq_view->sample_rate_hz == 0 || iq_view->sample_count < 512) {
+    return 0;
+  }
+
+  if (on_ais_mid) {
+    const std::vector<double> ais1_discriminator = BuildFmDiscriminatorShifted(
+        iq_view, -kAisHalfSeparationHz, kChannelMixLpfCutoffHz);
+    const std::vector<double> ais2_discriminator = BuildFmDiscriminatorShifted(
+        iq_view, kAisHalfSeparationHz, kChannelMixLpfCutoffHz);
+    ProcessAisChannel(iq_view, ais1_discriminator, /*channel_a=*/true, emit_fn, user_data);
+    ProcessAisChannel(iq_view, ais2_discriminator, /*channel_a=*/false, emit_fn, user_data);
+  } else {
+    const std::vector<double> discriminator_raw = BuildFmDiscriminator(iq_view);
+    if (discriminator_raw.size() < 512) {
+      return 0;
+    }
+    if (on_ais1) {
+      ProcessAisChannel(iq_view, discriminator_raw, /*channel_a=*/true, emit_fn, user_data);
+    }
+    if (on_ais2) {
+      ProcessAisChannel(iq_view, discriminator_raw, /*channel_a=*/false, emit_fn, user_data);
+    }
+  }
+
+  MaybePersistWarmStart(g_metric_blocks.load(std::memory_order_relaxed), /*force=*/false);
   return 0;
 }
 
@@ -1440,7 +1533,7 @@ void Shutdown() {
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.12.0",
+    .plugin_version = "0.13.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,
