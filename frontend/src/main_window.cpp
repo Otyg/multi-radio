@@ -487,7 +487,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   channel_bandwidth_spin_ = new QSpinBox(control_group);
   channel_bandwidth_spin_->setRange(0, 500000);
   channel_bandwidth_spin_->setSingleStep(1000);
-  channel_bandwidth_spin_->setValue(25000);
+  channel_bandwidth_spin_->setValue(30000);
   channel_bandwidth_spin_->setSuffix(" Hz");
   channel_bandwidth_spin_->setSpecialValueText("Off");
   hardware_bandwidth_spin_ = new QSpinBox(control_group);

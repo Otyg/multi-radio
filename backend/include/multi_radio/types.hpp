@@ -38,7 +38,7 @@ struct ModeConfig {
   std::vector<double> frequency_list_hz;
   uint32_t dwell_ms = 500;
   uint32_t sample_rate_hz = 2048000;
-  uint32_t channel_bandwidth_hz = 25000;
+  uint32_t channel_bandwidth_hz = 30000;
   uint32_t hardware_bandwidth_hz = 0;
   bool ais_autotune_enabled = false;
   bool ais_baud_trim_enabled = false;
