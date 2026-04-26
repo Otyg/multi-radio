@@ -84,8 +84,6 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.sample_rate_hz = config.sample_rate_hz();
   out.channel_bandwidth_hz = config.channel_bandwidth_hz();
   out.hardware_bandwidth_hz = config.hardware_bandwidth_hz();
-  out.ais_autotune_enabled = config.ais_autotune_enabled();
-  out.ais_baud_trim_enabled = config.ais_baud_trim_enabled();
   out.dc_blocker_enabled = config.dc_blocker_enabled();
   out.dc_blocker_cutoff_hz = config.dc_blocker_cutoff_hz();
   out.center_notch_enabled = config.center_notch_enabled();
@@ -104,8 +102,6 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_sample_rate_hz(config.sample_rate_hz);
   out->set_channel_bandwidth_hz(config.channel_bandwidth_hz);
   out->set_hardware_bandwidth_hz(config.hardware_bandwidth_hz);
-  out->set_ais_autotune_enabled(config.ais_autotune_enabled);
-  out->set_ais_baud_trim_enabled(config.ais_baud_trim_enabled);
   out->set_dc_blocker_enabled(config.dc_blocker_enabled);
   out->set_dc_blocker_cutoff_hz(config.dc_blocker_cutoff_hz);
   out->set_center_notch_enabled(config.center_notch_enabled);

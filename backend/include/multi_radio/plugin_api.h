@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define MULTI_RADIO_PLUGIN_API_VERSION 1
+#define MULTI_RADIO_PLUGIN_API_VERSION 2
 
 typedef void (*multi_radio_emit_message_fn)(const char* signal_type, const char* payload,
                                             double frequency_hz, uint64_t unix_ms,
@@ -18,8 +18,6 @@ typedef struct multi_radio_iq_view {
   size_t sample_count;
   uint32_t sample_rate_hz;
   uint32_t center_frequency_hz;
-  uint8_t ais_autotune_enabled;
-  uint8_t ais_baud_trim_enabled;
 } multi_radio_iq_view;
 
 typedef struct multi_radio_plugin_descriptor {

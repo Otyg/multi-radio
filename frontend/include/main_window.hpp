@@ -8,7 +8,6 @@
 #include <QCheckBox>
 #include <QDateTime>
 #include <QDoubleSpinBox>
-#include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QMap>
@@ -76,8 +75,6 @@ class MainWindow : public QMainWindow {
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;
   QSpinBox* hardware_bandwidth_spin_ = nullptr;
-  QCheckBox* ais_autotune_checkbox_ = nullptr;
-  QCheckBox* ais_baud_trim_checkbox_ = nullptr;
   QCheckBox* dc_blocker_checkbox_ = nullptr;
   QSpinBox* dc_blocker_cutoff_spin_ = nullptr;
   QCheckBox* center_notch_checkbox_ = nullptr;
@@ -89,7 +86,6 @@ class MainWindow : public QMainWindow {
   QComboBox* spectrum_source_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
-  QLabel* ais_autotune_indicator_ = nullptr;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
 
   QTableWidget* decoded_table_ = nullptr;

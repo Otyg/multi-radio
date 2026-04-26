@@ -43,11 +43,14 @@ int main() {
   {
     ScanScheduler scheduler;
     ModeConfig config;
+    config.dwell_ms = 250;
     scheduler.Configure(RadioMode::kAirMarinePlot, config);
 
     assert(Eq(scheduler.NextFrequencyHz().value(), 162000000.0));
+    assert(Eq(scheduler.NextFrequencyHz().value(), 156525000.0));
     assert(Eq(scheduler.NextFrequencyHz().value(), 162000000.0));
-    assert(Eq(scheduler.NextFrequencyHz().value(), 162000000.0));
+    assert(Eq(scheduler.NextFrequencyHz().value(), 156525000.0));
+    assert(scheduler.DwellMs() == 5000);
   }
 
   return 0;

@@ -7,10 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <deque>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -29,17 +26,12 @@ constexpr double kGmskModulationIndex = 0.5;
 constexpr double kGmskBt = 0.4;
 constexpr int kTimingSamplesPerSymbol = 4;
 constexpr int kLegacySamplesPerSymbol = 5;
-constexpr double kMinBaudRate = 9300.0;
-constexpr double kMaxBaudRate = 9900.0;
+constexpr double kTimingGainMu = 0.030;
+constexpr double kTimingGainOmega = 0.0008;
 constexpr size_t kMaxRecentFrames = 1024;
 constexpr uint64_t kRecentFrameWindow = 4096;
 constexpr uint64_t kMetricReportEveryBlocks = 1;
 constexpr double kPi = 3.14159265358979323846;
-constexpr uint64_t kGlobalAfcUpdatePeriodBlocks = 20;
-constexpr double kGlobalAfcAlpha = 0.0020;
-constexpr uint64_t kPersistEveryBlocks = 240;
-constexpr double kPersistAfcDeltaThresholdRad = 0.00020;
-constexpr const char* kWarmStartStateFileName = "ais_warm_start_state.v1";
 
 struct RecentFrame {
   uint64_t hash = 0;
@@ -61,251 +53,7 @@ std::atomic<uint64_t> g_metric_duplicates{0};
 std::atomic<uint64_t> g_metric_emitted{0};
 std::atomic<bool> g_initialized{false};
 
-struct AutotuneProfile {
-  const char* name = "";
-  double afc_alpha = 0.0;
-  double timing_gain_mu = 0.0;
-  double timing_gain_omega = 0.0;
-};
-
-constexpr std::array<AutotuneProfile, 3> kAutotuneProfiles = {{
-    {"stable", 0.0015, 0.020, 0.0006},
-    {"balanced", 0.0030, 0.030, 0.0008},
-    {"aggressive", 0.0060, 0.045, 0.0012},
-}};
-constexpr uint64_t kAfcUpdatePeriodBlocks = 10;
-constexpr uint64_t kBaudUpdatePeriodBlocks = 20;
-constexpr double kBaudTrimAlpha = 0.25;
-
-constexpr auto kAutotuneWindow = std::chrono::seconds(60);
-constexpr auto kAutotuneRecoveryWindow = std::chrono::seconds(300);
-constexpr uint64_t kAutotuneRecoveryFailThreshold = 300;
-
-struct AutotuneProfileScore {
-  uint64_t crc_ok = 0;
-  uint64_t crc_fail = 0;
-  uint64_t windows = 0;
-};
-
-struct ChannelAutotuneState {
-  bool initialized = false;
-  bool locked = false;
-  size_t active_profile = 0;
-  double afc_offset_rad = 0.0;
-  uint64_t afc_blocks_since_update = 0;
-  double afc_mean_acc = 0.0;
-  uint64_t afc_mean_count = 0;
-  double baud_estimate_hz = kSymbolRate;
-  uint64_t baud_blocks_since_update = 0;
-  double baud_mean_acc = 0.0;
-  uint64_t baud_mean_count = 0;
-  std::chrono::steady_clock::time_point window_start;
-  uint64_t window_crc_ok_start = 0;
-  uint64_t window_crc_fail_start = 0;
-  std::array<AutotuneProfileScore, kAutotuneProfiles.size()> scores{};
-};
-
-struct GlobalAfcState {
-  double afc_offset_rad = 0.0;
-  uint64_t afc_blocks_since_update = 0;
-  double afc_mean_acc = 0.0;
-  uint64_t afc_mean_count = 0;
-};
-
-struct WarmStartState {
-  bool valid = false;
-  double global_afc_offset_rad = 0.0;
-  size_t profile_index = 0;
-  bool profile_locked = false;
-};
-
-ChannelAutotuneState g_autotune_ais1;
-ChannelAutotuneState g_autotune_ais2;
-GlobalAfcState g_global_afc;
-WarmStartState g_warm_start;
-std::filesystem::path g_warm_start_state_file;
-double g_last_persisted_afc_offset_rad = 0.0;
-size_t g_last_persisted_profile_index = 0;
-bool g_last_persisted_profile_locked = false;
-uint64_t g_last_persist_blocks = 0;
-
-std::string ExtractJsonStringField(const char* json, const char* key) {
-  if (json == nullptr || key == nullptr) {
-    return {};
-  }
-  const std::string source(json);
-  const std::string token = std::string("\"") + key + "\":\"";
-  const size_t start = source.find(token);
-  if (start == std::string::npos) {
-    return {};
-  }
-  size_t pos = start + token.size();
-  std::string out;
-  out.reserve(64);
-  bool escape = false;
-  while (pos < source.size()) {
-    const char c = source[pos++];
-    if (escape) {
-      switch (c) {
-        case 'n':
-          out.push_back('\n');
-          break;
-        case 'r':
-          out.push_back('\r');
-          break;
-        case 't':
-          out.push_back('\t');
-          break;
-        default:
-          out.push_back(c);
-          break;
-      }
-      escape = false;
-      continue;
-    }
-    if (c == '\\') {
-      escape = true;
-      continue;
-    }
-    if (c == '"') {
-      break;
-    }
-    out.push_back(c);
-  }
-  return out;
-}
-
-std::filesystem::path ResolveWarmStartStatePath(const char* config_json) {
-  std::filesystem::path state_dir;
-  const std::string from_config = ExtractJsonStringField(config_json, "state_dir");
-  if (!from_config.empty()) {
-    state_dir = std::filesystem::path(from_config);
-  }
-  if (state_dir.empty()) {
-    const char* from_env = std::getenv("MR_LOG_DIR");
-    if (from_env != nullptr && from_env[0] != '\0') {
-      state_dir = std::filesystem::path(from_env) / "plugin_state";
-    } else {
-      state_dir = std::filesystem::path("./logs") / "plugin_state";
-    }
-  }
-  return state_dir / kWarmStartStateFileName;
-}
-
-bool ParseWarmStartLine(const std::string& line, const char* key, std::string* value) {
-  if (key == nullptr || value == nullptr) {
-    return false;
-  }
-  const std::string prefix = std::string(key) + "=";
-  if (line.rfind(prefix, 0) != 0) {
-    return false;
-  }
-  *value = line.substr(prefix.size());
-  return true;
-}
-
-bool LoadWarmStartState(const std::filesystem::path& path, WarmStartState* out) {
-  if (out == nullptr) {
-    return false;
-  }
-  std::ifstream in(path);
-  if (!in.is_open()) {
-    return false;
-  }
-
-  int version = 0;
-  double global_afc_offset_rad = 0.0;
-  size_t profile_index = 0;
-  int profile_locked = 0;
-  bool have_version = false;
-  bool have_offset = false;
-  bool have_profile = false;
-  bool have_locked = false;
-  std::string line;
-  while (std::getline(in, line)) {
-    std::string value;
-    if (ParseWarmStartLine(line, "version", &value)) {
-      version = std::atoi(value.c_str());
-      have_version = true;
-      continue;
-    }
-    if (ParseWarmStartLine(line, "global_afc_offset_rad", &value)) {
-      global_afc_offset_rad = std::strtod(value.c_str(), nullptr);
-      have_offset = true;
-      continue;
-    }
-    if (ParseWarmStartLine(line, "profile_index", &value)) {
-      profile_index = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
-      have_profile = true;
-      continue;
-    }
-    if (ParseWarmStartLine(line, "profile_locked", &value)) {
-      profile_locked = std::atoi(value.c_str());
-      have_locked = true;
-      continue;
-    }
-  }
-
-  if (!have_version || version != 1 || !have_offset || !have_profile || !have_locked) {
-    return false;
-  }
-  if (!std::isfinite(global_afc_offset_rad)) {
-    return false;
-  }
-
-  out->valid = true;
-  out->global_afc_offset_rad = global_afc_offset_rad;
-  out->profile_index = std::min(profile_index, kAutotuneProfiles.size() - 1);
-  out->profile_locked = (profile_locked != 0);
-  return true;
-}
-
-bool SaveWarmStartState(const std::filesystem::path& path, const WarmStartState& state) {
-  if (!state.valid || path.empty()) {
-    return false;
-  }
-  std::error_code ec;
-  const auto parent = path.parent_path();
-  if (!parent.empty()) {
-    std::filesystem::create_directories(parent, ec);
-    if (ec) {
-      return false;
-    }
-  }
-
-  const std::filesystem::path tmp = path.string() + ".tmp";
-  {
-    std::ofstream out(tmp, std::ios::trunc);
-    if (!out.is_open()) {
-      return false;
-    }
-    out << "version=1\n";
-    out << "global_afc_offset_rad=" << state.global_afc_offset_rad << "\n";
-    out << "profile_index=" << state.profile_index << "\n";
-    out << "profile_locked=" << (state.profile_locked ? 1 : 0) << "\n";
-  }
-  std::filesystem::rename(tmp, path, ec);
-  if (ec) {
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-      std::filesystem::remove(tmp, ec);
-      return false;
-    }
-  }
-  return true;
-}
-
-void ApplyWarmStartToChannel(ChannelAutotuneState* state) {
-  if (state == nullptr || !g_warm_start.valid) {
-    return;
-  }
-  state->active_profile = std::min(g_warm_start.profile_index, kAutotuneProfiles.size() - 1);
-  state->locked = g_warm_start.profile_locked;
-}
-
-int Init(const char* config_json) {
+int Init(const char* /*config_json*/) {
   if (!g_initialized.exchange(true, std::memory_order_relaxed)) {
     g_recent_frames.clear();
     g_sequence = 0;
@@ -320,169 +68,8 @@ int Init(const char* config_json) {
     g_metric_crc_fail_ais2.store(0, std::memory_order_relaxed);
     g_metric_duplicates.store(0, std::memory_order_relaxed);
     g_metric_emitted.store(0, std::memory_order_relaxed);
-    g_autotune_ais1 = ChannelAutotuneState{};
-    g_autotune_ais2 = ChannelAutotuneState{};
-    g_global_afc = GlobalAfcState{};
-    g_warm_start = WarmStartState{};
-
-    g_warm_start_state_file = ResolveWarmStartStatePath(config_json);
-    if (LoadWarmStartState(g_warm_start_state_file, &g_warm_start)) {
-      g_global_afc.afc_offset_rad = g_warm_start.global_afc_offset_rad;
-      ApplyWarmStartToChannel(&g_autotune_ais1);
-      ApplyWarmStartToChannel(&g_autotune_ais2);
-      g_last_persisted_afc_offset_rad = g_warm_start.global_afc_offset_rad;
-      g_last_persisted_profile_index = g_warm_start.profile_index;
-      g_last_persisted_profile_locked = g_warm_start.profile_locked;
-    } else {
-      g_last_persisted_afc_offset_rad = 0.0;
-      g_last_persisted_profile_index = 0;
-      g_last_persisted_profile_locked = false;
-    }
-    g_last_persist_blocks = 0;
   }
   return 0;
-}
-
-void StartAutotuneWindow(ChannelAutotuneState* state, uint64_t crc_ok_now, uint64_t crc_fail_now) {
-  if (state == nullptr) {
-    return;
-  }
-  state->window_start = std::chrono::steady_clock::now();
-  state->window_crc_ok_start = crc_ok_now;
-  state->window_crc_fail_start = crc_fail_now;
-}
-
-double ProfileScore(const AutotuneProfileScore& score) {
-  if (score.crc_ok == 0) {
-    return -(static_cast<double>(score.crc_fail));
-  }
-  return static_cast<double>(score.crc_ok) / static_cast<double>(score.crc_fail + 1);
-}
-
-void AdvanceAutotune(ChannelAutotuneState* state, uint64_t crc_ok_now, uint64_t crc_fail_now) {
-  if (state == nullptr) {
-    return;
-  }
-
-  const auto now = std::chrono::steady_clock::now();
-  if (!state->initialized) {
-    state->initialized = true;
-    StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
-    return;
-  }
-
-  const auto elapsed = now - state->window_start;
-  const auto active_idx = std::min(state->active_profile, kAutotuneProfiles.size() - 1);
-  const uint64_t ok_delta = crc_ok_now - state->window_crc_ok_start;
-  const uint64_t fail_delta = crc_fail_now - state->window_crc_fail_start;
-
-  if (!state->locked) {
-    if (elapsed < kAutotuneWindow) {
-      return;
-    }
-    auto& profile_score = state->scores[active_idx];
-    profile_score.crc_ok += ok_delta;
-    profile_score.crc_fail += fail_delta;
-    ++profile_score.windows;
-
-    if (state->active_profile + 1 < kAutotuneProfiles.size()) {
-      ++state->active_profile;
-      StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
-      return;
-    }
-
-    // Completed one full probe sweep (~3 minutes). Lock to best profile.
-    size_t best_idx = 0;
-    double best = ProfileScore(state->scores[0]);
-    for (size_t i = 1; i < state->scores.size(); ++i) {
-      const double candidate = ProfileScore(state->scores[i]);
-      if (candidate > best) {
-        best = candidate;
-        best_idx = i;
-      }
-    }
-    state->active_profile = best_idx;
-    state->locked = true;
-    StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
-    return;
-  }
-
-  if (elapsed < kAutotuneRecoveryWindow) {
-    return;
-  }
-
-  // If locked profile stalls, restart probing from next profile.
-  if (ok_delta == 0 && fail_delta >= kAutotuneRecoveryFailThreshold) {
-    const size_t next_profile = (active_idx + 1U) % kAutotuneProfiles.size();
-    state->locked = false;
-    state->active_profile = next_profile;
-    state->scores = {};
-  }
-  StartAutotuneWindow(state, crc_ok_now, crc_fail_now);
-}
-
-struct WarmProfileSelection {
-  size_t profile_index = 0;
-  bool profile_locked = false;
-};
-
-WarmProfileSelection SelectWarmProfile() {
-  const uint64_t ok1 = g_metric_crc_ok_ais1.load(std::memory_order_relaxed);
-  const uint64_t ok2 = g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
-  const bool lock1 = g_autotune_ais1.locked;
-  const bool lock2 = g_autotune_ais2.locked;
-
-  if (lock1 != lock2) {
-    return lock1 ? WarmProfileSelection{g_autotune_ais1.active_profile, true}
-                 : WarmProfileSelection{g_autotune_ais2.active_profile, true};
-  }
-  if (ok1 >= ok2) {
-    return WarmProfileSelection{g_autotune_ais1.active_profile, g_autotune_ais1.locked};
-  }
-  return WarmProfileSelection{g_autotune_ais2.active_profile, g_autotune_ais2.locked};
-}
-
-WarmStartState BuildCurrentWarmStartState() {
-  WarmStartState state;
-  const WarmProfileSelection profile = SelectWarmProfile();
-  state.valid = true;
-  state.global_afc_offset_rad = g_global_afc.afc_offset_rad;
-  state.profile_index = std::min(profile.profile_index, kAutotuneProfiles.size() - 1);
-  state.profile_locked = profile.profile_locked;
-  return state;
-}
-
-bool ShouldPersistWarmStart(const WarmStartState& state, uint64_t blocks_now) {
-  if (!state.valid || g_warm_start_state_file.empty()) {
-    return false;
-  }
-  if ((blocks_now - g_last_persist_blocks) >= kPersistEveryBlocks) {
-    return true;
-  }
-  if (std::abs(state.global_afc_offset_rad - g_last_persisted_afc_offset_rad) >=
-      kPersistAfcDeltaThresholdRad) {
-    return true;
-  }
-  if (state.profile_index != g_last_persisted_profile_index ||
-      state.profile_locked != g_last_persisted_profile_locked) {
-    return true;
-  }
-  return false;
-}
-
-void MaybePersistWarmStart(uint64_t blocks_now, bool force) {
-  const WarmStartState current = BuildCurrentWarmStartState();
-  if (!force && !ShouldPersistWarmStart(current, blocks_now)) {
-    return;
-  }
-  if (!SaveWarmStartState(g_warm_start_state_file, current)) {
-    return;
-  }
-  g_warm_start = current;
-  g_last_persisted_afc_offset_rad = current.global_afc_offset_rad;
-  g_last_persisted_profile_index = current.profile_index;
-  g_last_persisted_profile_locked = current.profile_locked;
-  g_last_persist_blocks = blocks_now;
 }
 
 bool IsNearFrequency(uint32_t value, uint32_t target, uint32_t tolerance) {
@@ -1176,99 +763,9 @@ int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<doub
     return 0;
   }
 
-  ChannelAutotuneState* autotune_state = channel_a ? &g_autotune_ais1 : &g_autotune_ais2;
-  const bool autotune_enabled = (iq_view->ais_autotune_enabled != 0);
-  const bool baud_tracking = (iq_view->ais_baud_trim_enabled != 0);
-  const uint64_t crc_ok_channel_now =
-      channel_a ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
-                : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
-  const uint64_t crc_fail_channel_now =
-      channel_a ? g_metric_crc_fail_ais1.load(std::memory_order_relaxed)
-                : g_metric_crc_fail_ais2.load(std::memory_order_relaxed);
-  if (autotune_enabled) {
-    AdvanceAutotune(autotune_state, crc_ok_channel_now, crc_fail_channel_now);
-  } else {
-    // Explicit manual mode: no hidden profile/AFC state carries over while disabled.
-    autotune_state->initialized = false;
-    autotune_state->locked = false;
-    autotune_state->active_profile = g_warm_start.valid ? g_warm_start.profile_index : 0;
-    autotune_state->afc_offset_rad = 0.0;
-    autotune_state->afc_blocks_since_update = 0;
-    autotune_state->afc_mean_acc = 0.0;
-    autotune_state->afc_mean_count = 0;
-    autotune_state->scores = {};
-  }
-
-  const size_t profile_idx = std::min(autotune_state->active_profile, kAutotuneProfiles.size() - 1);
-  const AutotuneProfile& profile = kAutotuneProfiles[profile_idx];
-
-  double block_mean = 0.0;
-  for (double v : discriminator_raw) {
-    block_mean += v;
-  }
-  block_mean /= static_cast<double>(discriminator_raw.size());
-
-  const bool afc_tracking = autotune_enabled && !autotune_state->locked;
-  const double alpha = afc_tracking ? std::clamp(profile.afc_alpha, 0.0, 1.0) : 0.0;
-  bool afc_updated_this_block = false;
-  bool global_afc_updated_this_block = false;
-  if (afc_tracking) {
-    g_global_afc.afc_mean_acc += block_mean;
-    ++g_global_afc.afc_mean_count;
-    ++g_global_afc.afc_blocks_since_update;
-    if (g_global_afc.afc_blocks_since_update >= kGlobalAfcUpdatePeriodBlocks &&
-        g_global_afc.afc_mean_count > 0) {
-      const double global_mean_avg = g_global_afc.afc_mean_acc /
-                                     static_cast<double>(g_global_afc.afc_mean_count);
-      g_global_afc.afc_offset_rad =
-          g_global_afc.afc_offset_rad * (1.0 - kGlobalAfcAlpha) + global_mean_avg * kGlobalAfcAlpha;
-      g_global_afc.afc_blocks_since_update = 0;
-      g_global_afc.afc_mean_acc = 0.0;
-      g_global_afc.afc_mean_count = 0;
-      global_afc_updated_this_block = true;
-    }
-
-    const double residual_mean = block_mean - g_global_afc.afc_offset_rad;
-    autotune_state->afc_mean_acc += residual_mean;
-    ++autotune_state->afc_mean_count;
-    ++autotune_state->afc_blocks_since_update;
-    if (autotune_state->afc_blocks_since_update >= kAfcUpdatePeriodBlocks &&
-        autotune_state->afc_mean_count > 0) {
-      const double block_mean_avg =
-          autotune_state->afc_mean_acc / static_cast<double>(autotune_state->afc_mean_count);
-      autotune_state->afc_offset_rad =
-          autotune_state->afc_offset_rad * (1.0 - alpha) + block_mean_avg * alpha;
-      autotune_state->afc_blocks_since_update = 0;
-      autotune_state->afc_mean_acc = 0.0;
-      autotune_state->afc_mean_count = 0;
-      afc_updated_this_block = true;
-    }
-  } else {
-    autotune_state->afc_blocks_since_update = 0;
-    autotune_state->afc_mean_acc = 0.0;
-    autotune_state->afc_mean_count = 0;
-  }
-
-  const double combined_afc_offset_rad = g_global_afc.afc_offset_rad + autotune_state->afc_offset_rad;
-  std::vector<double> discriminator;
-  discriminator.reserve(discriminator_raw.size());
-  for (double v : discriminator_raw) {
-    discriminator.push_back(v - combined_afc_offset_rad);
-  }
-
-  autotune_state->baud_estimate_hz =
-      std::clamp(autotune_state->baud_estimate_hz, kMinBaudRate, kMaxBaudRate);
-  if (!baud_tracking) {
-    // Explicit manual mode: keep nominal AIS symbol rate when trim is disabled.
-    autotune_state->baud_estimate_hz = kSymbolRate;
-    autotune_state->baud_blocks_since_update = 0;
-    autotune_state->baud_mean_acc = 0.0;
-    autotune_state->baud_mean_count = 0;
-  }
-  const double timing_resampled_rate =
-      autotune_state->baud_estimate_hz * static_cast<double>(kTimingSamplesPerSymbol);
-  const double legacy_resampled_rate =
-      autotune_state->baud_estimate_hz * static_cast<double>(kLegacySamplesPerSymbol);
+  const std::vector<double>& discriminator = discriminator_raw;
+  const double timing_resampled_rate = kSymbolRate * static_cast<double>(kTimingSamplesPerSymbol);
+  const double legacy_resampled_rate = kSymbolRate * static_cast<double>(kLegacySamplesPerSymbol);
 
   double abs_mean = 0.0;
   for (double v : discriminator) {
@@ -1292,34 +789,8 @@ int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<doub
       matched.empty() ? 0.0 : std::sqrt(power_mean / static_cast<double>(matched.size()));
 
   const TimingRecoveryResult timing = RecoverClockGardner(
-      matched, static_cast<double>(kTimingSamplesPerSymbol), profile.timing_gain_mu,
-      profile.timing_gain_omega);
+      matched, static_cast<double>(kTimingSamplesPerSymbol), kTimingGainMu, kTimingGainOmega);
   const bool timing_ready = timing.lock;
-  bool baud_updated_this_block = false;
-  double measured_baud_hz = 0.0;
-  if (baud_tracking && timing_ready && timing.avg_omega > 1e-6) {
-    measured_baud_hz = std::clamp(timing_resampled_rate / timing.avg_omega, kMinBaudRate, kMaxBaudRate);
-    autotune_state->baud_mean_acc += measured_baud_hz;
-    ++autotune_state->baud_mean_count;
-    ++autotune_state->baud_blocks_since_update;
-    if (autotune_state->baud_blocks_since_update >= kBaudUpdatePeriodBlocks &&
-        autotune_state->baud_mean_count > 0) {
-      const double baud_avg = autotune_state->baud_mean_acc /
-                              static_cast<double>(autotune_state->baud_mean_count);
-      autotune_state->baud_estimate_hz =
-          std::clamp(autotune_state->baud_estimate_hz * (1.0 - kBaudTrimAlpha) +
-                         baud_avg * kBaudTrimAlpha,
-                     kMinBaudRate, kMaxBaudRate);
-      autotune_state->baud_blocks_since_update = 0;
-      autotune_state->baud_mean_acc = 0.0;
-      autotune_state->baud_mean_count = 0;
-      baud_updated_this_block = true;
-    }
-  } else if (!baud_tracking) {
-    autotune_state->baud_blocks_since_update = 0;
-    autotune_state->baud_mean_acc = 0.0;
-    autotune_state->baud_mean_count = 0;
-  }
   const std::vector<double> legacy_resampled = ResampleLinear(
       discriminator, static_cast<double>(iq_view->sample_rate_hz), legacy_resampled_rate);
   const bool legacy_ready = legacy_resampled.size() >= 512;
@@ -1378,10 +849,6 @@ int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<doub
     debug_state = "AIS_DECODED";
   }
 
-  const double rad_to_hz = static_cast<double>(iq_view->sample_rate_hz) / (2.0 * kPi);
-  const double afc_offset_hz = combined_afc_offset_rad * rad_to_hz;
-  const double afc_global_offset_hz = g_global_afc.afc_offset_rad * rad_to_hz;
-  const double afc_residual_offset_hz = autotune_state->afc_offset_rad * rad_to_hz;
   const uint64_t channel_crc_ok =
       channel_a ? g_metric_crc_ok_ais1.load(std::memory_order_relaxed)
                 : g_metric_crc_ok_ais2.load(std::memory_order_relaxed);
@@ -1391,17 +858,10 @@ int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<doub
 
   const uint64_t blocks = g_metric_blocks.load(std::memory_order_relaxed);
   if ((blocks % kMetricReportEveryBlocks) == 0) {
-    std::string decode_mode = "continuous_gmsk_gardner";
-    if (autotune_enabled) {
-      decode_mode += "_afc";
-    }
-    if (baud_tracking) {
-      decode_mode += "_baudtrim";
-    }
     std::ostringstream metrics_json;
     metrics_json << "{\"kind\":\"metric\""
                  << ",\"channel\":\"" << (channel_a ? "AIS1" : "AIS2") << "\""
-                 << ",\"metric_decode_mode\":\"" << decode_mode << "\""
+                 << ",\"metric_decode_mode\":\"continuous_gmsk_gardner_fixed\""
                  << ",\"metric_blocks\":\"" << blocks << "\""
                  << ",\"metric_flags\":\"" << g_metric_flags.load(std::memory_order_relaxed) << "\""
                  << ",\"metric_candidates\":\"" << g_metric_candidates.load(std::memory_order_relaxed) << "\""
@@ -1415,25 +875,6 @@ int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<doub
                  << ",\"metric_demod_ready\":\"" << (demod_ready ? "1" : "0") << "\""
                  << ",\"metric_demod_resampled_samples\":\"" << resampled.size() << "\""
                  << ",\"metric_demod_rms\":\"" << demod_rms << "\""
-                 << ",\"metric_afc_alpha\":\"" << alpha << "\""
-                 << ",\"metric_afc_offset_rad\":\"" << combined_afc_offset_rad << "\""
-                 << ",\"metric_afc_offset_hz\":\"" << afc_offset_hz << "\""
-                 << ",\"metric_afc_global_offset_rad\":\"" << g_global_afc.afc_offset_rad << "\""
-                 << ",\"metric_afc_global_offset_hz\":\"" << afc_global_offset_hz << "\""
-                 << ",\"metric_afc_residual_offset_rad\":\"" << autotune_state->afc_offset_rad << "\""
-                 << ",\"metric_afc_residual_offset_hz\":\"" << afc_residual_offset_hz << "\""
-                 << ",\"metric_afc_tracking\":\"" << (afc_tracking ? "1" : "0") << "\""
-                 << ",\"metric_afc_update_period_blocks\":\"" << kAfcUpdatePeriodBlocks << "\""
-                 << ",\"metric_afc_updated\":\"" << (afc_updated_this_block ? "1" : "0") << "\""
-                 << ",\"metric_afc_global_update_period_blocks\":\"" << kGlobalAfcUpdatePeriodBlocks << "\""
-                 << ",\"metric_afc_global_updated\":\"" << (global_afc_updated_this_block ? "1" : "0") << "\""
-                 << ",\"metric_afc_hold_blocks\":\"" << autotune_state->afc_blocks_since_update << "\""
-                 << ",\"metric_baud_estimate_hz\":\"" << autotune_state->baud_estimate_hz << "\""
-                 << ",\"metric_baud_measured_hz\":\"" << measured_baud_hz << "\""
-                 << ",\"metric_baud_tracking\":\"" << (baud_tracking ? "1" : "0") << "\""
-                 << ",\"metric_baud_update_period_blocks\":\"" << kBaudUpdatePeriodBlocks << "\""
-                 << ",\"metric_baud_updated\":\"" << (baud_updated_this_block ? "1" : "0") << "\""
-                 << ",\"metric_baud_hold_blocks\":\"" << autotune_state->baud_blocks_since_update << "\""
                  << ",\"metric_timing_omega_avg\":\"" << timing.avg_omega << "\""
                  << ",\"metric_gmsk_bt\":\"" << kGmskBt << "\""
                  << ",\"metric_gmsk_h\":\"" << kGmskModulationIndex << "\""
@@ -1441,11 +882,6 @@ int ProcessAisChannel(const multi_radio_iq_view* iq_view, const std::vector<doub
                  << ",\"metric_timing_symbols\":\"" << timing.symbol_samples.size() << "\""
                  << ",\"metric_timing_avg_abs_error\":\"" << timing.avg_abs_error << "\""
                  << ",\"metric_timing_lock\":\"" << (timing_ready ? "1" : "0") << "\""
-                 << ",\"metric_autotune_enabled\":\"" << (autotune_enabled ? "1" : "0") << "\""
-                 << ",\"metric_autotune_profile\":\"" << profile_idx << "\""
-                 << ",\"metric_autotune_profile_name\":\"" << profile.name << "\""
-                 << ",\"metric_autotune_locked\":\"" << (autotune_state->locked ? "1" : "0") << "\""
-                 << ",\"metric_autotune_window_s\":\"" << kAutotuneWindow.count() << "\""
                  << ",\"metric_legacy_sps\":\"" << kLegacySamplesPerSymbol << "\""
                  << ",\"metric_legacy_ready\":\"" << (legacy_ready ? "1" : "0") << "\""
                  << ",\"metric_legacy_symbols\":\""
@@ -1498,14 +934,12 @@ int ProcessIq(const multi_radio_iq_view* iq_view, multi_radio_emit_message_fn em
     }
   }
 
-  MaybePersistWarmStart(g_metric_blocks.load(std::memory_order_relaxed), /*force=*/false);
   return 0;
 }
 
 int Flush(multi_radio_emit_message_fn /*emit_fn*/, void* /*user_data*/) { return 0; }
 
 void Shutdown() {
-  MaybePersistWarmStart(g_metric_blocks.load(std::memory_order_relaxed), /*force=*/true);
   g_recent_frames.clear();
   g_sequence = 0;
   g_metric_blocks.store(0, std::memory_order_relaxed);
@@ -1519,21 +953,12 @@ void Shutdown() {
   g_metric_crc_fail_ais2.store(0, std::memory_order_relaxed);
   g_metric_duplicates.store(0, std::memory_order_relaxed);
   g_metric_emitted.store(0, std::memory_order_relaxed);
-  g_autotune_ais1 = ChannelAutotuneState{};
-  g_autotune_ais2 = ChannelAutotuneState{};
-  g_global_afc = GlobalAfcState{};
-  g_warm_start = WarmStartState{};
-  g_warm_start_state_file.clear();
-  g_last_persisted_afc_offset_rad = 0.0;
-  g_last_persisted_profile_index = 0;
-  g_last_persisted_profile_locked = false;
-  g_last_persist_blocks = 0;
   g_initialized.store(false, std::memory_order_relaxed);
 }
 
 const multi_radio_plugin_descriptor kDescriptor = {
     .plugin_name = "ais_wrapper",
-    .plugin_version = "0.13.0",
+    .plugin_version = "0.14.0",
     .api_version = MULTI_RADIO_PLUGIN_API_VERSION,
     .supported_signals_csv = "AIS",
     .init = &Init,

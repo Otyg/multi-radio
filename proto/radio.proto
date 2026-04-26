@@ -35,8 +35,8 @@ message ModeConfig {
   uint32 sample_rate_hz = 7;
   uint32 channel_bandwidth_hz = 8;
   uint32 hardware_bandwidth_hz = 9;
-  bool ais_autotune_enabled = 10;
-  bool ais_baud_trim_enabled = 11;
+  reserved 10;
+  reserved 11;
   bool dc_blocker_enabled = 12;
   uint32 dc_blocker_cutoff_hz = 13;
   bool center_notch_enabled = 14;

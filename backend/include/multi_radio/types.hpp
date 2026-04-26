@@ -40,8 +40,6 @@ struct ModeConfig {
   uint32_t sample_rate_hz = 2048000;
   uint32_t channel_bandwidth_hz = 30000;
   uint32_t hardware_bandwidth_hz = 0;
-  bool ais_autotune_enabled = false;
-  bool ais_baud_trim_enabled = false;
   bool dc_blocker_enabled = false;
   uint32_t dc_blocker_cutoff_hz = 30;
   bool center_notch_enabled = false;
@@ -85,8 +83,6 @@ struct IQSampleBlock {
   std::vector<int16_t> interleaved_iq;
   uint32_t sample_rate_hz = 0;
   uint32_t center_frequency_hz = 0;
-  bool ais_autotune_enabled = false;
-  bool ais_baud_trim_enabled = false;
 };
 
 struct PluginInfo {

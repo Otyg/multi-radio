@@ -6,6 +6,8 @@ namespace multi_radio {
 
 namespace {
 constexpr double kAisMidHz = 162000000.0;
+constexpr double kDscCh70Hz = 156525000.0;
+constexpr uint32_t kAirMarineFixedDwellMs = 5000;
 }  // namespace
 
 ScanScheduler::ScanScheduler() = default;
@@ -44,11 +46,14 @@ std::optional<double> ScanScheduler::NextFrequencyHz() {
 }
 
 uint32_t ScanScheduler::DwellMs() const {
+  if (mode_ == RadioMode::kAirMarinePlot) {
+    return kAirMarineFixedDwellMs;
+  }
   return config_.dwell_ms == 0 ? 500 : config_.dwell_ms;
 }
 
 std::vector<double> ScanScheduler::BuildAirMarineFrequencies() const {
-  return {kAisMidHz};
+  return {kAisMidHz, kDscCh70Hz};
 }
 
 std::vector<double> ScanScheduler::BuildRangeFrequencies(const ModeConfig& config) const {

@@ -245,11 +245,7 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
   multi_radio_iq_view view{.interleaved_iq = iq.interleaved_iq.data(),
                            .sample_count = iq.interleaved_iq.size() / 2,
                            .sample_rate_hz = iq.sample_rate_hz,
-                           .center_frequency_hz = iq.center_frequency_hz,
-                           .ais_autotune_enabled =
-                               static_cast<uint8_t>(iq.ais_autotune_enabled ? 1 : 0),
-                           .ais_baud_trim_enabled =
-                               static_cast<uint8_t>(iq.ais_baud_trim_enabled ? 1 : 0)};
+                           .center_frequency_hz = iq.center_frequency_hz};
 
   for (auto& plugin : plugins_) {
     if (!plugin.info.enabled || plugin.descriptor == nullptr || plugin.descriptor->process_iq == nullptr) {

@@ -9,7 +9,7 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
   - `FIXED`
   - `SCAN_RANGE`
   - `SCAN_LIST`
-  - `AIR_MARINE_PLOT` (center tune `162.000 MHz`, dual-channelized AIS1/AIS2 decode)
+  - `AIR_MARINE_PLOT` (fixed dwell `5s`, scan hops between `162.000 MHz` for dual-channelized AIS1/AIS2 and CH70 `156.525 MHz` for DSC)
 - Multiple simultaneous receivers (one worker thread per receiver).
 - In-process plugin system (`.so`) with C ABI + API version check.
 - Event + decoded message telemetry streaming.
@@ -22,8 +22,8 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
   - `DC blocker` with configurable cutoff
   - `Center notch` with configurable notch width
   - `LO offset` with configurable offset (applies in fixed and scanning modes)
-- AIS decoder warm-start persistence (shared AFC bootstrap + profile lock) saved under
-  `MR_LOG_DIR/plugin_state/ais_warm_start_state.v1` to reduce startup warmup.
+- DSC plugin now includes an experimental receive/decode path (using current tuned frequency)
+  with BFSK bit recovery plus first-pass DSC frame parsing (format/address/category/telecommand/EOS/ECC signals).
 
 ## Repository structure
 

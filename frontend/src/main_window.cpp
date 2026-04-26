@@ -12,7 +12,6 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
-#include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSplitter>
@@ -479,6 +478,57 @@ QString BuildAisDecodedSummary(const QString& sentence, const QVariantMap& field
   return summary_parts.join(" ");
 }
 
+QString BuildDscDecodedSummary(const QVariantMap& fields) {
+  auto field_text = [&fields](const QString& key) -> QString {
+    if (!fields.contains(key)) {
+      return {};
+    }
+    return fields.value(key).toString();
+  };
+
+  const QString kind = field_text("kind");
+  if (kind.isEmpty() || kind == "candidate") {
+    return {};
+  }
+
+  QStringList summary_parts;
+  const QString format = field_text("format_label");
+  const QString category = field_text("category_label");
+  const QString address = field_text("address_digits");
+  const QString self_id = field_text("self_id_digits");
+  const QString tc1 = field_text("telecommand_1");
+  const QString tc2 = field_text("telecommand_2");
+  const QString eos = field_text("eos_label");
+  const QString validity = field_text("validity");
+
+  if (!format.isEmpty()) {
+    summary_parts << QString("fmt=%1").arg(format);
+  }
+  if (!category.isEmpty()) {
+    summary_parts << QString("cat=%1").arg(category);
+  }
+  if (!address.isEmpty()) {
+    summary_parts << QString("to=%1").arg(address);
+  }
+  if (!self_id.isEmpty()) {
+    summary_parts << QString("from=%1").arg(self_id);
+  }
+  if (!tc1.isEmpty()) {
+    summary_parts << QString("tc1=%1").arg(tc1);
+  }
+  if (!tc2.isEmpty()) {
+    summary_parts << QString("tc2=%1").arg(tc2);
+  }
+  if (!eos.isEmpty()) {
+    summary_parts << QString("eos=%1").arg(eos);
+  }
+  if (!validity.isEmpty()) {
+    summary_parts << QString("validity=%1").arg(validity);
+  }
+
+  return summary_parts.join(" ");
+}
+
 }  // namespace
 
 MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* parent)
@@ -527,10 +577,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   hardware_bandwidth_spin_->setValue(0);
   hardware_bandwidth_spin_->setSuffix(" Hz");
   hardware_bandwidth_spin_->setSpecialValueText("Auto");
-  ais_autotune_checkbox_ = new QCheckBox("Enabled", control_group);
-  ais_autotune_checkbox_->setChecked(false);
-  ais_baud_trim_checkbox_ = new QCheckBox("Enabled", control_group);
-  ais_baud_trim_checkbox_->setChecked(false);
   dc_blocker_checkbox_ = new QCheckBox("Enabled", control_group);
   dc_blocker_checkbox_->setChecked(false);
   dc_blocker_cutoff_spin_ = new QSpinBox(control_group);
@@ -579,8 +625,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   control_layout->addRow("Sample rate", sample_rate_spin_);
   control_layout->addRow("Channel bandwidth", channel_bandwidth_spin_);
   control_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
-  control_layout->addRow("AIS autotune", ais_autotune_checkbox_);
-  control_layout->addRow("AIS baud trim", ais_baud_trim_checkbox_);
   control_layout->addRow("DC blocker", dc_blocker_checkbox_);
   control_layout->addRow("DC cutoff", dc_blocker_cutoff_spin_);
   control_layout->addRow("Center notch", center_notch_checkbox_);
@@ -606,17 +650,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   minutes_filter_spin_ = new QSpinBox(filter_group);
   minutes_filter_spin_->setRange(1, 240);
   minutes_filter_spin_->setValue(30);
-  ais_autotune_indicator_ = new QLabel("AUTOTUNE: waiting", filter_group);
-  ais_autotune_indicator_->setStyleSheet(
-      "QLabel { font-weight: 600; color: #8a6d3b; background: #fcf8e3; border: 1px solid #f1da9a; "
-      "padding: 4px 8px; border-radius: 4px; }");
   auto* visualization_settings_button = new QPushButton("Visualization settings...", filter_group);
 
   filter_layout->addRow("Signal", signal_filter_combo_);
   filter_layout->addRow("Spectrum view", spectrum_source_combo_);
   filter_layout->addRow("Receiver", receiver_filter_combo_);
   filter_layout->addRow("Last minutes", minutes_filter_spin_);
-  filter_layout->addRow("AIS autotune", ais_autotune_indicator_);
   filter_layout->addRow(visualization_settings_button);
 
   top_layout->addWidget(control_group, 2);
@@ -783,8 +822,6 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
   config.set_channel_bandwidth_hz(static_cast<uint32_t>(channel_bandwidth_spin_->value()));
   config.set_hardware_bandwidth_hz(static_cast<uint32_t>(hardware_bandwidth_spin_->value()));
-  config.set_ais_autotune_enabled(ais_autotune_checkbox_->isChecked());
-  config.set_ais_baud_trim_enabled(ais_baud_trim_checkbox_->isChecked());
   config.set_dc_blocker_enabled(dc_blocker_checkbox_->isChecked());
   config.set_dc_blocker_cutoff_hz(static_cast<uint32_t>(dc_blocker_cutoff_spin_->value()));
   config.set_center_notch_enabled(center_notch_checkbox_->isChecked());
@@ -802,13 +839,11 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, autotune=%5, baud-trim=%6, dc=%7@%8 Hz, notch=%9@%10 Hz, lo-offset=%11@%12 Hz)")
+  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, dc=%5@%6 Hz, notch=%7@%8 Hz, lo-offset=%9@%10 Hz)")
                 .arg(receiver_id)
                 .arg(sample_rate_spin_->value())
                 .arg(channel_bandwidth_spin_->value())
                 .arg(hardware_bandwidth_spin_->value())
-                .arg(ais_autotune_checkbox_->isChecked() ? "on" : "off")
-                .arg(ais_baud_trim_checkbox_->isChecked() ? "on" : "off")
                 .arg(dc_blocker_checkbox_->isChecked() ? "on" : "off")
                 .arg(dc_blocker_cutoff_spin_->value())
                 .arg(center_notch_checkbox_->isChecked() ? "on" : "off")
@@ -857,6 +892,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   row.payload = payload;
   if (signal_type == "SIGNAL_TYPE_AIS") {
     row.decoded_summary = BuildAisDecodedSummary(payload, fields);
+  } else if (signal_type == "SIGNAL_TYPE_DSC") {
+    row.decoded_summary = BuildDscDecodedSummary(fields);
   }
 
   auto field_text = [&fields](const QString& key) -> QString {
@@ -868,41 +905,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   const QString kind = field_text("kind");
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
-    const QString autotune_enabled = field_text("metric_autotune_enabled");
-    const QString profile_name = field_text("metric_autotune_profile_name");
-    const QString locked = field_text("metric_autotune_locked");
-    const QString afc_tracking = field_text("metric_afc_tracking");
     const QString channel = field_text("channel");
-    const bool autotune_is_enabled = (autotune_enabled != "0");
-    if (ais_autotune_indicator_ != nullptr) {
-      if (!autotune_is_enabled) {
-        ais_autotune_indicator_->setText(
-            QString("AUTOTUNE: disabled (%1)").arg(channel.isEmpty() ? "n/a" : channel));
-        ais_autotune_indicator_->setStyleSheet(
-            "QLabel { font-weight: 600; color: #444; background: #efefef; border: 1px solid #c9c9c9; "
-            "padding: 4px 8px; border-radius: 4px; }");
-      } else {
-        const bool is_locked = (locked == "1");
-        const bool afc_is_tracking = (afc_tracking == "1");
-        const QString status = is_locked ? "profile locked" : "probing";
-        const QString afc_mode = afc_is_tracking ? "AFC track" : "AFC hold";
-        ais_autotune_indicator_->setText(
-            QString("AUTOTUNE: %1, %2 (%3, %4)")
-                .arg(status)
-                .arg(afc_mode)
-                .arg(profile_name.isEmpty() ? "n/a" : profile_name)
-                .arg(channel.isEmpty() ? "n/a" : channel));
-        if (is_locked) {
-          ais_autotune_indicator_->setStyleSheet(
-              "QLabel { font-weight: 600; color: #215732; background: #e8f6ec; border: 1px solid #9fd5ad; "
-              "padding: 4px 8px; border-radius: 4px; }");
-        } else {
-          ais_autotune_indicator_->setStyleSheet(
-              "QLabel { font-weight: 600; color: #8a6d3b; background: #fcf8e3; border: 1px solid #f1da9a; "
-              "padding: 4px 8px; border-radius: 4px; }");
-        }
-      }
-    }
     auto parse_u64 = [&field_text](const QString& key, quint64 fallback = 0) -> quint64 {
       bool ok = false;
       const quint64 value = field_text(key).toULongLong(&ok);
@@ -914,8 +917,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     const quint64 crc_fail_total =
         parse_u64("metric_crc_fail_channel", parse_u64("metric_crc_fail", 0));
     const quint64 emitted_total = parse_u64("metric_emitted", 0);
-    const bool is_locked = autotune_is_enabled && (locked == "1");
-    const quint64 interval_ms = is_locked ? 10000 : 30000;
+    const quint64 interval_ms = 30000;
 
     AisCrcSummaryState& summary = ais_crc_summary_by_channel_[channel_key];
     if (summary.last_log_unix_ms == 0 || unix_ms <= summary.last_log_unix_ms ||
@@ -933,17 +935,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                                : static_cast<double>(crc_ok_total) /
                                      static_cast<double>(crc_ok_total + crc_fail_total);
 
-      AppendLog(QString("[%1] RX%2 AIS CRC summary ch=%3 auto=%4/%5/%6 afc=%7 offset=%8Hz baud=%9Hz(track=%10) path=%11 ok=%12 (+%13) fail=%14 (+%15) emitted=%16 (+%17) ok_ratio=%18")
+      AppendLog(QString("[%1] RX%2 AIS CRC summary ch=%3 path=%4 ok=%5 (+%6) fail=%7 (+%8) emitted=%9 (+%10) ok_ratio=%11")
                     .arg(ToLocalTime(unix_ms))
                     .arg(receiver_id)
                     .arg(channel_key)
-                    .arg(autotune_is_enabled ? "on" : "off")
-                    .arg(profile_name.isEmpty() ? "n/a" : profile_name)
-                    .arg(autotune_is_enabled ? (locked == "1" ? "locked" : "probing") : "manual")
-                    .arg(afc_tracking == "1" ? "track" : "hold")
-                    .arg(field_text("metric_afc_offset_hz"))
-                    .arg(field_text("metric_baud_estimate_hz"))
-                    .arg(field_text("metric_baud_tracking"))
                     .arg(field_text("metric_decode_path"))
                     .arg(crc_ok_total)
                     .arg(ok_delta)
@@ -952,12 +947,6 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                     .arg(emitted_total)
                     .arg(emitted_delta)
                     .arg(ratio, 0, 'f', 4));
-      if (is_locked && ok_delta == 0 && fail_delta > 0) {
-        AppendLog(QString("[%1] RX%2 AIS warning: locked profile but still no CRC OK on %3 in this interval")
-                      .arg(ToLocalTime(unix_ms))
-                      .arg(receiver_id)
-                      .arg(channel_key));
-      }
 
       summary.last_log_unix_ms = unix_ms;
       summary.last_crc_ok = crc_ok_total;
@@ -991,7 +980,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   AppendLog(summary);
 
   const QString metric_blocks = field_text("metric_blocks");
-  if (!metric_blocks.isEmpty()) {
+  if (!metric_blocks.isEmpty() && signal_type == "SIGNAL_TYPE_AIS") {
     AppendLog(QString("AIS metrics: blocks=%1 flags=%2 candidates=%3 crc_ok=%4 crc_fail=%5 dup=%6 emitted=%7 demod_ready=%8")
                   .arg(metric_blocks)
                   .arg(field_text("metric_flags"))
@@ -1001,6 +990,15 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(field_text("metric_duplicates"))
                   .arg(field_text("metric_emitted"))
                   .arg(field_text("metric_demod_ready")));
+  } else if (!metric_blocks.isEmpty() && signal_type == "SIGNAL_TYPE_DSC") {
+    AppendLog(QString("DSC metrics: blocks=%1 candidates=%2 dup=%3 emitted=%4 frames=%5 ecc_ok=%6 ecc_fail=%7")
+                  .arg(metric_blocks)
+                  .arg(field_text("metric_candidates"))
+                  .arg(field_text("metric_duplicates"))
+                  .arg(field_text("metric_emitted"))
+                  .arg(field_text("metric_frames_parsed"))
+                  .arg(field_text("metric_ecc_ok"))
+                  .arg(field_text("metric_ecc_fail")));
   }
 
   all_rows_.push_back(row);

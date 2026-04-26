@@ -469,8 +469,6 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
   mode_config_.sample_rate_hz = kDefaultSampleRateHz;
   mode_config_.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
   mode_config_.hardware_bandwidth_hz = 0;
-  mode_config_.ais_autotune_enabled = false;
-  mode_config_.ais_baud_trim_enabled = false;
   mode_config_.dc_blocker_enabled = false;
   mode_config_.dc_blocker_cutoff_hz = kDefaultDcBlockerCutoffHz;
   mode_config_.center_notch_enabled = false;
@@ -584,8 +582,6 @@ void ReceiverWorker::RunLoop() {
     uint32_t desired_sample_rate_hz = kDefaultSampleRateHz;
     uint32_t channel_bandwidth_hz = kDefaultChannelBandwidthHz;
     uint32_t desired_hardware_bandwidth_hz = 0;
-    bool ais_autotune_enabled = false;
-    bool ais_baud_trim_enabled = false;
     bool dc_blocker_enabled = false;
     uint32_t dc_blocker_cutoff_hz = kDefaultDcBlockerCutoffHz;
     bool center_notch_enabled = false;
@@ -600,8 +596,6 @@ void ReceiverWorker::RunLoop() {
       desired_sample_rate_hz = mode_config_.sample_rate_hz;
       channel_bandwidth_hz = mode_config_.channel_bandwidth_hz;
       desired_hardware_bandwidth_hz = mode_config_.hardware_bandwidth_hz;
-      ais_autotune_enabled = mode_config_.ais_autotune_enabled;
-      ais_baud_trim_enabled = mode_config_.ais_baud_trim_enabled;
       dc_blocker_enabled = mode_config_.dc_blocker_enabled;
       dc_blocker_cutoff_hz = mode_config_.dc_blocker_cutoff_hz;
       center_notch_enabled = mode_config_.center_notch_enabled;
@@ -742,8 +736,6 @@ void ReceiverWorker::RunLoop() {
                                      &receiver_spectrum, &receiver_peak_hz, &receiver_peak_strength,
                                      &receiver_start_hz, &receiver_end_hz);
 
-      iq.ais_autotune_enabled = ais_autotune_enabled;
-      iq.ais_baud_trim_enabled = ais_baud_trim_enabled;
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
 
       double demod_peak_hz = 0.0;
