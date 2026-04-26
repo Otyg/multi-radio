@@ -78,6 +78,12 @@ class MainWindow : public QMainWindow {
   QSpinBox* hardware_bandwidth_spin_ = nullptr;
   QCheckBox* ais_autotune_checkbox_ = nullptr;
   QCheckBox* ais_baud_trim_checkbox_ = nullptr;
+  QCheckBox* dc_blocker_checkbox_ = nullptr;
+  QSpinBox* dc_blocker_cutoff_spin_ = nullptr;
+  QCheckBox* center_notch_checkbox_ = nullptr;
+  QSpinBox* center_notch_width_spin_ = nullptr;
+  QCheckBox* lo_offset_checkbox_ = nullptr;
+  QSpinBox* lo_offset_spin_ = nullptr;
 
   QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* spectrum_source_combo_ = nullptr;

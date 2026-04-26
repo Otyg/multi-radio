@@ -42,6 +42,12 @@ struct ModeConfig {
   uint32_t hardware_bandwidth_hz = 0;
   bool ais_autotune_enabled = false;
   bool ais_baud_trim_enabled = false;
+  bool dc_blocker_enabled = false;
+  uint32_t dc_blocker_cutoff_hz = 30;
+  bool center_notch_enabled = false;
+  uint32_t center_notch_width_hz = 2000;
+  bool lo_offset_enabled = false;
+  int32_t lo_offset_hz = 0;
 };
 
 struct ReceiverDescriptor {

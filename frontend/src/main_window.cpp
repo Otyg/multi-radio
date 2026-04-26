@@ -531,6 +531,30 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   ais_autotune_checkbox_->setChecked(false);
   ais_baud_trim_checkbox_ = new QCheckBox("Enabled", control_group);
   ais_baud_trim_checkbox_->setChecked(false);
+  dc_blocker_checkbox_ = new QCheckBox("Enabled", control_group);
+  dc_blocker_checkbox_->setChecked(false);
+  dc_blocker_cutoff_spin_ = new QSpinBox(control_group);
+  dc_blocker_cutoff_spin_->setRange(1, 5000);
+  dc_blocker_cutoff_spin_->setSingleStep(10);
+  dc_blocker_cutoff_spin_->setValue(30);
+  dc_blocker_cutoff_spin_->setSuffix(" Hz");
+  dc_blocker_cutoff_spin_->setEnabled(false);
+  center_notch_checkbox_ = new QCheckBox("Enabled", control_group);
+  center_notch_checkbox_->setChecked(false);
+  center_notch_width_spin_ = new QSpinBox(control_group);
+  center_notch_width_spin_->setRange(100, 200000);
+  center_notch_width_spin_->setSingleStep(100);
+  center_notch_width_spin_->setValue(2000);
+  center_notch_width_spin_->setSuffix(" Hz");
+  center_notch_width_spin_->setEnabled(false);
+  lo_offset_checkbox_ = new QCheckBox("Enabled", control_group);
+  lo_offset_checkbox_->setChecked(false);
+  lo_offset_spin_ = new QSpinBox(control_group);
+  lo_offset_spin_->setRange(-500000, 500000);
+  lo_offset_spin_->setSingleStep(100);
+  lo_offset_spin_->setValue(0);
+  lo_offset_spin_->setSuffix(" Hz");
+  lo_offset_spin_->setEnabled(false);
 
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
@@ -557,6 +581,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   control_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
   control_layout->addRow("AIS autotune", ais_autotune_checkbox_);
   control_layout->addRow("AIS baud trim", ais_baud_trim_checkbox_);
+  control_layout->addRow("DC blocker", dc_blocker_checkbox_);
+  control_layout->addRow("DC cutoff", dc_blocker_cutoff_spin_);
+  control_layout->addRow("Center notch", center_notch_checkbox_);
+  control_layout->addRow("Notch width", center_notch_width_spin_);
+  control_layout->addRow("LO offset", lo_offset_checkbox_);
+  control_layout->addRow("LO offset Hz", lo_offset_spin_);
   control_layout->addRow(button_row);
 
   auto* filter_group = new QGroupBox("Message Filters", central);
@@ -648,6 +678,15 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
     }
+  });
+  connect(dc_blocker_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
+    dc_blocker_cutoff_spin_->setEnabled(enabled);
+  });
+  connect(center_notch_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
+    center_notch_width_spin_->setEnabled(enabled);
+  });
+  connect(lo_offset_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
+    lo_offset_spin_->setEnabled(enabled);
   });
 
   connect(client_.get(), &GrpcClient::ReceiverEventReceived, this, &MainWindow::OnReceiverEvent);
@@ -746,6 +785,12 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_hardware_bandwidth_hz(static_cast<uint32_t>(hardware_bandwidth_spin_->value()));
   config.set_ais_autotune_enabled(ais_autotune_checkbox_->isChecked());
   config.set_ais_baud_trim_enabled(ais_baud_trim_checkbox_->isChecked());
+  config.set_dc_blocker_enabled(dc_blocker_checkbox_->isChecked());
+  config.set_dc_blocker_cutoff_hz(static_cast<uint32_t>(dc_blocker_cutoff_spin_->value()));
+  config.set_center_notch_enabled(center_notch_checkbox_->isChecked());
+  config.set_center_notch_width_hz(static_cast<uint32_t>(center_notch_width_spin_->value()));
+  config.set_lo_offset_enabled(lo_offset_checkbox_->isChecked());
+  config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
 
   const auto list_tokens = list_frequencies_edit_->text().split(',', Qt::SkipEmptyParts);
   for (const auto& token : list_tokens) {
@@ -757,13 +802,19 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, autotune=%5, baud-trim=%6)")
+  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, autotune=%5, baud-trim=%6, dc=%7@%8 Hz, notch=%9@%10 Hz, lo-offset=%11@%12 Hz)")
                 .arg(receiver_id)
                 .arg(sample_rate_spin_->value())
                 .arg(channel_bandwidth_spin_->value())
                 .arg(hardware_bandwidth_spin_->value())
                 .arg(ais_autotune_checkbox_->isChecked() ? "on" : "off")
-                .arg(ais_baud_trim_checkbox_->isChecked() ? "on" : "off"));
+                .arg(ais_baud_trim_checkbox_->isChecked() ? "on" : "off")
+                .arg(dc_blocker_checkbox_->isChecked() ? "on" : "off")
+                .arg(dc_blocker_cutoff_spin_->value())
+                .arg(center_notch_checkbox_->isChecked() ? "on" : "off")
+                .arg(center_notch_width_spin_->value())
+                .arg(lo_offset_checkbox_->isChecked() ? "on" : "off")
+                .arg(lo_offset_spin_->value()));
 }
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,

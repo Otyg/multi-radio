@@ -23,8 +23,32 @@ constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kMinChannelBandwidthHz = 2000;
 constexpr uint32_t kMaxChannelBandwidthHz = 500000;
 constexpr uint32_t kMinHardwareBandwidthHz = 1000;
+constexpr uint32_t kDefaultDcBlockerCutoffHz = 30;
+constexpr uint32_t kMinDcBlockerCutoffHz = 1;
+constexpr uint32_t kMaxDcBlockerCutoffHz = 5000;
+constexpr uint32_t kDefaultCenterNotchWidthHz = 2000;
+constexpr uint32_t kMinCenterNotchWidthHz = 100;
+constexpr uint32_t kMaxCenterNotchWidthHz = 200000;
 
 struct IqLowPassState {
+  double i = 0.0;
+  double q = 0.0;
+  bool initialized = false;
+};
+
+struct IqFrequencyShiftState {
+  double phase_rad = 0.0;
+};
+
+struct IqDcBlockState {
+  bool initialized = false;
+  double prev_in_i = 0.0;
+  double prev_in_q = 0.0;
+  double prev_out_i = 0.0;
+  double prev_out_q = 0.0;
+};
+
+struct IqCenterNotchState {
   double i = 0.0;
   double q = 0.0;
   bool initialized = false;
@@ -47,7 +71,129 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
     out.hardware_bandwidth_hz =
         std::clamp(out.hardware_bandwidth_hz, kMinHardwareBandwidthHz, out.sample_rate_hz);
   }
+  if (out.dc_blocker_enabled) {
+    if (out.dc_blocker_cutoff_hz == 0) {
+      out.dc_blocker_cutoff_hz = kDefaultDcBlockerCutoffHz;
+    }
+    out.dc_blocker_cutoff_hz =
+        std::clamp(out.dc_blocker_cutoff_hz, kMinDcBlockerCutoffHz, kMaxDcBlockerCutoffHz);
+  } else {
+    out.dc_blocker_cutoff_hz = kDefaultDcBlockerCutoffHz;
+  }
+  if (out.center_notch_enabled) {
+    if (out.center_notch_width_hz == 0) {
+      out.center_notch_width_hz = kDefaultCenterNotchWidthHz;
+    }
+    const uint32_t max_notch =
+        std::min(kMaxCenterNotchWidthHz, std::max<uint32_t>(kMinCenterNotchWidthHz, out.sample_rate_hz / 2));
+    out.center_notch_width_hz =
+        std::clamp(out.center_notch_width_hz, kMinCenterNotchWidthHz, max_notch);
+  } else {
+    out.center_notch_width_hz = kDefaultCenterNotchWidthHz;
+  }
+  if (!out.lo_offset_enabled) {
+    out.lo_offset_hz = 0;
+  } else {
+    const int32_t max_offset =
+        std::max<int32_t>(1000, static_cast<int32_t>(static_cast<double>(out.sample_rate_hz) * 0.45));
+    out.lo_offset_hz = std::clamp(out.lo_offset_hz, -max_offset, max_offset);
+  }
   return out;
+}
+
+void ApplyIqFrequencyShift(IQSampleBlock* iq, int32_t frequency_shift_hz, IqFrequencyShiftState* state) {
+  if (iq == nullptr || state == nullptr || iq->sample_rate_hz == 0 || iq->interleaved_iq.size() < 4) {
+    return;
+  }
+  if (frequency_shift_hz == 0) {
+    state->phase_rad = 0.0;
+    return;
+  }
+
+  const double omega = (-2.0 * kPi * static_cast<double>(frequency_shift_hz)) /
+                       static_cast<double>(iq->sample_rate_hz);
+  for (size_t idx = 0; idx + 1 < iq->interleaved_iq.size(); idx += 2) {
+    const double in_i = static_cast<double>(iq->interleaved_iq[idx]);
+    const double in_q = static_cast<double>(iq->interleaved_iq[idx + 1]);
+    const double phase = state->phase_rad;
+    const double cos_phase = std::cos(phase);
+    const double sin_phase = std::sin(phase);
+    const double out_i = in_i * cos_phase - in_q * sin_phase;
+    const double out_q = in_i * sin_phase + in_q * cos_phase;
+    iq->interleaved_iq[idx] = static_cast<int16_t>(std::lrint(std::clamp(out_i, -32768.0, 32767.0)));
+    iq->interleaved_iq[idx + 1] = static_cast<int16_t>(std::lrint(std::clamp(out_q, -32768.0, 32767.0)));
+    state->phase_rad += omega;
+    if (state->phase_rad > kPi) {
+      state->phase_rad -= 2.0 * kPi;
+    } else if (state->phase_rad < -kPi) {
+      state->phase_rad += 2.0 * kPi;
+    }
+  }
+}
+
+void ApplyIqDcBlocker(IQSampleBlock* iq, uint32_t cutoff_hz, IqDcBlockState* state) {
+  if (iq == nullptr || state == nullptr || iq->sample_rate_hz == 0 || iq->interleaved_iq.size() < 4) {
+    return;
+  }
+  if (cutoff_hz == 0) {
+    state->initialized = false;
+    return;
+  }
+
+  const double alpha = std::clamp(
+      std::exp((-2.0 * kPi * static_cast<double>(cutoff_hz)) / static_cast<double>(iq->sample_rate_hz)), 0.0, 0.9999);
+  for (size_t idx = 0; idx + 1 < iq->interleaved_iq.size(); idx += 2) {
+    const double in_i = static_cast<double>(iq->interleaved_iq[idx]);
+    const double in_q = static_cast<double>(iq->interleaved_iq[idx + 1]);
+    if (!state->initialized) {
+      state->prev_in_i = in_i;
+      state->prev_in_q = in_q;
+      state->prev_out_i = 0.0;
+      state->prev_out_q = 0.0;
+      state->initialized = true;
+    }
+    const double out_i = in_i - state->prev_in_i + alpha * state->prev_out_i;
+    const double out_q = in_q - state->prev_in_q + alpha * state->prev_out_q;
+    state->prev_in_i = in_i;
+    state->prev_in_q = in_q;
+    state->prev_out_i = out_i;
+    state->prev_out_q = out_q;
+    iq->interleaved_iq[idx] = static_cast<int16_t>(std::lrint(std::clamp(out_i, -32768.0, 32767.0)));
+    iq->interleaved_iq[idx + 1] = static_cast<int16_t>(std::lrint(std::clamp(out_q, -32768.0, 32767.0)));
+  }
+}
+
+void ApplyIqCenterNotch(IQSampleBlock* iq, uint32_t notch_width_hz, IqCenterNotchState* state) {
+  if (iq == nullptr || state == nullptr || iq->sample_rate_hz == 0 || iq->interleaved_iq.size() < 4) {
+    return;
+  }
+  if (notch_width_hz == 0) {
+    state->initialized = false;
+    return;
+  }
+
+  const double nyquist_hz = static_cast<double>(iq->sample_rate_hz) * 0.5;
+  const double cutoff_hz =
+      std::clamp(static_cast<double>(notch_width_hz) * 0.5, 1.0, std::max(1.0, nyquist_hz - 1.0));
+  const double alpha = std::clamp(
+      1.0 - std::exp((-2.0 * kPi * cutoff_hz) / static_cast<double>(iq->sample_rate_hz)), 0.0001, 1.0);
+
+  for (size_t idx = 0; idx + 1 < iq->interleaved_iq.size(); idx += 2) {
+    const double in_i = static_cast<double>(iq->interleaved_iq[idx]);
+    const double in_q = static_cast<double>(iq->interleaved_iq[idx + 1]);
+    if (!state->initialized) {
+      state->i = in_i;
+      state->q = in_q;
+      state->initialized = true;
+    } else {
+      state->i += alpha * (in_i - state->i);
+      state->q += alpha * (in_q - state->q);
+    }
+    const double out_i = std::clamp(in_i - state->i, -32768.0, 32767.0);
+    const double out_q = std::clamp(in_q - state->q, -32768.0, 32767.0);
+    iq->interleaved_iq[idx] = static_cast<int16_t>(std::lrint(out_i));
+    iq->interleaved_iq[idx + 1] = static_cast<int16_t>(std::lrint(out_q));
+  }
 }
 
 void ApplyIqChannelBandwidth(IQSampleBlock* iq, uint32_t channel_bandwidth_hz, IqLowPassState* state) {
@@ -325,6 +471,12 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial,
   mode_config_.hardware_bandwidth_hz = 0;
   mode_config_.ais_autotune_enabled = false;
   mode_config_.ais_baud_trim_enabled = false;
+  mode_config_.dc_blocker_enabled = false;
+  mode_config_.dc_blocker_cutoff_hz = kDefaultDcBlockerCutoffHz;
+  mode_config_.center_notch_enabled = false;
+  mode_config_.center_notch_width_hz = kDefaultCenterNotchWidthHz;
+  mode_config_.lo_offset_enabled = false;
+  mode_config_.lo_offset_hz = 0;
   mode_config_ = NormalizeModeConfig(mode_config_);
   scheduler_.Configure(mode_, mode_config_);
 }
@@ -422,6 +574,9 @@ void ReceiverWorker::RunLoop() {
   uint32_t applied_sample_rate_hz = 0;
   uint32_t applied_hardware_bandwidth_hz = std::numeric_limits<uint32_t>::max();
   IqLowPassState lowpass_state;
+  IqFrequencyShiftState frequency_shift_state;
+  IqDcBlockState dc_block_state;
+  IqCenterNotchState center_notch_state;
 
   while (running_.load()) {
     std::optional<double> frequency_hz;
@@ -431,6 +586,12 @@ void ReceiverWorker::RunLoop() {
     uint32_t desired_hardware_bandwidth_hz = 0;
     bool ais_autotune_enabled = false;
     bool ais_baud_trim_enabled = false;
+    bool dc_blocker_enabled = false;
+    uint32_t dc_blocker_cutoff_hz = kDefaultDcBlockerCutoffHz;
+    bool center_notch_enabled = false;
+    uint32_t center_notch_width_hz = kDefaultCenterNotchWidthHz;
+    bool lo_offset_enabled = false;
+    int32_t lo_offset_hz = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode_config_ = NormalizeModeConfig(mode_config_);
@@ -441,6 +602,12 @@ void ReceiverWorker::RunLoop() {
       desired_hardware_bandwidth_hz = mode_config_.hardware_bandwidth_hz;
       ais_autotune_enabled = mode_config_.ais_autotune_enabled;
       ais_baud_trim_enabled = mode_config_.ais_baud_trim_enabled;
+      dc_blocker_enabled = mode_config_.dc_blocker_enabled;
+      dc_blocker_cutoff_hz = mode_config_.dc_blocker_cutoff_hz;
+      center_notch_enabled = mode_config_.center_notch_enabled;
+      center_notch_width_hz = mode_config_.center_notch_width_hz;
+      lo_offset_enabled = mode_config_.lo_offset_enabled;
+      lo_offset_hz = mode_config_.lo_offset_hz;
     }
 
     std::string error;
@@ -458,6 +625,9 @@ void ReceiverWorker::RunLoop() {
       }
       applied_sample_rate_hz = desired_sample_rate_hz;
       lowpass_state.initialized = false;
+      dc_block_state.initialized = false;
+      center_notch_state.initialized = false;
+      frequency_shift_state.phase_rad = 0.0;
       std::ostringstream msg;
       msg << "sample-rate updated to " << desired_sample_rate_hz << " Hz";
       PublishEvent(EventKind::kInfo, msg.str());
@@ -487,21 +657,49 @@ void ReceiverWorker::RunLoop() {
       continue;
     }
 
-    const auto tune_hz = static_cast<uint32_t>(frequency_hz.value());
+    const double logical_tuned_frequency_hz = frequency_hz.value();
+    int64_t requested_tune_hz = static_cast<int64_t>(std::llround(logical_tuned_frequency_hz));
+    if (lo_offset_enabled) {
+      requested_tune_hz += static_cast<int64_t>(lo_offset_hz);
+    }
+    const bool tune_hz_in_range = requested_tune_hz > 0 &&
+                                  requested_tune_hz <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+    if (!tune_hz_in_range) {
+      requested_tune_hz = static_cast<int64_t>(std::llround(logical_tuned_frequency_hz));
+    }
+    const int32_t effective_lo_offset_hz = (lo_offset_enabled && tune_hz_in_range) ? lo_offset_hz : 0;
+    const auto tune_hz = static_cast<uint32_t>(requested_tune_hz);
     if (!device_->SetCenterFrequencyHz(tune_hz, &error)) {
       {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_ = error;
       }
-      PublishEvent(EventKind::kError, "tune failed: " + error, frequency_hz.value());
+      PublishEvent(EventKind::kError, "tune failed: " + error, logical_tuned_frequency_hz);
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
       continue;
     }
 
-    PublishEvent(EventKind::kTuneHop, "tuned", frequency_hz.value());
-    lowpass_state.initialized = false;
+    if (lo_offset_enabled && tune_hz_in_range) {
+      std::ostringstream msg;
+      msg << "tuned with LO offset " << lo_offset_hz << " Hz (hw=" << tune_hz
+          << " Hz, target=" << static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz))
+          << " Hz)";
+      PublishEvent(EventKind::kInfo, msg.str(), logical_tuned_frequency_hz, false);
+    } else if (lo_offset_enabled && !tune_hz_in_range) {
+      std::ostringstream msg;
+      msg << "LO offset disabled for hop: target "
+          << static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz))
+          << " Hz with offset " << lo_offset_hz << " Hz is out of range";
+      PublishEvent(EventKind::kWarning, msg.str(), logical_tuned_frequency_hz, false);
+    }
 
-    const double tuned_frequency_hz = frequency_hz.value();
+    PublishEvent(EventKind::kTuneHop, "tuned", logical_tuned_frequency_hz);
+    lowpass_state.initialized = false;
+    dc_block_state.initialized = false;
+    center_notch_state.initialized = false;
+    frequency_shift_state.phase_rad = 0.0;
+
+    const double tuned_frequency_hz = logical_tuned_frequency_hz;
     const auto dwell_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dwell_ms);
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
 
@@ -516,6 +714,23 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
+      if (effective_lo_offset_hz != 0) {
+        ApplyIqFrequencyShift(&iq, effective_lo_offset_hz, &frequency_shift_state);
+      } else {
+        frequency_shift_state.phase_rad = 0.0;
+      }
+      if (dc_blocker_enabled) {
+        ApplyIqDcBlocker(&iq, dc_blocker_cutoff_hz, &dc_block_state);
+      } else {
+        dc_block_state.initialized = false;
+      }
+      if (center_notch_enabled) {
+        ApplyIqCenterNotch(&iq, center_notch_width_hz, &center_notch_state);
+      } else {
+        center_notch_state.initialized = false;
+      }
+      iq.center_frequency_hz = static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz));
+
       double receiver_peak_hz = 0.0;
       double receiver_peak_strength = 0.0;
       double receiver_start_hz = 0.0;
