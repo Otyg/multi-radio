@@ -37,8 +37,7 @@ constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 40;
-constexpr uint32_t kAudioSampleRateNarrowbandHz = 16000;
-constexpr uint32_t kAudioSampleRateWfmHz = 48000;
+constexpr uint32_t kAudioSampleRateHz = 48000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
 constexpr uint32_t kSquelchCloseDebounceMs = 500;
@@ -107,10 +106,8 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
                      AudioDemodState* state, std::vector<int16_t>* pcm_out);
 
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
-  if (modulation == Modulation::kWfm) {
-    return kAudioSampleRateWfmHz;
-  }
-  return kAudioSampleRateNarrowbandHz;
+  (void)modulation;
+  return kAudioSampleRateHz;
 }
 
 size_t AudioFrameSamplesForRate(uint32_t audio_sample_rate_hz) {
@@ -1074,7 +1071,9 @@ void ReceiverWorker::RunLoop() {
     bool squelch_open = scan_list_monitor_mode && has_scan_squelch;
     bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
-    bool audio_gate_open_until_channel_hop = scan_list_monitor_mode && has_scan_squelch;
+    // Keep audio flowing for the full channel visit to avoid short, stitched clips when
+    // squelch state chatters or never reaches a stable "open" transition.
+    bool audio_gate_open_until_channel_hop = has_scan_squelch;
     std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
     std::optional<std::chrono::steady_clock::time_point> squelch_close_candidate_at;
     double last_signal_db = -120.0;
