@@ -49,7 +49,7 @@ constexpr int kScanRangeModeTabIndex = 1;
 constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
-constexpr double kDefaultScanListSquelchDb = -30.0;
+constexpr double kDefaultScanListSquelchDb = -67.5;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {

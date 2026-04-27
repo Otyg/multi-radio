@@ -350,7 +350,7 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   state->has_signal_level_db = false;
   state->signal_level_db = -120.0;
   state->has_squelch_threshold_db = false;
-  state->squelch_threshold_db = -30.0;
+  state->squelch_threshold_db = -67.5;
 }
 
 int SignalVisualizationWidget::NormalizeFftSize(int fft_size) {
@@ -661,7 +661,7 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   display.has_signal_level_db = false;
   display.signal_level_db = -120.0;
   display.has_squelch_threshold_db = false;
-  display.squelch_threshold_db = -30.0;
+  display.squelch_threshold_db = -67.5;
 
   if (states_.isEmpty()) {
     PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);

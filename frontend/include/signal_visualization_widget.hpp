@@ -62,7 +62,7 @@ class SignalVisualizationWidget : public QWidget {
     bool has_signal_level_db = false;
     double signal_level_db = -120.0;
     bool has_squelch_threshold_db = false;
-    double squelch_threshold_db = -30.0;
+    double squelch_threshold_db = -67.5;
   };
   struct ReceiverState {
     QVector<double> waveform;
@@ -81,7 +81,7 @@ class SignalVisualizationWidget : public QWidget {
     bool has_signal_level_db = false;
     double signal_level_db = -120.0;
     bool has_squelch_threshold_db = false;
-    double squelch_threshold_db = -30.0;
+    double squelch_threshold_db = -67.5;
   };
 
   void EnsureState(ReceiverState* state) const;

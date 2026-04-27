@@ -121,6 +121,7 @@ Supported modulation values in import: `AM`, `NFM`, `FM`, `WFM`.
 open for monitoring/audio while frequency hopping continues strictly on dwell timing (no squelch-hold on a channel).
 
 `SCAN_LIST` has a `Default squelch` control used for new channels and CSV imports.
+Initial default is `-67.5 dB`.
 Each channel can either use that default or set its own squelch threshold in channel settings.
 Channels without an explicit squelch value use the default automatically.
 Use `Auto squelch` in `SCAN_LIST` for a simple calibration pass (4 loops in monitor mode):

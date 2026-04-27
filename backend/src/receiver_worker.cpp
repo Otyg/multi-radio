@@ -766,7 +766,7 @@ void ReceiverWorker::RunLoop() {
     int32_t lo_offset_hz = 0;
     bool scan_list_monitor_mode = false;
     int scan_list_channel_index = -1;
-    double squelch_threshold_db = -30.0;
+    double squelch_threshold_db = -67.5;
     Modulation scan_modulation = Modulation::kNfm;
     bool has_scan_squelch = false;
     double scan_list_channel_frequency_hz = 0.0;

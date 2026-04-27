@@ -96,7 +96,7 @@ class MainWindow : public QMainWindow {
     double frequency_mhz = 0.0;
     v1::Modulation modulation = v1::MODULATION_NFM;
     int bandwidth_hz = 0;
-    double squelch_threshold_db = -30.0;
+    double squelch_threshold_db = -67.5;
     int dwell_ms = 0;
     bool use_default_squelch = true;
   };

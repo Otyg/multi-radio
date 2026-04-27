@@ -42,7 +42,7 @@ struct ModeConfig {
     double frequency_hz = 0.0;
     Modulation modulation = Modulation::kNfm;
     uint32_t channel_bandwidth_hz = 0;
-    double squelch_threshold_db = -30.0;
+    double squelch_threshold_db = -67.5;
     uint32_t dwell_ms = 0;
     bool use_default_squelch = true;
   };
@@ -64,7 +64,7 @@ struct ModeConfig {
   bool lo_offset_enabled = false;
   int32_t lo_offset_hz = 0;
   bool scan_list_monitor_mode = false;
-  double scan_list_default_squelch_db = -30.0;
+  double scan_list_default_squelch_db = -67.5;
 };
 
 struct ReceiverDescriptor {
