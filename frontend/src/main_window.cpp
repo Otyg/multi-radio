@@ -54,6 +54,7 @@ constexpr int kAudioPrefillMs = 220;
 constexpr int kAudioSinkBufferMs = 3000;
 constexpr int kAudioPendingMaxMs = 6000;
 constexpr int kAudioDrainIntervalMs = 10;
+constexpr int kAudioBytesPerSample = 2;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
@@ -1927,10 +1928,13 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
   }
   audio_pending_pcm_.append(pcm);
   const int max_buffered_audio_bytes =
-      std::max(4096, (sample_rate_hz * 2 * kAudioPendingMaxMs) / 1000);
+      std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPendingMaxMs) / 1000);
   if (audio_pending_pcm_.size() > max_buffered_audio_bytes) {
-    const int dropped = audio_pending_pcm_.size() - max_buffered_audio_bytes;
-    audio_pending_pcm_.remove(0, dropped);
+    int dropped = audio_pending_pcm_.size() - max_buffered_audio_bytes;
+    dropped -= dropped % kAudioBytesPerSample;
+    if (dropped > 0) {
+      audio_pending_pcm_.remove(0, dropped);
+    }
     if (!audio_queue_overrun_logged_) {
       AppendLog(QString("Audio queue overrun: dropped %1 bytes").arg(dropped));
       audio_queue_overrun_logged_ = true;
@@ -1940,7 +1944,7 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
   }
   if (!audio_prefill_complete_) {
     const int prefill_bytes =
-        std::max(4096, (sample_rate_hz * 2 * kAudioPrefillMs) / 1000);
+        std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPrefillMs) / 1000);
     if (audio_pending_pcm_.size() < prefill_bytes) {
       return;
     }
@@ -1981,7 +1985,8 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
   audio_format.setChannelCount(1);
   audio_format.setSampleFormat(QAudioFormat::Int16);
   audio_sink_ = new QAudioSink(default_output, audio_format, this);
-  audio_sink_->setBufferSize(std::max(4096, (sample_rate_hz * 2 * kAudioSinkBufferMs) / 1000));
+  audio_sink_->setBufferSize(
+      std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioSinkBufferMs) / 1000));
   audio_output_device_ = audio_sink_->start();
   if (audio_output_device_ == nullptr) {
     audio_output_disabled_ = true;
@@ -2013,11 +2018,19 @@ void MainWindow::DrainAudioOutputQueue() {
       }
       bytes_to_write = std::min(bytes_to_write, bytes_free);
     }
+    bytes_to_write -= (bytes_to_write % kAudioBytesPerSample);
+    if (bytes_to_write <= 0) {
+      return;
+    }
     const qint64 written = audio_output_device_->write(audio_pending_pcm_.constData(), bytes_to_write);
     if (written <= 0) {
       return;
     }
-    audio_pending_pcm_.remove(0, static_cast<int>(written));
+    const qint64 aligned_written = written - (written % kAudioBytesPerSample);
+    if (aligned_written <= 0) {
+      return;
+    }
+    audio_pending_pcm_.remove(0, static_cast<int>(aligned_written));
   }
 #endif
 }

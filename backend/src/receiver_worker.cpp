@@ -939,10 +939,13 @@ ReceiverStatus ReceiverWorker::Status() const {
 void ReceiverWorker::RunLoop() {
   uint32_t applied_sample_rate_hz = 0;
   uint32_t applied_hardware_bandwidth_hz = std::numeric_limits<uint32_t>::max();
+  uint32_t applied_tune_hz = std::numeric_limits<uint32_t>::max();
   IqLowPassState lowpass_state;
   IqFrequencyShiftState frequency_shift_state;
   IqDcBlockState dc_block_state;
   IqCenterNotchState center_notch_state;
+  std::vector<int16_t> audio_pcm_buffer;
+  AudioDemodState audio_demod_state;
 
   while (running_.load()) {
     std::optional<double> frequency_hz;
@@ -1044,6 +1047,9 @@ void ReceiverWorker::RunLoop() {
     }
 
     if (!frequency_hz.has_value()) {
+      applied_tune_hz = std::numeric_limits<uint32_t>::max();
+      audio_pcm_buffer.clear();
+      audio_demod_state = AudioDemodState{};
       PublishEvent(EventKind::kWarning, "no active frequencies in current mode");
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       continue;
@@ -1061,31 +1067,42 @@ void ReceiverWorker::RunLoop() {
     }
     const int32_t effective_lo_offset_hz = (lo_offset_enabled && tune_hz_in_range) ? lo_offset_hz : 0;
     const auto tune_hz = static_cast<uint32_t>(requested_tune_hz);
-    if (!device_->SetCenterFrequencyHz(tune_hz, &error)) {
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = error;
+    const bool tune_changed = (tune_hz != applied_tune_hz);
+    if (tune_changed) {
+      if (!device_->SetCenterFrequencyHz(tune_hz, &error)) {
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          last_error_ = error;
+        }
+        applied_tune_hz = std::numeric_limits<uint32_t>::max();
+        PublishEvent(EventKind::kError, "tune failed: " + error, logical_tuned_frequency_hz);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        continue;
       }
-      PublishEvent(EventKind::kError, "tune failed: " + error, logical_tuned_frequency_hz);
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-      continue;
-    }
+      applied_tune_hz = tune_hz;
+      lowpass_state.initialized = false;
+      dc_block_state.initialized = false;
+      center_notch_state.initialized = false;
+      frequency_shift_state.phase_rad = 0.0;
+      audio_pcm_buffer.clear();
+      audio_demod_state = AudioDemodState{};
 
-    if (lo_offset_enabled && tune_hz_in_range) {
-      std::ostringstream msg;
-      msg << "tuned with LO offset " << lo_offset_hz << " Hz (hw=" << tune_hz
-          << " Hz, target=" << static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz))
-          << " Hz)";
-      PublishEvent(EventKind::kInfo, msg.str(), logical_tuned_frequency_hz, false);
-    } else if (lo_offset_enabled && !tune_hz_in_range) {
-      std::ostringstream msg;
-      msg << "LO offset disabled for hop: target "
-          << static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz))
-          << " Hz with offset " << lo_offset_hz << " Hz is out of range";
-      PublishEvent(EventKind::kWarning, msg.str(), logical_tuned_frequency_hz, false);
-    }
+      if (lo_offset_enabled && tune_hz_in_range) {
+        std::ostringstream msg;
+        msg << "tuned with LO offset " << lo_offset_hz << " Hz (hw=" << tune_hz
+            << " Hz, target=" << static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz))
+            << " Hz)";
+        PublishEvent(EventKind::kInfo, msg.str(), logical_tuned_frequency_hz, false);
+      } else if (lo_offset_enabled && !tune_hz_in_range) {
+        std::ostringstream msg;
+        msg << "LO offset disabled for hop: target "
+            << static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz))
+            << " Hz with offset " << lo_offset_hz << " Hz is out of range";
+        PublishEvent(EventKind::kWarning, msg.str(), logical_tuned_frequency_hz, false);
+      }
 
-    PublishEvent(EventKind::kTuneHop, "tuned", logical_tuned_frequency_hz);
+      PublishEvent(EventKind::kTuneHop, "tuned", logical_tuned_frequency_hz);
+    }
     if (has_scan_squelch) {
       std::ostringstream status;
       status << "SCAN_STATUS idx=" << scan_list_channel_index
@@ -1095,10 +1112,6 @@ void ReceiverWorker::RunLoop() {
              << " monitor=" << (scan_list_monitor_mode ? "1" : "0");
       PublishEvent(EventKind::kInfo, status.str(), logical_tuned_frequency_hz, false);
     }
-    lowpass_state.initialized = false;
-    dc_block_state.initialized = false;
-    center_notch_state.initialized = false;
-    frequency_shift_state.phase_rad = 0.0;
 
     const double tuned_frequency_hz = logical_tuned_frequency_hz;
     const auto tune_started_at = std::chrono::steady_clock::now();
@@ -1111,8 +1124,6 @@ void ReceiverWorker::RunLoop() {
     double last_signal_db = -120.0;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
-    std::vector<int16_t> audio_pcm_buffer;
-    AudioDemodState audio_demod_state;
 
     while (running_.load()) {
       const auto now = std::chrono::steady_clock::now();
