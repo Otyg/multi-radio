@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -286,6 +287,19 @@ std::string FormatSeries(const std::vector<double>& values, int precision) {
     out << std::fixed << std::setprecision(precision) << values[i];
   }
   return out.str();
+}
+
+std::string SanitizeToken(std::string text) {
+  if (text.empty()) {
+    return "unnamed";
+  }
+  for (char& ch : text) {
+    const unsigned char uch = static_cast<unsigned char>(ch);
+    if (std::isspace(uch) != 0 || ch == '=' || ch == '"' || ch == '\'' || ch == ',') {
+      ch = '_';
+    }
+  }
+  return text;
 }
 
 std::string Base64Encode(const std::vector<uint8_t>& data) {
@@ -755,6 +769,8 @@ void ReceiverWorker::RunLoop() {
     double squelch_threshold_db = -30.0;
     Modulation scan_modulation = Modulation::kNfm;
     bool has_scan_squelch = false;
+    double scan_list_channel_frequency_hz = 0.0;
+    std::string scan_list_channel_label = "unnamed";
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode_config_ = NormalizeModeConfig(mode_config_);
@@ -764,6 +780,7 @@ void ReceiverWorker::RunLoop() {
         frequency_hz = target->frequency_hz;
         dwell_ms = target->dwell_ms;
         scan_list_channel_index = target->scan_list_channel_index;
+        scan_list_channel_frequency_hz = target->frequency_hz;
       }
       desired_sample_rate_hz = mode_config_.sample_rate_hz;
       channel_bandwidth_hz = mode_config_.channel_bandwidth_hz;
@@ -782,8 +799,15 @@ void ReceiverWorker::RunLoop() {
         squelch_threshold_db = channel.squelch_threshold_db;
         scan_modulation = channel.modulation;
         has_scan_squelch = true;
+        scan_list_channel_frequency_hz = channel.frequency_hz;
+        if (!channel.label.empty()) {
+          scan_list_channel_label = channel.label;
+        } else {
+          scan_list_channel_label = "idx_" + std::to_string(scan_list_channel_index);
+        }
       }
     }
+    const std::string scan_list_channel_label_token = SanitizeToken(scan_list_channel_label);
 
     std::string error;
     if (desired_sample_rate_hz != applied_sample_rate_hz) {
@@ -890,6 +914,8 @@ void ReceiverWorker::RunLoop() {
     bool squelch_open = scan_list_monitor_mode && has_scan_squelch;
     bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
+    std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
+    double last_signal_db = -120.0;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_audio_emit = std::chrono::steady_clock::time_point::min();
     auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
@@ -949,6 +975,7 @@ void ReceiverWorker::RunLoop() {
 
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
       const double signal_db = EstimateSignalDbfs(iq);
+      last_signal_db = signal_db;
 
       if (hold_on_squelch) {
         const bool next_squelch_open = signal_db >= squelch_threshold_db;
@@ -957,8 +984,30 @@ void ReceiverWorker::RunLoop() {
           if (squelch_open) {
             squelch_seen_open = true;
             squelch_closed_at.reset();
+            squelch_opened_at = std::chrono::steady_clock::now();
+            std::ostringstream opened;
+            opened << "SCAN_SQUELCH_OPEN idx=" << scan_list_channel_index
+                   << " label=" << scan_list_channel_label_token
+                   << " freq_hz=" << FormatDouble(scan_list_channel_frequency_hz, 0)
+                   << " signal_db=" << FormatDouble(signal_db, 1)
+                   << " threshold_db=" << FormatDouble(squelch_threshold_db, 1);
+            PublishEvent(EventKind::kInfo, opened.str(), tuned_frequency_hz);
           } else {
             squelch_closed_at = std::chrono::steady_clock::now();
+            if (squelch_opened_at.has_value()) {
+              const auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - *squelch_opened_at)
+                                       .count();
+              std::ostringstream closed;
+              closed << "SCAN_SQUELCH_CLOSE idx=" << scan_list_channel_index
+                     << " label=" << scan_list_channel_label_token
+                     << " freq_hz=" << FormatDouble(scan_list_channel_frequency_hz, 0)
+                     << " signal_db=" << FormatDouble(signal_db, 1)
+                     << " threshold_db=" << FormatDouble(squelch_threshold_db, 1)
+                     << " open_ms=" << open_ms;
+              PublishEvent(EventKind::kInfo, closed.str(), tuned_frequency_hz);
+            }
+            squelch_opened_at.reset();
           }
           std::ostringstream status;
           status << "SCAN_STATUS idx=" << scan_list_channel_index
@@ -1050,6 +1099,19 @@ void ReceiverWorker::RunLoop() {
         }
         next_audio_emit = now + std::chrono::milliseconds(kAudioFrameIntervalMs);
       }
+    }
+    if (hold_on_squelch && squelch_opened_at.has_value()) {
+      const auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - *squelch_opened_at)
+                               .count();
+      std::ostringstream closed;
+      closed << "SCAN_SQUELCH_CLOSE idx=" << scan_list_channel_index
+             << " label=" << scan_list_channel_label_token
+             << " freq_hz=" << FormatDouble(scan_list_channel_frequency_hz, 0)
+             << " signal_db=" << FormatDouble(last_signal_db, 1)
+             << " threshold_db=" << FormatDouble(squelch_threshold_db, 1)
+             << " open_ms=" << open_ms;
+      PublishEvent(EventKind::kInfo, closed.str(), tuned_frequency_hz);
     }
   }
 }

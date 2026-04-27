@@ -123,8 +123,12 @@ open for monitoring/audio while frequency hopping continues strictly on dwell ti
 `SCAN_LIST` has a `Default squelch` control used for new channels and CSV imports.
 Each channel can either use that default or set its own squelch threshold in channel settings.
 Channels without an explicit squelch value use the default automatically.
+Use `Auto squelch` in `SCAN_LIST` for a simple calibration pass (4 loops in monitor mode):
+it samples `signal_db` over configured channels and sets `Default squelch` to mean + 3 dB.
 The active scan squelch threshold is shown as a dashed marker with value in the spectrum panel,
 and the marker follows live updates in the `Default squelch` field when default squelch is active.
+When scan-list squelch opens/closes, backend events `SCAN_SQUELCH_OPEN`/`SCAN_SQUELCH_CLOSE`
+include channel info and open duration (`open_ms` on close), and these are shown in GUI log.
 
 If the client crashes on startup around audio backend initialization, temporarily disable audio output:
 

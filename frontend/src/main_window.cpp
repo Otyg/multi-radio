@@ -763,9 +763,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* list_actions = new QHBoxLayout();
   auto* add_channel_button = new QPushButton("Add channel", list_tab);
   auto* import_csv_button = new QPushButton("Import CSV", list_tab);
+  auto* auto_squelch_button = new QPushButton("Auto squelch", list_tab);
   auto* clear_channels_button = new QPushButton("Clear channels", list_tab);
   list_actions->addWidget(add_channel_button);
   list_actions->addWidget(import_csv_button);
+  list_actions->addWidget(auto_squelch_button);
   list_actions->addWidget(clear_channels_button);
   list_actions->addStretch(1);
   list_layout->addLayout(list_actions);
@@ -782,6 +784,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   connect(add_channel_button, &QPushButton::clicked, this, &MainWindow::AddScanListChannel);
   connect(import_csv_button, &QPushButton::clicked, this, &MainWindow::ImportScanListCsv);
+  connect(auto_squelch_button, &QPushButton::clicked, this, &MainWindow::StartAutoSquelchCalibration);
   connect(scan_list_monitor_checkbox_, &QCheckBox::toggled, this, [this](bool /*enabled*/) {
     SaveScanListConfigToSettings();
     if (receiver_combo_->currentIndex() >= 0) {
@@ -817,6 +820,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
                               "Remove all scan-list channels?") != QMessageBox::Yes) {
       return;
     }
+    auto_squelch_active_ = false;
+    auto_squelch_restore_monitor_mode_ = false;
     scan_list_channels_.clear();
     active_scan_list_channel_index_ = -1;
     active_scan_list_channel_state_ = ScanListChannelState::kIdle;
@@ -954,6 +959,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     SaveScanListConfigToSettings();
   });
   connect(receiver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+    auto_squelch_active_ = false;
+    auto_squelch_restore_monitor_mode_ = false;
     active_scan_list_channel_index_ = -1;
     active_scan_list_channel_state_ = ScanListChannelState::kIdle;
     if (receiver_combo_->currentIndex() >= 0 && scan_list_default_squelch_spin_ != nullptr) {
@@ -1227,6 +1234,48 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     return;
   }
   if (event_kind == static_cast<int>(v1::EVENT_KIND_TUNE_HOP)) {
+    return;
+  }
+  if (message.startsWith("SCAN_SQUELCH_OPEN ") || message.startsWith("SCAN_SQUELCH_CLOSE ")) {
+    bool idx_ok = false;
+    const int channel_index = TokenValue(message, "idx").toInt(&idx_ok);
+    QString channel_label;
+    if (IsSelectedReceiver(receiver_id) && idx_ok && channel_index >= 0 &&
+        static_cast<size_t>(channel_index) < scan_list_channels_.size()) {
+      channel_label = scan_list_channels_[static_cast<size_t>(channel_index)].label.trimmed();
+    }
+    if (channel_label.isEmpty()) {
+      channel_label = TokenValue(message, "label");
+      channel_label.replace('_', ' ');
+      if (channel_label.isEmpty()) {
+        channel_label = idx_ok ? QString("Kanal %1").arg(channel_index + 1) : QString("Kanal ?");
+      }
+    }
+    bool signal_ok = false;
+    const double signal_db = TokenValue(message, "signal_db").toDouble(&signal_ok);
+    bool threshold_ok = false;
+    const double threshold_db = TokenValue(message, "threshold_db").toDouble(&threshold_ok);
+    bool open_ms_ok = false;
+    const qint64 open_ms = TokenValue(message, "open_ms").toLongLong(&open_ms_ok);
+
+    if (message.startsWith("SCAN_SQUELCH_OPEN ")) {
+      AppendLog(QString("[%1] RX%2 SCAN squelch OPEN ch=%3 idx=%4 signal=%5 dB threshold=%6 dB")
+                    .arg(ToLocalTime(unix_ms))
+                    .arg(receiver_id)
+                    .arg(channel_label)
+                    .arg(idx_ok ? channel_index : -1)
+                    .arg(signal_ok ? QString::number(signal_db, 'f', 1) : "?")
+                    .arg(threshold_ok ? QString::number(threshold_db, 'f', 1) : "?"));
+    } else {
+      AppendLog(QString("[%1] RX%2 SCAN squelch CLOSE ch=%3 idx=%4 open=%5 ms signal=%6 dB threshold=%7 dB")
+                    .arg(ToLocalTime(unix_ms))
+                    .arg(receiver_id)
+                    .arg(channel_label)
+                    .arg(idx_ok ? channel_index : -1)
+                    .arg(open_ms_ok ? open_ms : -1)
+                    .arg(signal_ok ? QString::number(signal_db, 'f', 1) : "?")
+                    .arg(threshold_ok ? QString::number(threshold_db, 'f', 1) : "?"));
+    }
     return;
   }
 
@@ -1754,6 +1803,24 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
   if (!idx_ok || index < 0 || static_cast<size_t>(index) >= scan_list_channels_.size()) {
     return;
   }
+  bool monitor_ok = false;
+  const int monitor = TokenValue(message, "monitor").toInt(&monitor_ok);
+  if (auto_squelch_active_ && signal_ok && receiver_id == auto_squelch_receiver_id_ && monitor_ok &&
+      monitor == 1) {
+    if (auto_squelch_has_last_channel_ && index < auto_squelch_last_channel_index_) {
+      ++auto_squelch_completed_loops_;
+      AppendLog(QString("Auto squelch progress: loop %1/%2")
+                    .arg(auto_squelch_completed_loops_)
+                    .arg(auto_squelch_required_loops_));
+    }
+    auto_squelch_has_last_channel_ = true;
+    auto_squelch_last_channel_index_ = index;
+    auto_squelch_signal_sum_db_ += signal_db;
+    ++auto_squelch_sample_count_;
+    if (auto_squelch_completed_loops_ >= auto_squelch_required_loops_) {
+      CompleteAutoSquelchCalibration();
+    }
+  }
   const QString state = TokenValue(message, "state").trimmed().toLower();
   active_scan_list_channel_index_ = index;
   if (state == "open") {
@@ -1762,6 +1829,71 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
     active_scan_list_channel_state_ = ScanListChannelState::kSquelchClosed;
   }
   RefreshScanListChannelCards();
+}
+
+void MainWindow::StartAutoSquelchCalibration() {
+  if (auto_squelch_active_) {
+    auto_squelch_active_ = false;
+    auto_squelch_restore_monitor_mode_ = false;
+    AppendLog("Auto squelch canceled");
+    return;
+  }
+  if (scan_list_channels_.empty()) {
+    QMessageBox::information(this, "Auto squelch", "No scan-list channels configured.");
+    return;
+  }
+  if (receiver_combo_->currentIndex() < 0) {
+    QMessageBox::information(this, "Auto squelch", "Select a receiver first.");
+    return;
+  }
+
+  auto_squelch_receiver_id_ = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+  auto_squelch_required_loops_ = 4;
+  auto_squelch_completed_loops_ = 0;
+  auto_squelch_last_channel_index_ = -1;
+  auto_squelch_has_last_channel_ = false;
+  auto_squelch_signal_sum_db_ = 0.0;
+  auto_squelch_sample_count_ = 0;
+  auto_squelch_active_ = true;
+
+  if (mode_tabs_->currentIndex() != kScanListModeTabIndex) {
+    mode_tabs_->setCurrentIndex(kScanListModeTabIndex);
+  }
+  auto_squelch_restore_monitor_mode_ =
+      (scan_list_monitor_checkbox_ != nullptr && !scan_list_monitor_checkbox_->isChecked());
+  if (scan_list_monitor_checkbox_ != nullptr && !scan_list_monitor_checkbox_->isChecked()) {
+    scan_list_monitor_checkbox_->setChecked(true);
+  }
+  ApplyModeAndConfig();
+  AppendLog(QString("Auto squelch started: sampling %1 loops in monitor mode")
+                .arg(auto_squelch_required_loops_));
+}
+
+void MainWindow::CompleteAutoSquelchCalibration() {
+  if (!auto_squelch_active_) {
+    return;
+  }
+  auto_squelch_active_ = false;
+  if (auto_squelch_sample_count_ <= 0 || scan_list_default_squelch_spin_ == nullptr) {
+    auto_squelch_restore_monitor_mode_ = false;
+    AppendLog("Auto squelch failed: no signal samples collected");
+    return;
+  }
+
+  const double mean_db = auto_squelch_signal_sum_db_ / static_cast<double>(auto_squelch_sample_count_);
+  const double calibrated_default_db = std::clamp(mean_db + 3.0, -120.0, 0.0);
+  scan_list_default_squelch_spin_->setValue(calibrated_default_db);
+
+  if (auto_squelch_restore_monitor_mode_ && scan_list_monitor_checkbox_ != nullptr) {
+    scan_list_monitor_checkbox_->setChecked(false);
+  }
+  auto_squelch_restore_monitor_mode_ = false;
+  ApplyModeAndConfig();
+
+  AppendLog(QString("Auto squelch complete: mean=%1 dB, default set to %2 dB (%3 samples)")
+                .arg(mean_db, 0, 'f', 1)
+                .arg(calibrated_default_db, 0, 'f', 1)
+                .arg(auto_squelch_sample_count_));
 }
 
 void MainWindow::HandleAudioPcmEvent(const QString& message) {

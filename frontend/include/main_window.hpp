@@ -81,6 +81,8 @@ class MainWindow : public QMainWindow {
   void ImportScanListCsv();
   void RemoveScanListChannel(int index);
   void ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message);
+  void StartAutoSquelchCalibration();
+  void CompleteAutoSquelchCalibration();
   QString ScanListChannelCardText(int index) const;
   QString ScanListChannelCardStyle(int index) const;
   bool IsSelectedReceiver(uint32_t receiver_id) const;
@@ -141,6 +143,15 @@ class MainWindow : public QMainWindow {
   QScrollArea* scan_list_scroll_area_ = nullptr;
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+  bool auto_squelch_active_ = false;
+  bool auto_squelch_restore_monitor_mode_ = false;
+  uint32_t auto_squelch_receiver_id_ = 0;
+  int auto_squelch_required_loops_ = 4;
+  int auto_squelch_completed_loops_ = 0;
+  int auto_squelch_last_channel_index_ = -1;
+  bool auto_squelch_has_last_channel_ = false;
+  double auto_squelch_signal_sum_db_ = 0.0;
+  int auto_squelch_sample_count_ = 0;
 
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;
