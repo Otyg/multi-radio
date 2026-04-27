@@ -50,6 +50,10 @@ constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
 constexpr double kDefaultScanListSquelchDb = -67.5;
+constexpr int kAudioPrefillMs = 220;
+constexpr int kAudioSinkBufferMs = 3000;
+constexpr int kAudioPendingMaxMs = 6000;
+constexpr int kAudioDrainIntervalMs = 10;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
@@ -917,6 +921,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     audio_output_disabled_ = true;
     AppendLog("Audio output auto-disabled on WSL (set MR_ENABLE_AUDIO_OUTPUT=1 to override)");
   }
+#if MR_HAS_QT_MULTIMEDIA
+  audio_drain_timer_ = new QTimer(this);
+  audio_drain_timer_->setInterval(kAudioDrainIntervalMs);
+  connect(audio_drain_timer_, &QTimer::timeout, this, &MainWindow::DrainAudioOutputQueue);
+  audio_drain_timer_->start();
+#endif
 
   connect(refresh_button, &QPushButton::clicked, this, &MainWindow::RefreshReceivers);
   connect(start_button, &QPushButton::clicked, this, &MainWindow::StartSelectedReceiver);
@@ -1917,7 +1927,7 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
   }
   audio_pending_pcm_.append(pcm);
   const int max_buffered_audio_bytes =
-      std::max(4096, sample_rate_hz * 2 * 3);
+      std::max(4096, (sample_rate_hz * 2 * kAudioPendingMaxMs) / 1000);
   if (audio_pending_pcm_.size() > max_buffered_audio_bytes) {
     const int dropped = audio_pending_pcm_.size() - max_buffered_audio_bytes;
     audio_pending_pcm_.remove(0, dropped);
@@ -1927,6 +1937,14 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
     }
   } else {
     audio_queue_overrun_logged_ = false;
+  }
+  if (!audio_prefill_complete_) {
+    const int prefill_bytes =
+        std::max(4096, (sample_rate_hz * 2 * kAudioPrefillMs) / 1000);
+    if (audio_pending_pcm_.size() < prefill_bytes) {
+      return;
+    }
+    audio_prefill_complete_ = true;
   }
   DrainAudioOutputQueue();
 #else
@@ -1945,6 +1963,7 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
     audio_sink_ = nullptr;
     audio_output_device_ = nullptr;
     audio_pending_pcm_.clear();
+    audio_prefill_complete_ = false;
     audio_output_sample_rate_hz_ = 0;
   }
   if (audio_output_device_ != nullptr && audio_sink_ != nullptr &&
@@ -1962,24 +1981,27 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
   audio_format.setChannelCount(1);
   audio_format.setSampleFormat(QAudioFormat::Int16);
   audio_sink_ = new QAudioSink(default_output, audio_format, this);
-  audio_sink_->setBufferSize(std::max(4096, sample_rate_hz * 2 * 2));
+  audio_sink_->setBufferSize(std::max(4096, (sample_rate_hz * 2 * kAudioSinkBufferMs) / 1000));
   audio_output_device_ = audio_sink_->start();
   if (audio_output_device_ == nullptr) {
     audio_output_disabled_ = true;
     audio_sink_->deleteLater();
     audio_sink_ = nullptr;
     audio_pending_pcm_.clear();
+    audio_prefill_complete_ = false;
     audio_output_sample_rate_hz_ = 0;
     AppendLog("Audio output unavailable");
     return;
   }
+  audio_prefill_complete_ = false;
   audio_output_sample_rate_hz_ = sample_rate_hz;
 #endif
 }
 
 void MainWindow::DrainAudioOutputQueue() {
 #if MR_HAS_QT_MULTIMEDIA
-  if (audio_output_disabled_ || audio_output_device_ == nullptr || audio_pending_pcm_.isEmpty()) {
+  if (audio_output_disabled_ || audio_output_device_ == nullptr || !audio_prefill_complete_ ||
+      audio_pending_pcm_.isEmpty()) {
     return;
   }
   while (!audio_pending_pcm_.isEmpty()) {
@@ -1996,6 +2018,12 @@ void MainWindow::DrainAudioOutputQueue() {
       return;
     }
     audio_pending_pcm_.remove(0, static_cast<int>(written));
+  }
+  if (audio_sink_ != nullptr && audio_pending_pcm_.isEmpty()) {
+    const qint64 near_empty_threshold = static_cast<qint64>(audio_sink_->bufferSize() * 9 / 10);
+    if (audio_sink_->bytesFree() >= near_empty_threshold) {
+      audio_prefill_complete_ = false;
+    }
   }
 #endif
 }

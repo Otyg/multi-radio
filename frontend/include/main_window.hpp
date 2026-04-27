@@ -24,6 +24,7 @@
 class QIODevice;
 class QGridLayout;
 class QScrollArea;
+class QTimer;
 #if !defined(MR_HAS_QT_MULTIMEDIA)
 #define MR_HAS_QT_MULTIMEDIA 0
 #endif
@@ -164,6 +165,8 @@ class MainWindow : public QMainWindow {
   QIODevice* audio_output_device_ = nullptr;
   int audio_output_sample_rate_hz_ = 0;
   QByteArray audio_pending_pcm_;
+  QTimer* audio_drain_timer_ = nullptr;
+  bool audio_prefill_complete_ = false;
   bool audio_queue_overrun_logged_ = false;
   bool audio_output_disabled_ = false;
 };
