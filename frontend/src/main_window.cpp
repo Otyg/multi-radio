@@ -753,6 +753,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   global_layout->addRow(visualization_settings_button);
   mode_tabs_->addTab(global_tab, "GLOBAL");
   mode_tabs_->setCurrentIndex(kFixedModeTabIndex);
+  last_tab_index_ = mode_tabs_->currentIndex();
 
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
@@ -843,9 +844,27 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     RefreshScanListChannelCards();
   });
   connect(mode_tabs_, &QTabWidget::currentChanged, this, [this](int index) {
+    const int previous_tab_index = last_tab_index_;
+    last_tab_index_ = index;
     if (index >= kFixedModeTabIndex && index <= kAirMarineModeTabIndex) {
       last_mode_tab_index_ = index;
     }
+    if (previous_tab_index < 0 || previous_tab_index == index) {
+      return;
+    }
+    if (receiver_combo_->currentIndex() < 0) {
+      return;
+    }
+
+    const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+    std::string error;
+    if (!client_->StopReceiver(receiver_id, &error)) {
+      QMessageBox::warning(this, "StopReceiver failed", QString::fromStdString(error));
+      return;
+    }
+    AppendLog(QString("Tab switch stop requested for receiver %1").arg(receiver_id));
+    RefreshReceivers();
+    ApplyModeAndConfig();
   });
   connect(dc_blocker_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
     dc_blocker_cutoff_spin_->setEnabled(enabled);

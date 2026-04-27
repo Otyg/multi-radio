@@ -101,6 +101,7 @@ class MainWindow : public QMainWindow {
 
   QComboBox* receiver_combo_ = nullptr;
   QTabWidget* mode_tabs_ = nullptr;
+  int last_tab_index_ = -1;
   int last_mode_tab_index_ = 0;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;
