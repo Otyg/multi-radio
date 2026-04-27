@@ -40,6 +40,8 @@ constexpr uint32_t kAudioFrameIntervalMs = 40;
 constexpr uint32_t kAudioSampleRateNarrowbandHz = 16000;
 constexpr uint32_t kAudioSampleRateWfmHz = 48000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
+constexpr double kSquelchCloseHysteresisDb = 2.5;
+constexpr uint32_t kSquelchCloseDebounceMs = 500;
 
 struct IqLowPassState {
   double i = 0.0;
@@ -911,6 +913,7 @@ void ReceiverWorker::RunLoop() {
     bool lo_offset_enabled = false;
     int32_t lo_offset_hz = 0;
     bool scan_list_monitor_mode = false;
+    size_t scan_list_channel_count = 0;
     int scan_list_channel_index = -1;
     double squelch_threshold_db = -67.5;
     Modulation scan_modulation = Modulation::kNfm;
@@ -938,6 +941,7 @@ void ReceiverWorker::RunLoop() {
       lo_offset_enabled = mode_config_.lo_offset_enabled;
       lo_offset_hz = mode_config_.lo_offset_hz;
       scan_list_monitor_mode = mode_config_.scan_list_monitor_mode;
+      scan_list_channel_count = mode_config_.scan_list_channels.size();
       if (active_mode == RadioMode::kScanList && scan_list_channel_index >= 0 &&
           static_cast<size_t>(scan_list_channel_index) < mode_config_.scan_list_channels.size()) {
         const auto& channel = mode_config_.scan_list_channels[static_cast<size_t>(scan_list_channel_index)];
@@ -1071,20 +1075,24 @@ void ReceiverWorker::RunLoop() {
     bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
     std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
+    std::optional<std::chrono::steady_clock::time_point> squelch_close_candidate_at;
     double last_signal_db = -120.0;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
+    const bool single_scan_channel =
+        (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
     while (running_.load()) {
       const auto now = std::chrono::steady_clock::now();
-      if (!hold_on_squelch && now >= dwell_deadline) {
+      if (!hold_on_squelch && !single_scan_channel && now >= dwell_deadline) {
         break;
       }
       if (hold_on_squelch) {
-        if (!squelch_seen_open && now >= dwell_deadline) {
+        if (!single_scan_channel && !squelch_seen_open && now >= dwell_deadline) {
           break;
         }
         if (squelch_seen_open && !squelch_open && squelch_closed_at.has_value() &&
+            !single_scan_channel &&
             now >= *squelch_closed_at + std::chrono::milliseconds(dwell_ms)) {
           break;
         }
@@ -1133,10 +1141,28 @@ void ReceiverWorker::RunLoop() {
       last_signal_db = signal_db;
 
       if (hold_on_squelch) {
-        const bool next_squelch_open = signal_db >= squelch_threshold_db;
+        const double close_threshold_db = squelch_threshold_db - kSquelchCloseHysteresisDb;
+        bool next_squelch_open = squelch_open;
+        if (squelch_open) {
+          if (signal_db >= close_threshold_db) {
+            squelch_close_candidate_at.reset();
+          } else {
+            if (!squelch_close_candidate_at.has_value()) {
+              squelch_close_candidate_at = now;
+            }
+            if (now >= *squelch_close_candidate_at +
+                           std::chrono::milliseconds(kSquelchCloseDebounceMs)) {
+              next_squelch_open = false;
+            }
+          }
+        } else {
+          squelch_close_candidate_at.reset();
+          next_squelch_open = signal_db >= squelch_threshold_db;
+        }
         if (next_squelch_open != squelch_open) {
           squelch_open = next_squelch_open;
           if (squelch_open) {
+            squelch_close_candidate_at.reset();
             squelch_seen_open = true;
             squelch_closed_at.reset();
             squelch_opened_at = std::chrono::steady_clock::now();
@@ -1148,6 +1174,7 @@ void ReceiverWorker::RunLoop() {
                    << " threshold_db=" << FormatDouble(squelch_threshold_db, 1);
             PublishEvent(EventKind::kInfo, opened.str(), tuned_frequency_hz);
           } else {
+            squelch_close_candidate_at.reset();
             audio_pcm_buffer.clear();
             audio_demod_state = AudioDemodState{};
             squelch_closed_at = std::chrono::steady_clock::now();
@@ -1174,6 +1201,7 @@ void ReceiverWorker::RunLoop() {
           PublishEvent(EventKind::kInfo, status.str(), tuned_frequency_hz, false);
         }
       } else if (scan_list_monitor_mode && has_scan_squelch) {
+        squelch_close_candidate_at.reset();
         squelch_open = true;
         squelch_seen_open = true;
         squelch_closed_at.reset();
