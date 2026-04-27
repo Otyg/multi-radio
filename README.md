@@ -11,7 +11,7 @@ Multi-radio client/server application for RTL-SDR with C++20 backend and Qt6 fro
   - `SCAN_LIST`
   - `AIR_MARINE_PLOT` (fixed dwell `5s`, scan hops between `162.000 MHz` for dual-channelized AIS1/AIS2 and CH70 `156.525 MHz` for DSC)
 - Multiple simultaneous receivers (one worker thread per receiver).
-- In-process plugin system (`.so`) with C ABI + API version check.
+- In-process plugin system (`.so` on Linux, `.dll` on Windows) with C ABI + API version check.
 - Event + decoded message telemetry streaming.
 - In-memory event bus and rotating JSONL log persistence.
 - Qt6 client (receiver control + live table/log with filters by signal/receiver/time).
@@ -60,6 +60,60 @@ If dependencies are missing, relevant targets are skipped with warnings:
 - Missing Protobuf/gRPC: server/frontend skipped.
 - Missing Qt6: frontend skipped.
 - Missing `librtlsdr`: mock device backend used.
+
+## Cross-compile from WSL to Windows (MinGW-w64)
+
+Install cross-compilers in WSL:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y mingw-w64 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+```
+
+Configure + build a Windows-targeted build directory:
+
+```bash
+cmake -S . -B build-win \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake \
+  -DMR_BUILD_SERVER=OFF \
+  -DMR_BUILD_FRONTEND=OFF \
+  -DMR_BUILD_TESTS=OFF \
+  -DMR_ENABLE_RTLSDR=OFF
+cmake --build build-win -j
+```
+
+Notes:
+- This default cross-build compiles core + plugins for Windows and emits `.dll` plugin binaries.
+- Building Windows server/frontend from Linux requires Windows builds of gRPC/Qt dependencies in the toolchain sysroot.
+- If you see errors around `std::mutex` / `std::condition_variable`, ensure the MinGW POSIX toolchain is used
+  (`x86_64-w64-mingw32-g++-posix`, not `...-win32`).
+
+### Build Windows frontend from WSL (Qt6 + gRPC via vcpkg)
+
+1. Install host codegen tools in WSL (used by CMake while building):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y protobuf-compiler protobuf-compiler-grpc
+```
+
+2. Install `vcpkg` and Windows target dependencies:
+
+```bash
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+~/vcpkg/vcpkg install --overlay-triplets="$PWD/cmake/triplets" --triplet x64-mingw-dynamic-posix qtbase qtmultimedia protobuf grpc
+```
+
+3. Configure and build frontend for Windows:
+
+```bash
+rm -rf build-win-frontend
+VCPKG_ROOT=~/vcpkg ./scripts/build_windows_frontend.sh
+```
+
+Artifacts:
+- `build-win-frontend/frontend/multi_radio_client.exe`
 
 ## Run server
 

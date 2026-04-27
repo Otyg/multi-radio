@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <limits>
@@ -37,6 +38,8 @@ constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 80;
 constexpr uint32_t kAudioSampleRateHz = 16000;
+constexpr size_t kAudioFrameSamples =
+    (static_cast<size_t>(kAudioSampleRateHz) * static_cast<size_t>(kAudioFrameIntervalMs)) / 1000U;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 
 struct IqLowPassState {
@@ -63,7 +66,9 @@ struct IqCenterNotchState {
   bool initialized = false;
 };
 
-std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq);
+std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples = 8192);
+bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector<int16_t>* pcm_out);
+bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64);
 
 uint32_t DefaultBandwidthForModulation(Modulation modulation) {
   switch (modulation) {
@@ -379,37 +384,45 @@ std::vector<double> BuildAmEnvelope(const IQSampleBlock& iq) {
   return envelope;
 }
 
-bool BuildAudioPcm16Base64(const IQSampleBlock& iq, Modulation modulation, uint32_t* sample_rate_hz,
-                           std::string* payload_b64) {
-  if (sample_rate_hz == nullptr || payload_b64 == nullptr) {
+bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector<int16_t>* pcm_out) {
+  if (pcm_out == nullptr) {
     return false;
   }
+  pcm_out->clear();
   if (iq.sample_rate_hz == 0) {
     return false;
   }
-
   std::vector<double> source;
   if (modulation == Modulation::kAm) {
     source = BuildAmEnvelope(iq);
   } else {
-    source = BuildFmDiscriminator(iq);
+    source = BuildFmDiscriminator(iq, 0);
   }
   if (source.size() < 32) {
     return false;
   }
 
   const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(kAudioSampleRateHz);
+  if (ratio <= 0.0) {
+    return false;
+  }
   const double step = std::max(1.0, ratio);
-  std::vector<int16_t> pcm;
-  pcm.reserve(640);
+  pcm_out->reserve(static_cast<size_t>(static_cast<double>(source.size()) / step) + 2U);
   double pos = 0.0;
-  while (pos < static_cast<double>(source.size()) && pcm.size() < 640) {
+  while (pos < static_cast<double>(source.size())) {
     const size_t idx = static_cast<size_t>(pos);
-    const double sample = std::clamp(source[idx] * 9000.0, -30000.0, 30000.0);
-    pcm.push_back(static_cast<int16_t>(std::lrint(sample)));
+    const size_t next_idx = std::min(idx + 1, source.size() - 1);
+    const double frac = pos - static_cast<double>(idx);
+    const double mixed = source[idx] + (source[next_idx] - source[idx]) * frac;
+    const double sample = std::clamp(mixed * 9000.0, -30000.0, 30000.0);
+    pcm_out->push_back(static_cast<int16_t>(std::lrint(sample)));
     pos += step;
   }
-  if (pcm.empty()) {
+  return !pcm_out->empty();
+}
+
+bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64) {
+  if (payload_b64 == nullptr || pcm.empty()) {
     return false;
   }
   std::vector<uint8_t> raw;
@@ -419,21 +432,19 @@ bool BuildAudioPcm16Base64(const IQSampleBlock& iq, Modulation modulation, uint3
     raw.push_back(static_cast<uint8_t>(word & 0x00ffU));
     raw.push_back(static_cast<uint8_t>((word >> 8U) & 0x00ffU));
   }
-
-  *sample_rate_hz = kAudioSampleRateHz;
   *payload_b64 = Base64Encode(raw);
   return true;
 }
 
-std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq) {
+std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples) {
   std::vector<double> discriminator;
   if (iq.sample_rate_hz == 0 || iq.interleaved_iq.size() < 4) {
     return discriminator;
   }
 
   const size_t available_samples = iq.interleaved_iq.size() / 2;
-  const size_t max_samples = 8192;
-  const size_t sample_count = std::min(available_samples, max_samples);
+  const size_t sample_count = (max_samples == 0) ? available_samples
+                                                  : std::min(available_samples, max_samples);
   if (sample_count < 64) {
     return discriminator;
   }
@@ -917,8 +928,8 @@ void ReceiverWorker::RunLoop() {
     std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
     double last_signal_db = -120.0;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
-    auto next_audio_emit = std::chrono::steady_clock::time_point::min();
     auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
+    std::vector<int16_t> audio_pcm_buffer;
 
     while (running_.load()) {
       const auto now = std::chrono::steady_clock::now();
@@ -993,6 +1004,7 @@ void ReceiverWorker::RunLoop() {
                    << " threshold_db=" << FormatDouble(squelch_threshold_db, 1);
             PublishEvent(EventKind::kInfo, opened.str(), tuned_frequency_hz);
           } else {
+            audio_pcm_buffer.clear();
             squelch_closed_at = std::chrono::steady_clock::now();
             if (squelch_opened_at.has_value()) {
               const auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1089,15 +1101,25 @@ void ReceiverWorker::RunLoop() {
         next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
       }
 
-      if (has_scan_squelch && squelch_open && now >= next_audio_emit) {
-        uint32_t audio_sample_rate_hz = 0;
-        std::string audio_b64;
-        if (BuildAudioPcm16Base64(iq, scan_modulation, &audio_sample_rate_hz, &audio_b64)) {
-          std::ostringstream audio_msg;
-          audio_msg << "AUDIO_PCM16 sr=" << audio_sample_rate_hz << " data=" << audio_b64;
-          PublishEvent(EventKind::kInfo, audio_msg.str(), tuned_frequency_hz, false);
+      if (has_scan_squelch && squelch_open) {
+        std::vector<int16_t> block_pcm;
+        if (BuildAudioPcm16(iq, scan_modulation, &block_pcm)) {
+          audio_pcm_buffer.insert(audio_pcm_buffer.end(), block_pcm.begin(), block_pcm.end());
         }
-        next_audio_emit = now + std::chrono::milliseconds(kAudioFrameIntervalMs);
+        while (audio_pcm_buffer.size() >= kAudioFrameSamples) {
+          const auto frame_end = audio_pcm_buffer.begin() +
+                                 static_cast<std::vector<int16_t>::difference_type>(kAudioFrameSamples);
+          const std::vector<int16_t> frame_pcm(audio_pcm_buffer.begin(), frame_end);
+          std::string audio_b64;
+          if (EncodePcm16Base64(frame_pcm, &audio_b64)) {
+            std::ostringstream audio_msg;
+            audio_msg << "AUDIO_PCM16 sr=" << kAudioSampleRateHz << " data=" << audio_b64;
+            PublishEvent(EventKind::kInfo, audio_msg.str(), tuned_frequency_hz, false);
+          }
+          audio_pcm_buffer.erase(audio_pcm_buffer.begin(), frame_end);
+        }
+      } else if (has_scan_squelch) {
+        audio_pcm_buffer.clear();
       }
     }
     if (hold_on_squelch && squelch_opened_at.has_value()) {

@@ -1,16 +1,94 @@
 #include "multi_radio/plugin_host.hpp"
 
-#include <dlfcn.h>
-
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
 #include <string_view>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 namespace multi_radio {
 
 namespace {
+
+#ifdef _WIN32
+std::string GetLastSharedLibraryError() {
+  const DWORD code = GetLastError();
+  if (code == 0) {
+    return "unknown error";
+  }
+
+  LPSTR buffer = nullptr;
+  const DWORD size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                                        FORMAT_MESSAGE_IGNORE_INSERTS,
+                                    nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                    reinterpret_cast<LPSTR>(&buffer), 0, nullptr);
+  if (size == 0 || buffer == nullptr) {
+    return "Win32 error code " + std::to_string(code);
+  }
+
+  std::string message(buffer, size);
+  LocalFree(buffer);
+  while (!message.empty() &&
+         (message.back() == '\r' || message.back() == '\n' || message.back() == ' ')) {
+    message.pop_back();
+  }
+  return message;
+}
+
+void* OpenSharedLibrary(const std::filesystem::path& path) {
+  return reinterpret_cast<void*>(LoadLibraryA(path.string().c_str()));
+}
+
+void* ResolveSharedSymbol(void* handle, const char* symbol_name) {
+  if (handle == nullptr || symbol_name == nullptr) {
+    return nullptr;
+  }
+  return reinterpret_cast<void*>(
+      GetProcAddress(reinterpret_cast<HMODULE>(handle), symbol_name));
+}
+
+void CloseSharedLibrary(void* handle) {
+  if (handle != nullptr) {
+    FreeLibrary(reinterpret_cast<HMODULE>(handle));
+  }
+}
+
+std::string PluginSharedExtension() {
+  return ".dll";
+}
+#else
+std::string GetLastSharedLibraryError() {
+  const char* message = dlerror();
+  return message == nullptr ? "unknown error" : std::string(message);
+}
+
+void* OpenSharedLibrary(const std::filesystem::path& path) {
+  return dlopen(path.string().c_str(), RTLD_NOW);
+}
+
+void* ResolveSharedSymbol(void* handle, const char* symbol_name) {
+  return dlsym(handle, symbol_name);
+}
+
+void CloseSharedLibrary(void* handle) {
+  if (handle != nullptr) {
+    dlclose(handle);
+  }
+}
+
+std::string PluginSharedExtension() {
+  return ".so";
+}
+#endif
 
 std::vector<SignalType> ParseSignalCsv(const std::string& csv) {
   std::vector<SignalType> out;
@@ -113,7 +191,7 @@ PluginHost::~PluginHost() {
       plugin.descriptor->shutdown();
     }
     if (plugin.dl_handle != nullptr) {
-      dlclose(plugin.dl_handle);
+      CloseSharedLibrary(plugin.dl_handle);
       plugin.dl_handle = nullptr;
     }
   }
@@ -130,22 +208,25 @@ bool PluginHost::LoadAll(std::string* error) {
     return false;
   }
 
+  const std::string shared_ext = PluginSharedExtension();
   for (const auto& entry : std::filesystem::directory_iterator(plugin_dir_)) {
-    if (!entry.is_regular_file() || entry.path().extension() != ".so") {
+    if (!entry.is_regular_file() || entry.path().extension() != shared_ext) {
       continue;
     }
 
-    void* handle = dlopen(entry.path().c_str(), RTLD_NOW);
+    void* handle = OpenSharedLibrary(entry.path());
     if (handle == nullptr) {
       if (error != nullptr) {
-        *error = std::string("Failed to load plugin ") + entry.path().string() + ": " + dlerror();
+        *error =
+            std::string("Failed to load plugin ") + entry.path().string() + ": " +
+            GetLastSharedLibraryError();
       }
       return false;
     }
 
-    auto* symbol = dlsym(handle, "multi_radio_get_plugin_descriptor");
+    auto* symbol = ResolveSharedSymbol(handle, "multi_radio_get_plugin_descriptor");
     if (symbol == nullptr) {
-      dlclose(handle);
+      CloseSharedLibrary(handle);
       if (error != nullptr) {
         *error = "Plugin missing required symbol multi_radio_get_plugin_descriptor: " +
                  entry.path().string();
@@ -156,7 +237,7 @@ bool PluginHost::LoadAll(std::string* error) {
     auto get_descriptor = reinterpret_cast<multi_radio_get_plugin_descriptor_fn>(symbol);
     const multi_radio_plugin_descriptor* descriptor = get_descriptor();
     if (descriptor == nullptr) {
-      dlclose(handle);
+      CloseSharedLibrary(handle);
       if (error != nullptr) {
         *error = "Plugin returned null descriptor: " + entry.path().string();
       }
@@ -164,7 +245,7 @@ bool PluginHost::LoadAll(std::string* error) {
     }
 
     if (descriptor->api_version != MULTI_RADIO_PLUGIN_API_VERSION) {
-      dlclose(handle);
+      CloseSharedLibrary(handle);
       if (error != nullptr) {
         *error = "Plugin API mismatch in " + entry.path().string();
       }
@@ -177,7 +258,7 @@ bool PluginHost::LoadAll(std::string* error) {
                                                                         : std::string(descriptor->plugin_name));
       const int rc = descriptor->init(init_json.c_str());
       if (rc != 0) {
-        dlclose(handle);
+        CloseSharedLibrary(handle);
         if (error != nullptr) {
           *error = "Plugin init failed for " + entry.path().string();
         }

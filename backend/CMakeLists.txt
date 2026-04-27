@@ -32,8 +32,11 @@ target_include_directories(multi_radio_core
 target_link_libraries(multi_radio_core
   PUBLIC
     Threads::Threads
-    dl
 )
+
+if(CMAKE_DL_LIBS)
+  target_link_libraries(multi_radio_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 if(MR_HAS_RTLSDR)
   target_compile_definitions(multi_radio_core PRIVATE MULTI_RADIO_WITH_RTLSDR)
