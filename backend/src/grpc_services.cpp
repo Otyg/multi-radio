@@ -57,6 +57,31 @@ v1::SignalType ToProto(SignalType type) {
   }
 }
 
+Modulation FromProto(v1::Modulation modulation) {
+  switch (modulation) {
+    case v1::MODULATION_AM:
+      return Modulation::kAm;
+    case v1::MODULATION_WFM:
+      return Modulation::kWfm;
+    case v1::MODULATION_NFM:
+    case v1::MODULATION_UNSPECIFIED:
+    default:
+      return Modulation::kNfm;
+  }
+}
+
+v1::Modulation ToProto(Modulation modulation) {
+  switch (modulation) {
+    case Modulation::kAm:
+      return v1::MODULATION_AM;
+    case Modulation::kWfm:
+      return v1::MODULATION_WFM;
+    case Modulation::kNfm:
+    default:
+      return v1::MODULATION_NFM;
+  }
+}
+
 v1::EventKind ToProto(EventKind kind) {
   switch (kind) {
     case EventKind::kInfo:
@@ -80,6 +105,18 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.range_end_hz = config.range_end_hz();
   out.range_step_hz = config.range_step_hz();
   out.frequency_list_hz.assign(config.frequency_list_hz().begin(), config.frequency_list_hz().end());
+  out.scan_list_channels.clear();
+  out.scan_list_channels.reserve(static_cast<size_t>(config.scan_list_channels_size()));
+  for (const auto& channel : config.scan_list_channels()) {
+    ModeConfig::ScanListChannel parsed;
+    parsed.label = channel.label();
+    parsed.frequency_hz = channel.frequency_hz();
+    parsed.modulation = FromProto(channel.modulation());
+    parsed.channel_bandwidth_hz = channel.channel_bandwidth_hz();
+    parsed.squelch_threshold_db = channel.squelch_threshold_db();
+    parsed.dwell_ms = channel.dwell_ms();
+    out.scan_list_channels.push_back(std::move(parsed));
+  }
   out.dwell_ms = config.dwell_ms();
   out.sample_rate_hz = config.sample_rate_hz();
   out.channel_bandwidth_hz = config.channel_bandwidth_hz();
@@ -111,6 +148,16 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->clear_frequency_list_hz();
   for (double frequency : config.frequency_list_hz) {
     out->add_frequency_list_hz(frequency);
+  }
+  out->clear_scan_list_channels();
+  for (const auto& channel : config.scan_list_channels) {
+    auto* added = out->add_scan_list_channels();
+    added->set_label(channel.label);
+    added->set_frequency_hz(channel.frequency_hz);
+    added->set_modulation(ToProto(channel.modulation));
+    added->set_channel_bandwidth_hz(channel.channel_bandwidth_hz);
+    added->set_squelch_threshold_db(channel.squelch_threshold_db);
+    added->set_dwell_ms(channel.dwell_ms);
   }
 }
 

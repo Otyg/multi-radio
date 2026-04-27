@@ -57,4 +57,30 @@ SignalType SignalTypeFromString(const std::string& value) {
   return SignalType::kUnknown;
 }
 
+std::string ToString(Modulation modulation) {
+  switch (modulation) {
+    case Modulation::kAm:
+      return "AM";
+    case Modulation::kWfm:
+      return "WFM";
+    case Modulation::kNfm:
+    default:
+      return "NFM";
+  }
+}
+
+Modulation ModulationFromString(const std::string& value) {
+  std::string upper = value;
+  std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  if (upper == "AM") {
+    return Modulation::kAm;
+  }
+  if (upper == "WFM") {
+    return Modulation::kWfm;
+  }
+  return Modulation::kNfm;
+}
+
 }  // namespace multi_radio

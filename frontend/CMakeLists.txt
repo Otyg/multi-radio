@@ -8,6 +8,7 @@ if(NOT Qt6_FOUND)
   message(WARNING "Skipping frontend: Qt6 not found.")
   return()
 endif()
+find_package(Qt6 COMPONENTS Multimedia QUIET)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)
@@ -34,3 +35,11 @@ target_link_libraries(multi_radio_client
     Qt6::Core
     multi_radio::proto
 )
+
+if(TARGET Qt6::Multimedia)
+  target_link_libraries(multi_radio_client PRIVATE Qt6::Multimedia)
+  target_compile_definitions(multi_radio_client PRIVATE MR_HAS_QT_MULTIMEDIA=1)
+else()
+  target_compile_definitions(multi_radio_client PRIVATE MR_HAS_QT_MULTIMEDIA=0)
+  message(WARNING "Qt6 Multimedia not found: scan-list audio playback disabled.")
+endif()

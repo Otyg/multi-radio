@@ -22,6 +22,12 @@ enum class SignalType {
   kDsc,
 };
 
+enum class Modulation {
+  kNfm,
+  kWfm,
+  kAm,
+};
+
 enum class EventKind {
   kInfo,
   kWarning,
@@ -31,11 +37,21 @@ enum class EventKind {
 };
 
 struct ModeConfig {
+  struct ScanListChannel {
+    std::string label;
+    double frequency_hz = 0.0;
+    Modulation modulation = Modulation::kNfm;
+    uint32_t channel_bandwidth_hz = 0;
+    double squelch_threshold_db = -30.0;
+    uint32_t dwell_ms = 0;
+  };
+
   double fixed_frequency_hz = 0.0;
   double range_start_hz = 0.0;
   double range_end_hz = 0.0;
   double range_step_hz = 0.0;
   std::vector<double> frequency_list_hz;
+  std::vector<ScanListChannel> scan_list_channels;
   uint32_t dwell_ms = 500;
   uint32_t sample_rate_hz = 2048000;
   uint32_t channel_bandwidth_hz = 30000;
@@ -99,5 +115,7 @@ uint64_t UnixMillisNow();
 std::string ToString(RadioMode mode);
 std::string ToString(SignalType signal_type);
 SignalType SignalTypeFromString(const std::string& value);
+std::string ToString(Modulation modulation);
+Modulation ModulationFromString(const std::string& value);
 
 }  // namespace multi_radio

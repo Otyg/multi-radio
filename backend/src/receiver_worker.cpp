@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace multi_radio {
@@ -29,6 +31,12 @@ constexpr uint32_t kMaxDcBlockerCutoffHz = 5000;
 constexpr uint32_t kDefaultCenterNotchWidthHz = 2000;
 constexpr uint32_t kMinCenterNotchWidthHz = 100;
 constexpr uint32_t kMaxCenterNotchWidthHz = 200000;
+constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
+constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
+constexpr uint32_t kDefaultAmBandwidthHz = 10000;
+constexpr size_t kMaxScanListChannels = 5;
+constexpr uint32_t kAudioFrameIntervalMs = 80;
+constexpr uint32_t kAudioSampleRateHz = 16000;
 
 struct IqLowPassState {
   double i = 0.0;
@@ -53,6 +61,20 @@ struct IqCenterNotchState {
   double q = 0.0;
   bool initialized = false;
 };
+
+std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq);
+
+uint32_t DefaultBandwidthForModulation(Modulation modulation) {
+  switch (modulation) {
+    case Modulation::kAm:
+      return kDefaultAmBandwidthHz;
+    case Modulation::kWfm:
+      return kDefaultWfmBandwidthHz;
+    case Modulation::kNfm:
+    default:
+      return kDefaultNfmBandwidthHz;
+  }
+}
 
 ModeConfig NormalizeModeConfig(const ModeConfig& input) {
   ModeConfig out = input;
@@ -97,6 +119,20 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
     const int32_t max_offset =
         std::max<int32_t>(1000, static_cast<int32_t>(static_cast<double>(out.sample_rate_hz) * 0.45));
     out.lo_offset_hz = std::clamp(out.lo_offset_hz, -max_offset, max_offset);
+  }
+  if (out.scan_list_channels.size() > kMaxScanListChannels) {
+    out.scan_list_channels.resize(kMaxScanListChannels);
+  }
+  for (auto& channel : out.scan_list_channels) {
+    if (channel.channel_bandwidth_hz == 0) {
+      channel.channel_bandwidth_hz = DefaultBandwidthForModulation(channel.modulation);
+    }
+    channel.channel_bandwidth_hz =
+        std::clamp(channel.channel_bandwidth_hz, kMinChannelBandwidthHz, kMaxChannelBandwidthHz);
+    channel.squelch_threshold_db = std::clamp(channel.squelch_threshold_db, -120.0, 0.0);
+    if (channel.dwell_ms > 0) {
+      channel.dwell_ms = std::clamp<uint32_t>(channel.dwell_ms, 50, 60000);
+    }
   }
   return out;
 }
@@ -248,6 +284,129 @@ std::string FormatSeries(const std::vector<double>& values, int precision) {
     out << std::fixed << std::setprecision(precision) << values[i];
   }
   return out.str();
+}
+
+std::string Base64Encode(const std::vector<uint8_t>& data) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((data.size() + 2) / 3) * 4);
+  size_t idx = 0;
+  while (idx + 3 <= data.size()) {
+    const uint32_t block = (static_cast<uint32_t>(data[idx]) << 16U) |
+                           (static_cast<uint32_t>(data[idx + 1]) << 8U) |
+                           static_cast<uint32_t>(data[idx + 2]);
+    out.push_back(kAlphabet[(block >> 18U) & 0x3fU]);
+    out.push_back(kAlphabet[(block >> 12U) & 0x3fU]);
+    out.push_back(kAlphabet[(block >> 6U) & 0x3fU]);
+    out.push_back(kAlphabet[block & 0x3fU]);
+    idx += 3;
+  }
+  const size_t remain = data.size() - idx;
+  if (remain == 1) {
+    const uint32_t block = static_cast<uint32_t>(data[idx]) << 16U;
+    out.push_back(kAlphabet[(block >> 18U) & 0x3fU]);
+    out.push_back(kAlphabet[(block >> 12U) & 0x3fU]);
+    out.push_back('=');
+    out.push_back('=');
+  } else if (remain == 2) {
+    const uint32_t block = (static_cast<uint32_t>(data[idx]) << 16U) |
+                           (static_cast<uint32_t>(data[idx + 1]) << 8U);
+    out.push_back(kAlphabet[(block >> 18U) & 0x3fU]);
+    out.push_back(kAlphabet[(block >> 12U) & 0x3fU]);
+    out.push_back(kAlphabet[(block >> 6U) & 0x3fU]);
+    out.push_back('=');
+  }
+  return out;
+}
+
+double EstimateSignalDbfs(const IQSampleBlock& iq) {
+  if (iq.interleaved_iq.empty()) {
+    return -120.0;
+  }
+  const size_t sample_count = iq.interleaved_iq.size() / 2;
+  if (sample_count == 0) {
+    return -120.0;
+  }
+  long double sum_power = 0.0;
+  for (size_t idx = 0; idx + 1 < iq.interleaved_iq.size(); idx += 2) {
+    const long double i = static_cast<long double>(iq.interleaved_iq[idx]);
+    const long double q = static_cast<long double>(iq.interleaved_iq[idx + 1]);
+    sum_power += i * i + q * q;
+  }
+  const long double mean_power = sum_power / static_cast<long double>(sample_count);
+  const long double full_scale_power = 32768.0L * 32768.0L;
+  const long double normalized = mean_power / full_scale_power;
+  const long double bounded = std::max<long double>(normalized, 1.0e-12L);
+  return 10.0 * std::log10(static_cast<double>(bounded));
+}
+
+std::vector<double> BuildAmEnvelope(const IQSampleBlock& iq) {
+  std::vector<double> envelope;
+  const size_t sample_count = iq.interleaved_iq.size() / 2;
+  if (sample_count < 32) {
+    return envelope;
+  }
+  envelope.reserve(sample_count);
+  double mean = 0.0;
+  for (size_t n = 0; n < sample_count; ++n) {
+    const double i = static_cast<double>(iq.interleaved_iq[n * 2]);
+    const double q = static_cast<double>(iq.interleaved_iq[n * 2 + 1]);
+    const double mag = std::sqrt(i * i + q * q) / 32768.0;
+    envelope.push_back(mag);
+    mean += mag;
+  }
+  mean /= static_cast<double>(envelope.size());
+  for (double& sample : envelope) {
+    sample -= mean;
+  }
+  return envelope;
+}
+
+bool BuildAudioPcm16Base64(const IQSampleBlock& iq, Modulation modulation, uint32_t* sample_rate_hz,
+                           std::string* payload_b64) {
+  if (sample_rate_hz == nullptr || payload_b64 == nullptr) {
+    return false;
+  }
+  if (iq.sample_rate_hz == 0) {
+    return false;
+  }
+
+  std::vector<double> source;
+  if (modulation == Modulation::kAm) {
+    source = BuildAmEnvelope(iq);
+  } else {
+    source = BuildFmDiscriminator(iq);
+  }
+  if (source.size() < 32) {
+    return false;
+  }
+
+  const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(kAudioSampleRateHz);
+  const double step = std::max(1.0, ratio);
+  std::vector<int16_t> pcm;
+  pcm.reserve(640);
+  double pos = 0.0;
+  while (pos < static_cast<double>(source.size()) && pcm.size() < 640) {
+    const size_t idx = static_cast<size_t>(pos);
+    const double sample = std::clamp(source[idx] * 9000.0, -30000.0, 30000.0);
+    pcm.push_back(static_cast<int16_t>(std::lrint(sample)));
+    pos += step;
+  }
+  if (pcm.empty()) {
+    return false;
+  }
+  std::vector<uint8_t> raw;
+  raw.reserve(pcm.size() * 2);
+  for (int16_t sample : pcm) {
+    const uint16_t word = static_cast<uint16_t>(sample);
+    raw.push_back(static_cast<uint8_t>(word & 0x00ffU));
+    raw.push_back(static_cast<uint8_t>((word >> 8U) & 0x00ffU));
+  }
+
+  *sample_rate_hz = kAudioSampleRateHz;
+  *payload_b64 = Base64Encode(raw);
+  return true;
 }
 
 std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq) {
@@ -578,6 +737,7 @@ void ReceiverWorker::RunLoop() {
 
   while (running_.load()) {
     std::optional<double> frequency_hz;
+    RadioMode active_mode = RadioMode::kFixed;
     uint32_t dwell_ms = 500;
     uint32_t desired_sample_rate_hz = kDefaultSampleRateHz;
     uint32_t channel_bandwidth_hz = kDefaultChannelBandwidthHz;
@@ -588,11 +748,20 @@ void ReceiverWorker::RunLoop() {
     uint32_t center_notch_width_hz = kDefaultCenterNotchWidthHz;
     bool lo_offset_enabled = false;
     int32_t lo_offset_hz = 0;
+    int scan_list_channel_index = -1;
+    double squelch_threshold_db = -30.0;
+    Modulation scan_modulation = Modulation::kNfm;
+    bool has_scan_squelch = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode_config_ = NormalizeModeConfig(mode_config_);
-      frequency_hz = scheduler_.NextFrequencyHz();
-      dwell_ms = scheduler_.DwellMs();
+      active_mode = mode_;
+      const auto target = scheduler_.NextTarget();
+      if (target.has_value()) {
+        frequency_hz = target->frequency_hz;
+        dwell_ms = target->dwell_ms;
+        scan_list_channel_index = target->scan_list_channel_index;
+      }
       desired_sample_rate_hz = mode_config_.sample_rate_hz;
       channel_bandwidth_hz = mode_config_.channel_bandwidth_hz;
       desired_hardware_bandwidth_hz = mode_config_.hardware_bandwidth_hz;
@@ -602,6 +771,14 @@ void ReceiverWorker::RunLoop() {
       center_notch_width_hz = mode_config_.center_notch_width_hz;
       lo_offset_enabled = mode_config_.lo_offset_enabled;
       lo_offset_hz = mode_config_.lo_offset_hz;
+      if (active_mode == RadioMode::kScanList && scan_list_channel_index >= 0 &&
+          static_cast<size_t>(scan_list_channel_index) < mode_config_.scan_list_channels.size()) {
+        const auto& channel = mode_config_.scan_list_channels[static_cast<size_t>(scan_list_channel_index)];
+        channel_bandwidth_hz = channel.channel_bandwidth_hz;
+        squelch_threshold_db = channel.squelch_threshold_db;
+        scan_modulation = channel.modulation;
+        has_scan_squelch = true;
+      }
     }
 
     std::string error;
@@ -688,16 +865,41 @@ void ReceiverWorker::RunLoop() {
     }
 
     PublishEvent(EventKind::kTuneHop, "tuned", logical_tuned_frequency_hz);
+    if (has_scan_squelch) {
+      std::ostringstream status;
+      status << "SCAN_STATUS idx=" << scan_list_channel_index << " state=closed"
+             << " signal_db=-120.0 threshold_db=" << FormatDouble(squelch_threshold_db, 1);
+      PublishEvent(EventKind::kInfo, status.str(), logical_tuned_frequency_hz, false);
+    }
     lowpass_state.initialized = false;
     dc_block_state.initialized = false;
     center_notch_state.initialized = false;
     frequency_shift_state.phase_rad = 0.0;
 
     const double tuned_frequency_hz = logical_tuned_frequency_hz;
-    const auto dwell_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(dwell_ms);
+    const auto tune_started_at = std::chrono::steady_clock::now();
+    const auto dwell_deadline = tune_started_at + std::chrono::milliseconds(dwell_ms);
+    std::optional<std::chrono::steady_clock::time_point> squelch_closed_at;
+    bool squelch_open = false;
+    bool squelch_seen_open = false;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
+    auto next_audio_emit = std::chrono::steady_clock::time_point::min();
 
-    while (running_.load() && std::chrono::steady_clock::now() < dwell_deadline) {
+    while (running_.load()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (!has_scan_squelch && now >= dwell_deadline) {
+        break;
+      }
+      if (has_scan_squelch) {
+        if (!squelch_seen_open && now >= dwell_deadline) {
+          break;
+        }
+        if (squelch_seen_open && !squelch_open && squelch_closed_at.has_value() &&
+            now >= *squelch_closed_at + std::chrono::milliseconds(dwell_ms)) {
+          break;
+        }
+      }
+
       IQSampleBlock iq;
       if (!device_->ReadIq(&iq, &error)) {
         {
@@ -737,6 +939,26 @@ void ReceiverWorker::RunLoop() {
                                      &receiver_start_hz, &receiver_end_hz);
 
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
+      const double signal_db = EstimateSignalDbfs(iq);
+
+      if (has_scan_squelch) {
+        const bool next_squelch_open = signal_db >= squelch_threshold_db;
+        if (next_squelch_open != squelch_open) {
+          squelch_open = next_squelch_open;
+          if (squelch_open) {
+            squelch_seen_open = true;
+            squelch_closed_at.reset();
+          } else {
+            squelch_closed_at = std::chrono::steady_clock::now();
+          }
+          std::ostringstream status;
+          status << "SCAN_STATUS idx=" << scan_list_channel_index
+                 << " state=" << (squelch_open ? "open" : "closed")
+                 << " signal_db=" << FormatDouble(signal_db, 1)
+                 << " threshold_db=" << FormatDouble(squelch_threshold_db, 1);
+          PublishEvent(EventKind::kInfo, status.str(), tuned_frequency_hz, false);
+        }
+      }
 
       double demod_peak_hz = 0.0;
       double demod_peak_strength = 0.0;
@@ -761,7 +983,6 @@ void ReceiverWorker::RunLoop() {
         logger_->LogDecodedMessage(msg);
       });
 
-      const auto now = std::chrono::steady_clock::now();
       if (now >= next_viz_emit) {
         if (have_demod_frame) {
           const double demod_start_hz = 0.0;
@@ -787,6 +1008,17 @@ void ReceiverWorker::RunLoop() {
           PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
         }
         next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
+      }
+
+      if (has_scan_squelch && squelch_open && now >= next_audio_emit) {
+        uint32_t audio_sample_rate_hz = 0;
+        std::string audio_b64;
+        if (BuildAudioPcm16Base64(iq, scan_modulation, &audio_sample_rate_hz, &audio_b64)) {
+          std::ostringstream audio_msg;
+          audio_msg << "AUDIO_PCM16 sr=" << audio_sample_rate_hz << " data=" << audio_b64;
+          PublishEvent(EventKind::kInfo, audio_msg.str(), tuned_frequency_hz, false);
+        }
+        next_audio_emit = now + std::chrono::milliseconds(kAudioFrameIntervalMs);
       }
     }
   }

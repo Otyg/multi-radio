@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -12,12 +13,21 @@
 #include <QMainWindow>
 #include <QMap>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
 
 #include "grpc_client.hpp"
 #include "signal_visualization_widget.hpp"
+
+class QIODevice;
+#if !defined(MR_HAS_QT_MULTIMEDIA)
+#define MR_HAS_QT_MULTIMEDIA 0
+#endif
+#if MR_HAS_QT_MULTIMEDIA
+class QAudioSink;
+#endif
 
 namespace multi_radio {
 
@@ -61,6 +71,30 @@ class MainWindow : public QMainWindow {
   void AppendLog(const QString& line);
   void AddMessageRow(const MessageRow& row);
   bool PassesFilter(const MessageRow& row) const;
+  void RefreshScanListChannelCards();
+  void ConfigureScanListChannel(int index);
+  void ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message);
+  QString ScanListChannelCardText(int index) const;
+  QString ScanListChannelCardStyle(int index) const;
+  bool IsSelectedReceiver(uint32_t receiver_id) const;
+  void HandleAudioPcmEvent(const QString& message);
+  void LoadScanListConfigFromSettings();
+  void SaveScanListConfigToSettings() const;
+
+  struct ScanListChannelConfig {
+    QString label;
+    double frequency_mhz = 0.0;
+    v1::Modulation modulation = v1::MODULATION_NFM;
+    int bandwidth_hz = 0;
+    double squelch_threshold_db = -30.0;
+    int dwell_ms = 0;
+  };
+
+  enum class ScanListChannelState {
+    kIdle,
+    kSquelchClosed,
+    kSquelchOpen,
+  };
 
   std::unique_ptr<GrpcClient> client_;
   std::vector<MessageRow> all_rows_;
@@ -72,7 +106,6 @@ class MainWindow : public QMainWindow {
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;
   QLineEdit* range_step_edit_ = nullptr;
-  QLineEdit* list_frequencies_edit_ = nullptr;
   QSpinBox* dwell_ms_spin_ = nullptr;
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;
@@ -89,10 +122,18 @@ class MainWindow : public QMainWindow {
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
+  std::array<ScanListChannelConfig, 5> scan_list_channels_;
+  std::array<QPushButton*, 5> scan_list_channel_buttons_ = {nullptr, nullptr, nullptr, nullptr, nullptr};
+  int active_scan_list_channel_index_ = -1;
+  ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
 
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;
   SignalVisualizationWidget* signal_visualization_ = nullptr;
+#if MR_HAS_QT_MULTIMEDIA
+  QAudioSink* audio_sink_ = nullptr;
+#endif
+  QIODevice* audio_output_device_ = nullptr;
 };
 
 }  // namespace multi_radio

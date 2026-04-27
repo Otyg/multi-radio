@@ -5,19 +5,27 @@
 #include <optional>
 #include <sstream>
 
+#include <QByteArray>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QIODevice>
 #include <QPushButton>
+#include <QSettings>
 #include <QSplitter>
 #include <QVBoxLayout>
 #include <QWidget>
+#if MR_HAS_QT_MULTIMEDIA
+#include <QAudioFormat>
+#include <QAudioSink>
+#endif
 
 namespace multi_radio {
 
@@ -28,6 +36,55 @@ constexpr int kScanRangeModeTabIndex = 1;
 constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
+constexpr int kScanListChannelCount = 5;
+
+int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
+  switch (modulation) {
+    case v1::MODULATION_AM:
+      return 10000;
+    case v1::MODULATION_WFM:
+      return 180000;
+    case v1::MODULATION_NFM:
+    case v1::MODULATION_UNSPECIFIED:
+    default:
+      return 12500;
+  }
+}
+
+QString ModulationLabel(v1::Modulation modulation) {
+  switch (modulation) {
+    case v1::MODULATION_AM:
+      return "AM";
+    case v1::MODULATION_WFM:
+      return "WFM";
+    case v1::MODULATION_NFM:
+    case v1::MODULATION_UNSPECIFIED:
+    default:
+      return "NFM";
+  }
+}
+
+v1::Modulation ModulationFromText(const QString& text) {
+  const QString upper = text.trimmed().toUpper();
+  if (upper == "AM") {
+    return v1::MODULATION_AM;
+  }
+  if (upper == "WFM") {
+    return v1::MODULATION_WFM;
+  }
+  return v1::MODULATION_NFM;
+}
+
+QString TokenValue(const QString& message, const QString& key) {
+  const QStringList tokens = message.split(' ', Qt::SkipEmptyParts);
+  const QString prefix = key + "=";
+  for (const QString& token : tokens) {
+    if (token.startsWith(prefix)) {
+      return token.mid(prefix.size());
+    }
+  }
+  return {};
+}
 
 v1::RadioMode ModeFromTabIndex(int tab_index) {
   switch (tab_index) {
@@ -572,7 +629,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_start_edit_ = new QLineEdit("156000000", control_group);
   range_end_edit_ = new QLineEdit("163000000", control_group);
   range_step_edit_ = new QLineEdit("25000", control_group);
-  list_frequencies_edit_ = new QLineEdit("161975000,162025000,156525000,1090000000", control_group);
 
   dwell_ms_spin_ = new QSpinBox(control_group);
   dwell_ms_spin_->setRange(100, 10000);
@@ -635,8 +691,22 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   mode_tabs_->addTab(range_tab, "SCAN_RANGE");
 
   auto* list_tab = new QWidget(mode_tabs_);
-  auto* list_layout = new QFormLayout(list_tab);
-  list_layout->addRow("List Hz (comma)", list_frequencies_edit_);
+  auto* list_layout = new QVBoxLayout(list_tab);
+  auto* list_caption = new QLabel("Klicka pa en kanalruta for att konfigurera label, frekvens, modulation, bandbredd, squelch och dwell.", list_tab);
+  list_caption->setWordWrap(true);
+  list_layout->addWidget(list_caption);
+  auto* list_grid = new QGridLayout();
+  list_grid->setHorizontalSpacing(8);
+  list_grid->setVerticalSpacing(8);
+  for (int idx = 0; idx < kScanListChannelCount; ++idx) {
+    auto* channel_button = new QPushButton(list_tab);
+    channel_button->setMinimumHeight(110);
+    channel_button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    scan_list_channel_buttons_[static_cast<size_t>(idx)] = channel_button;
+    list_grid->addWidget(channel_button, idx / 3, idx % 3);
+    connect(channel_button, &QPushButton::clicked, this, [this, idx]() { ConfigureScanListChannel(idx); });
+  }
+  list_layout->addLayout(list_grid);
   mode_tabs_->addTab(list_tab, "SCAN_LIST");
 
   auto* air_marine_tab = new QWidget(mode_tabs_);
@@ -661,7 +731,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   auto* global_tab = new QWidget(mode_tabs_);
   auto* global_layout = new QFormLayout(global_tab);
-  global_layout->addRow("Dwell ms", dwell_ms_spin_);
+  global_layout->addRow("Default dwell ms", dwell_ms_spin_);
   global_layout->addRow("Sample rate", sample_rate_spin_);
   global_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
   global_layout->addRow("DC blocker", dc_blocker_checkbox_);
@@ -716,6 +786,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   root_layout->addWidget(splitter);
 
   setCentralWidget(central);
+  LoadScanListConfigFromSettings();
+  RefreshScanListChannelCards();
+
+#if MR_HAS_QT_MULTIMEDIA
+  QAudioFormat audio_format;
+  audio_format.setSampleRate(16000);
+  audio_format.setChannelCount(1);
+  audio_format.setSampleFormat(QAudioFormat::Int16);
+  audio_sink_ = new QAudioSink(audio_format, this);
+  audio_output_device_ = audio_sink_->start();
+  if (audio_output_device_ == nullptr) {
+    AppendLog("Audio output unavailable");
+  }
+#endif
 
   connect(refresh_button, &QPushButton::clicked, this, &MainWindow::RefreshReceivers);
   connect(start_button, &QPushButton::clicked, this, &MainWindow::StartSelectedReceiver);
@@ -754,6 +838,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       AddMessageRow(row);
     }
   });
+  connect(dwell_ms_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
+    SaveScanListConfigToSettings();
+  });
+  connect(receiver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+    active_scan_list_channel_index_ = -1;
+    active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+    RefreshScanListChannelCards();
+  });
   connect(mode_tabs_, &QTabWidget::currentChanged, this, [this](int index) {
     if (index >= kFixedModeTabIndex && index <= kAirMarineModeTabIndex) {
       last_mode_tab_index_ = index;
@@ -787,6 +879,8 @@ void MainWindow::RefreshReceivers() {
     return;
   }
 
+  const uint32_t previous_receiver_id =
+      (receiver_combo_->currentIndex() >= 0) ? static_cast<uint32_t>(receiver_combo_->currentData().toUInt()) : 0;
   receiver_combo_->clear();
   receiver_filter_combo_->clear();
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
@@ -803,6 +897,40 @@ void MainWindow::RefreshReceivers() {
     receiver_filter_combo_->addItem(QString("#%1").arg(receiver.receiver_id()),
                                     QVariant::fromValue<int>(receiver.receiver_id()));
   }
+
+  if (previous_receiver_id != 0) {
+    const int restore_index = receiver_combo_->findData(QVariant::fromValue<int>(previous_receiver_id));
+    if (restore_index >= 0) {
+      receiver_combo_->setCurrentIndex(restore_index);
+    }
+  }
+
+  if (receiver_combo_->currentIndex() >= 0) {
+    const uint32_t selected_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+    for (const auto& receiver : receivers) {
+      if (receiver.receiver_id() != selected_id) {
+        continue;
+      }
+      const auto& channels = receiver.mode_config().scan_list_channels();
+      if (!channels.empty()) {
+        for (int index = 0; index < kScanListChannelCount; ++index) {
+          ScanListChannelConfig updated = scan_list_channels_[static_cast<size_t>(index)];
+          if (index < channels.size()) {
+            const auto& channel = channels.Get(index);
+            updated.label = QString::fromStdString(channel.label());
+            updated.frequency_mhz = channel.frequency_hz() > 0.0 ? channel.frequency_hz() / 1000000.0 : 0.0;
+            updated.modulation = channel.modulation();
+            updated.bandwidth_hz = static_cast<int>(channel.channel_bandwidth_hz());
+            updated.squelch_threshold_db = channel.squelch_threshold_db();
+            updated.dwell_ms = static_cast<int>(channel.dwell_ms());
+          }
+          scan_list_channels_[static_cast<size_t>(index)] = updated;
+        }
+      }
+      break;
+    }
+  }
+  RefreshScanListChannelCards();
 
   signal_visualization_->SetKnownReceivers(receiver_ids);
   signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
@@ -874,9 +1002,19 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_lo_offset_enabled(lo_offset_checkbox_->isChecked());
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
 
-  const auto list_tokens = list_frequencies_edit_->text().split(',', Qt::SkipEmptyParts);
-  for (const auto& token : list_tokens) {
-    config.add_frequency_list_hz(token.trimmed().toDouble());
+  config.clear_scan_list_channels();
+  config.clear_frequency_list_hz();
+  for (const auto& channel : scan_list_channels_) {
+    auto* out = config.add_scan_list_channels();
+    out->set_label(channel.label.toStdString());
+    out->set_frequency_hz(channel.frequency_mhz * 1000000.0);
+    out->set_modulation(channel.modulation);
+    out->set_channel_bandwidth_hz(static_cast<uint32_t>(std::max(0, channel.bandwidth_hz)));
+    out->set_squelch_threshold_db(channel.squelch_threshold_db);
+    out->set_dwell_ms(static_cast<uint32_t>(std::max(0, channel.dwell_ms)));
+    if (channel.frequency_mhz > 0.0) {
+      config.add_frequency_list_hz(channel.frequency_mhz * 1000000.0);
+    }
   }
 
   if (!client_->SetModeConfig(receiver_id, config, &error)) {
@@ -899,6 +1037,16 @@ void MainWindow::ApplyModeAndConfig() {
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
                                  const QString& message, quint64 unix_ms) {
+  if (message.startsWith("AUDIO_PCM16 ")) {
+    if (IsSelectedReceiver(receiver_id)) {
+      HandleAudioPcmEvent(message);
+    }
+    return;
+  }
+  if (message.startsWith("SCAN_STATUS ")) {
+    ApplyScanListStatusEvent(receiver_id, message);
+    return;
+  }
   if (event_kind == static_cast<int>(v1::EVENT_KIND_TUNE_HOP)) {
     return;
   }
@@ -1048,6 +1196,233 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   all_rows_.push_back(row);
   AddMessageRow(row);
+}
+
+bool MainWindow::IsSelectedReceiver(uint32_t receiver_id) const {
+  if (receiver_combo_->currentIndex() < 0) {
+    return false;
+  }
+  return static_cast<uint32_t>(receiver_combo_->currentData().toUInt()) == receiver_id;
+}
+
+QString MainWindow::ScanListChannelCardText(int index) const {
+  if (index < 0 || index >= kScanListChannelCount) {
+    return {};
+  }
+  const auto& channel = scan_list_channels_[static_cast<size_t>(index)];
+  const QString label = channel.label.trimmed().isEmpty()
+                            ? QString("Kanal %1").arg(index + 1)
+                            : channel.label.trimmed();
+  const bool configured = channel.frequency_mhz > 0.0;
+  const QString freq_text =
+      configured ? QString("%1 MHz").arg(channel.frequency_mhz, 0, 'f', 3)
+                 : QString("Frekvens ej satt");
+  QString status_text = configured ? "Vilar" : "Okonfigurerad";
+  if (active_scan_list_channel_index_ == index) {
+    status_text = (active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen)
+                      ? "Squelch oppen"
+                      : "Squelch stangd";
+  }
+  return QString("%1\n%2\n%3").arg(label).arg(freq_text).arg(status_text);
+}
+
+QString MainWindow::ScanListChannelCardStyle(int index) const {
+  if (active_scan_list_channel_index_ == index &&
+      active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen) {
+    return "QPushButton { text-align: left; padding: 10px; border: 2px solid #2E7D32; background: #E8F5E9; }";
+  }
+  if (active_scan_list_channel_index_ == index &&
+      active_scan_list_channel_state_ == ScanListChannelState::kSquelchClosed) {
+    return "QPushButton { text-align: left; padding: 10px; border: 2px solid #EF6C00; background: #FFF3E0; }";
+  }
+  return "QPushButton { text-align: left; padding: 10px; border: 1px solid #B0BEC5; background: #FAFAFA; }";
+}
+
+void MainWindow::RefreshScanListChannelCards() {
+  for (int index = 0; index < kScanListChannelCount; ++index) {
+    QPushButton* button = scan_list_channel_buttons_[static_cast<size_t>(index)];
+    if (button == nullptr) {
+      continue;
+    }
+    button->setText(ScanListChannelCardText(index));
+    button->setStyleSheet(ScanListChannelCardStyle(index));
+  }
+}
+
+void MainWindow::ConfigureScanListChannel(int index) {
+  if (index < 0 || index >= kScanListChannelCount) {
+    return;
+  }
+  ScanListChannelConfig& channel = scan_list_channels_[static_cast<size_t>(index)];
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(QString("Konfigurera kanal %1").arg(index + 1));
+  auto* layout = new QFormLayout(&dialog);
+
+  auto* label_edit = new QLineEdit(channel.label, &dialog);
+  auto* frequency_spin = new QDoubleSpinBox(&dialog);
+  frequency_spin->setDecimals(3);
+  frequency_spin->setRange(0.0, 6000.0);
+  frequency_spin->setSingleStep(0.025);
+  frequency_spin->setSuffix(" MHz");
+  frequency_spin->setValue(channel.frequency_mhz);
+
+  auto* modulation_combo = new QComboBox(&dialog);
+  modulation_combo->addItem("AM");
+  modulation_combo->addItem("WFM");
+  modulation_combo->addItem("NFM");
+  modulation_combo->setCurrentText(ModulationLabel(channel.modulation));
+
+  auto* bandwidth_spin = new QSpinBox(&dialog);
+  bandwidth_spin->setRange(2000, 500000);
+  bandwidth_spin->setSingleStep(1000);
+  bandwidth_spin->setSuffix(" Hz");
+  const int channel_bandwidth =
+      channel.bandwidth_hz > 0 ? channel.bandwidth_hz : DefaultBandwidthHzForModulation(channel.modulation);
+  bandwidth_spin->setValue(channel_bandwidth);
+
+  auto* squelch_spin = new QDoubleSpinBox(&dialog);
+  squelch_spin->setDecimals(1);
+  squelch_spin->setRange(-120.0, 0.0);
+  squelch_spin->setSingleStep(1.0);
+  squelch_spin->setSuffix(" dB");
+  squelch_spin->setValue(channel.squelch_threshold_db);
+
+  auto* dwell_spin = new QSpinBox(&dialog);
+  dwell_spin->setRange(0, 60000);
+  dwell_spin->setSingleStep(100);
+  dwell_spin->setSpecialValueText("Use default");
+  dwell_spin->setSuffix(" ms");
+  dwell_spin->setValue(channel.dwell_ms);
+
+  connect(modulation_combo, &QComboBox::currentTextChanged, this, [bandwidth_spin](const QString& text) {
+    bandwidth_spin->setValue(DefaultBandwidthHzForModulation(ModulationFromText(text)));
+  });
+
+  layout->addRow("Label", label_edit);
+  layout->addRow("Frekvens", frequency_spin);
+  layout->addRow("Modulation", modulation_combo);
+  layout->addRow("Bandbredd", bandwidth_spin);
+  layout->addRow("Squelch threshold", squelch_spin);
+  layout->addRow("Kanal dwell", dwell_spin);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  layout->addRow(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  channel.label = label_edit->text().trimmed();
+  channel.frequency_mhz = frequency_spin->value();
+  channel.modulation = ModulationFromText(modulation_combo->currentText());
+  channel.bandwidth_hz = bandwidth_spin->value();
+  channel.squelch_threshold_db = squelch_spin->value();
+  channel.dwell_ms = dwell_spin->value();
+  SaveScanListConfigToSettings();
+  RefreshScanListChannelCards();
+}
+
+void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message) {
+  if (!IsSelectedReceiver(receiver_id)) {
+    return;
+  }
+  bool idx_ok = false;
+  const int index = TokenValue(message, "idx").toInt(&idx_ok);
+  if (!idx_ok || index < 0 || index >= kScanListChannelCount) {
+    return;
+  }
+  const QString state = TokenValue(message, "state").trimmed().toLower();
+  active_scan_list_channel_index_ = index;
+  if (state == "open") {
+    active_scan_list_channel_state_ = ScanListChannelState::kSquelchOpen;
+  } else {
+    active_scan_list_channel_state_ = ScanListChannelState::kSquelchClosed;
+  }
+  RefreshScanListChannelCards();
+}
+
+void MainWindow::HandleAudioPcmEvent(const QString& message) {
+#if MR_HAS_QT_MULTIMEDIA
+  if (audio_output_device_ == nullptr) {
+    return;
+  }
+  bool sr_ok = false;
+  const int sample_rate_hz = TokenValue(message, "sr").toInt(&sr_ok);
+  if (!sr_ok || sample_rate_hz <= 0) {
+    return;
+  }
+  const QString data_b64 = TokenValue(message, "data");
+  if (data_b64.isEmpty()) {
+    return;
+  }
+  const QByteArray pcm = QByteArray::fromBase64(data_b64.toUtf8());
+  if (pcm.isEmpty()) {
+    return;
+  }
+  audio_output_device_->write(pcm);
+#else
+  Q_UNUSED(message);
+#endif
+}
+
+void MainWindow::LoadScanListConfigFromSettings() {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("scan_list");
+  const int saved_default_dwell =
+      settings.value("default_dwell_ms", dwell_ms_spin_->value()).toInt();
+  if (saved_default_dwell > 0) {
+    dwell_ms_spin_->setValue(saved_default_dwell);
+  }
+
+  for (int index = 0; index < kScanListChannelCount; ++index) {
+    settings.beginGroup(QString("channel_%1").arg(index));
+    ScanListChannelConfig channel = scan_list_channels_[static_cast<size_t>(index)];
+    channel.label = settings.value("label", channel.label).toString();
+    channel.frequency_mhz =
+        settings.value("frequency_mhz", channel.frequency_mhz).toDouble();
+    channel.bandwidth_hz = settings.value("bandwidth_hz", channel.bandwidth_hz).toInt();
+    channel.squelch_threshold_db =
+        settings.value("squelch_threshold_db", channel.squelch_threshold_db).toDouble();
+    channel.dwell_ms = settings.value("dwell_ms", channel.dwell_ms).toInt();
+
+    const int modulation = settings.value("modulation", static_cast<int>(channel.modulation)).toInt();
+    switch (modulation) {
+      case v1::MODULATION_AM:
+        channel.modulation = v1::MODULATION_AM;
+        break;
+      case v1::MODULATION_WFM:
+        channel.modulation = v1::MODULATION_WFM;
+        break;
+      case v1::MODULATION_NFM:
+      default:
+        channel.modulation = v1::MODULATION_NFM;
+        break;
+    }
+    scan_list_channels_[static_cast<size_t>(index)] = channel;
+    settings.endGroup();
+  }
+  settings.endGroup();
+}
+
+void MainWindow::SaveScanListConfigToSettings() const {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("scan_list");
+  settings.setValue("default_dwell_ms", dwell_ms_spin_->value());
+  for (int index = 0; index < kScanListChannelCount; ++index) {
+    const ScanListChannelConfig& channel = scan_list_channels_[static_cast<size_t>(index)];
+    settings.beginGroup(QString("channel_%1").arg(index));
+    settings.setValue("label", channel.label);
+    settings.setValue("frequency_mhz", channel.frequency_mhz);
+    settings.setValue("modulation", static_cast<int>(channel.modulation));
+    settings.setValue("bandwidth_hz", channel.bandwidth_hz);
+    settings.setValue("squelch_threshold_db", channel.squelch_threshold_db);
+    settings.setValue("dwell_ms", channel.dwell_ms);
+    settings.endGroup();
+  }
+  settings.endGroup();
 }
 
 void MainWindow::OnStreamError(const QString& error) {

@@ -17,6 +17,13 @@ enum SignalType {
   SIGNAL_TYPE_DSC = 3;
 }
 
+enum Modulation {
+  MODULATION_UNSPECIFIED = 0;
+  MODULATION_AM = 1;
+  MODULATION_WFM = 2;
+  MODULATION_NFM = 3;
+}
+
 enum EventKind {
   EVENT_KIND_INFO = 0;
   EVENT_KIND_WARNING = 1;
@@ -43,6 +50,16 @@ message ModeConfig {
   uint32 center_notch_width_hz = 15;
   bool lo_offset_enabled = 16;
   int32 lo_offset_hz = 17;
+  repeated ScanListChannel scan_list_channels = 18;
+}
+
+message ScanListChannel {
+  string label = 1;
+  double frequency_hz = 2;
+  Modulation modulation = 3;
+  uint32 channel_bandwidth_hz = 4;
+  double squelch_threshold_db = 5;
+  uint32 dwell_ms = 6;
 }
 
 message ReceiverInfo {
