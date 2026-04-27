@@ -65,9 +65,44 @@ struct IqCenterNotchState {
   bool initialized = false;
 };
 
-std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples = 8192);
+struct FmDiscriminatorState {
+  bool initialized = false;
+  double prev_i = 0.0;
+  double prev_q = 0.0;
+};
+
+struct CascadedLowPassState {
+  std::vector<double> stage_values;
+  bool initialized = false;
+};
+
+struct DeemphasisState {
+  bool initialized = false;
+  double value = 0.0;
+};
+
+struct AudioDcBlockState {
+  bool initialized = false;
+  double prev_in = 0.0;
+  double prev_out = 0.0;
+};
+
+struct AudioResamplerState {
+  double next_source_pos = 0.0;
+};
+
+struct AudioDemodState {
+  FmDiscriminatorState fm_discriminator;
+  CascadedLowPassState lowpass;
+  DeemphasisState deemphasis;
+  AudioDcBlockState dc_block;
+  AudioResamplerState resampler;
+};
+
+std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples = 8192,
+                                         FmDiscriminatorState* state = nullptr);
 bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t audio_sample_rate_hz,
-                     std::vector<int16_t>* pcm_out);
+                     AudioDemodState* state, std::vector<int16_t>* pcm_out);
 bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64);
 
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
@@ -86,7 +121,7 @@ size_t AudioFrameSamplesForRate(uint32_t audio_sample_rate_hz) {
 }
 
 void ApplyCascadedLowPass(std::vector<double>* samples, double sample_rate_hz, double cutoff_hz,
-                          int stages) {
+                          int stages, CascadedLowPassState* state = nullptr) {
   if (samples == nullptr || samples->empty() || sample_rate_hz <= 0.0 || cutoff_hz <= 0.0 || stages <= 0) {
     return;
   }
@@ -95,6 +130,26 @@ void ApplyCascadedLowPass(std::vector<double>* samples, double sample_rate_hz, d
       std::clamp(cutoff_hz, 5.0, std::max(5.0, nyquist_hz - 1.0));
   const double alpha = std::clamp(1.0 - std::exp((-2.0 * kPi * bounded_cutoff_hz) / sample_rate_hz),
                                   1.0e-6, 1.0);
+
+  if (state != nullptr) {
+    if (state->stage_values.size() != static_cast<size_t>(stages)) {
+      state->stage_values.assign(static_cast<size_t>(stages), (*samples)[0]);
+      state->initialized = false;
+    }
+    for (int stage = 0; stage < stages; ++stage) {
+      double stage_state = (!state->initialized || !std::isfinite(state->stage_values[static_cast<size_t>(stage)]))
+                               ? (*samples)[0]
+                               : state->stage_values[static_cast<size_t>(stage)];
+      for (size_t idx = 0; idx < samples->size(); ++idx) {
+        stage_state += alpha * ((*samples)[idx] - stage_state);
+        (*samples)[idx] = stage_state;
+      }
+      state->stage_values[static_cast<size_t>(stage)] = stage_state;
+    }
+    state->initialized = true;
+    return;
+  }
+
   for (int stage = 0; stage < stages; ++stage) {
     double state = (*samples)[0];
     for (size_t idx = 0; idx < samples->size(); ++idx) {
@@ -104,30 +159,52 @@ void ApplyCascadedLowPass(std::vector<double>* samples, double sample_rate_hz, d
   }
 }
 
-void ApplyFmDeemphasis(std::vector<double>* samples, double sample_rate_hz, double tau_us) {
+void ApplyFmDeemphasis(std::vector<double>* samples, double sample_rate_hz, double tau_us,
+                       DeemphasisState* state = nullptr) {
   if (samples == nullptr || samples->empty() || sample_rate_hz <= 0.0 || tau_us <= 0.0) {
     return;
   }
   const double tau_s = tau_us * 1.0e-6;
   const double alpha = std::clamp(1.0 - std::exp(-1.0 / (sample_rate_hz * tau_s)), 1.0e-6, 1.0);
-  double state = (*samples)[0];
+
+  if (state != nullptr) {
+    if (!state->initialized || !std::isfinite(state->value)) {
+      state->value = (*samples)[0];
+      state->initialized = true;
+    }
+    for (size_t idx = 0; idx < samples->size(); ++idx) {
+      state->value += alpha * ((*samples)[idx] - state->value);
+      (*samples)[idx] = state->value;
+    }
+    return;
+  }
+
+  double deemphasis_value = (*samples)[0];
   for (size_t idx = 0; idx < samples->size(); ++idx) {
-    state += alpha * ((*samples)[idx] - state);
-    (*samples)[idx] = state;
+    deemphasis_value += alpha * ((*samples)[idx] - deemphasis_value);
+    (*samples)[idx] = deemphasis_value;
   }
 }
 
-void RemoveDcOffset(std::vector<double>* samples) {
-  if (samples == nullptr || samples->empty()) {
+void ApplyAudioDcBlock(std::vector<double>* samples, double sample_rate_hz, double cutoff_hz,
+                       AudioDcBlockState* state) {
+  if (samples == nullptr || samples->empty() || sample_rate_hz <= 0.0 || cutoff_hz <= 0.0 ||
+      state == nullptr) {
     return;
   }
-  double mean = 0.0;
-  for (double value : *samples) {
-    mean += value;
-  }
-  mean /= static_cast<double>(samples->size());
-  for (double& value : *samples) {
-    value -= mean;
+
+  const double alpha =
+      std::clamp(std::exp((-2.0 * kPi * cutoff_hz) / sample_rate_hz), 0.0, 0.99999);
+  for (double& sample : *samples) {
+    if (!state->initialized || !std::isfinite(state->prev_in) || !std::isfinite(state->prev_out)) {
+      state->prev_in = sample;
+      state->prev_out = 0.0;
+      state->initialized = true;
+    }
+    const double out = sample - state->prev_in + alpha * state->prev_out;
+    state->prev_in = sample;
+    state->prev_out = out;
+    sample = out;
   }
 }
 
@@ -446,7 +523,7 @@ std::vector<double> BuildAmEnvelope(const IQSampleBlock& iq) {
 }
 
 bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t audio_sample_rate_hz,
-                     std::vector<int16_t>* pcm_out) {
+                     AudioDemodState* state, std::vector<int16_t>* pcm_out) {
   if (pcm_out == nullptr) {
     return false;
   }
@@ -454,11 +531,15 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   if (iq.sample_rate_hz == 0) {
     return false;
   }
+  AudioDemodState local_state;
+  if (state == nullptr) {
+    state = &local_state;
+  }
   std::vector<double> source;
   if (modulation == Modulation::kAm) {
     source = BuildAmEnvelope(iq);
   } else {
-    source = BuildFmDiscriminator(iq, 0);
+    source = BuildFmDiscriminator(iq, 0, &state->fm_discriminator);
   }
   if (source.size() < 32) {
     return false;
@@ -467,18 +548,18 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   const double source_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
   switch (modulation) {
     case Modulation::kWfm:
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 7000.0, 4);
-      ApplyFmDeemphasis(&source, source_sample_rate_hz, 50.0);
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 7000.0, 4, &state->lowpass);
+      ApplyFmDeemphasis(&source, source_sample_rate_hz, 50.0, &state->deemphasis);
       break;
     case Modulation::kAm:
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 4500.0, 3);
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 4500.0, 3, &state->lowpass);
       break;
     case Modulation::kNfm:
     default:
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 3400.0, 3);
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 3400.0, 3, &state->lowpass);
       break;
   }
-  RemoveDcOffset(&source);
+  ApplyAudioDcBlock(&source, source_sample_rate_hz, 30.0, &state->dc_block);
 
   if (audio_sample_rate_hz == 0) {
     return false;
@@ -489,7 +570,7 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   }
   const double step = std::max(1.0, ratio);
   pcm_out->reserve(static_cast<size_t>(static_cast<double>(source.size()) / step) + 2U);
-  double pos = 0.0;
+  double pos = std::clamp(state->resampler.next_source_pos, 0.0, step);
   while (pos < static_cast<double>(source.size())) {
     const size_t idx = static_cast<size_t>(pos);
     const size_t next_idx = std::min(idx + 1, source.size() - 1);
@@ -498,6 +579,11 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
     const double sample = std::clamp(mixed * 9000.0, -30000.0, 30000.0);
     pcm_out->push_back(static_cast<int16_t>(std::lrint(sample)));
     pos += step;
+  }
+  state->resampler.next_source_pos = pos - static_cast<double>(source.size());
+  if (!std::isfinite(state->resampler.next_source_pos) || state->resampler.next_source_pos < 0.0 ||
+      state->resampler.next_source_pos >= step) {
+    state->resampler.next_source_pos = 0.0;
   }
   return !pcm_out->empty();
 }
@@ -517,7 +603,8 @@ bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64
   return true;
 }
 
-std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples) {
+std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples,
+                                         FmDiscriminatorState* state) {
   std::vector<double> discriminator;
   if (iq.sample_rate_hz == 0 || iq.interleaved_iq.size() < 4) {
     return discriminator;
@@ -530,10 +617,16 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
     return discriminator;
   }
 
-  discriminator.reserve(sample_count - 1);
+  size_t start_idx = 1;
   double prev_i = static_cast<double>(iq.interleaved_iq[0]);
   double prev_q = static_cast<double>(iq.interleaved_iq[1]);
-  for (size_t n = 1; n < sample_count; ++n) {
+  if (state != nullptr && state->initialized && std::isfinite(state->prev_i) && std::isfinite(state->prev_q)) {
+    start_idx = 0;
+    prev_i = state->prev_i;
+    prev_q = state->prev_q;
+  }
+  discriminator.reserve(sample_count - start_idx);
+  for (size_t n = start_idx; n < sample_count; ++n) {
     const double cur_i = static_cast<double>(iq.interleaved_iq[n * 2]);
     const double cur_q = static_cast<double>(iq.interleaved_iq[n * 2 + 1]);
     const double cross = prev_i * cur_q - prev_q * cur_i;
@@ -542,18 +635,26 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
     prev_i = cur_i;
     prev_q = cur_q;
   }
+  if (state != nullptr) {
+    const size_t last_idx = (sample_count - 1) * 2;
+    state->prev_i = static_cast<double>(iq.interleaved_iq[last_idx]);
+    state->prev_q = static_cast<double>(iq.interleaved_iq[last_idx + 1]);
+    state->initialized = true;
+  }
 
   if (discriminator.empty()) {
     return discriminator;
   }
 
-  double mean = 0.0;
-  for (double value : discriminator) {
-    mean += value;
-  }
-  mean /= static_cast<double>(discriminator.size());
-  for (double& value : discriminator) {
-    value -= mean;
+  if (state == nullptr) {
+    double mean = 0.0;
+    for (double value : discriminator) {
+      mean += value;
+    }
+    mean /= static_cast<double>(discriminator.size());
+    for (double& value : discriminator) {
+      value -= mean;
+    }
   }
   return discriminator;
 }
@@ -1011,6 +1112,7 @@ void ReceiverWorker::RunLoop() {
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
     std::vector<int16_t> audio_pcm_buffer;
+    AudioDemodState audio_demod_state;
 
     while (running_.load()) {
       const auto now = std::chrono::steady_clock::now();
@@ -1086,6 +1188,7 @@ void ReceiverWorker::RunLoop() {
             PublishEvent(EventKind::kInfo, opened.str(), tuned_frequency_hz);
           } else {
             audio_pcm_buffer.clear();
+            audio_demod_state = AudioDemodState{};
             squelch_closed_at = std::chrono::steady_clock::now();
             if (squelch_opened_at.has_value()) {
               const auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1188,9 +1291,10 @@ void ReceiverWorker::RunLoop() {
         const size_t audio_frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
         if (audio_frame_samples == 0) {
           audio_pcm_buffer.clear();
+          audio_demod_state = AudioDemodState{};
           continue;
         }
-        if (BuildAudioPcm16(iq, scan_modulation, audio_sample_rate_hz, &block_pcm)) {
+        if (BuildAudioPcm16(iq, scan_modulation, audio_sample_rate_hz, &audio_demod_state, &block_pcm)) {
           audio_pcm_buffer.insert(audio_pcm_buffer.end(), block_pcm.begin(), block_pcm.end());
         }
         while (audio_pcm_buffer.size() >= audio_frame_samples) {
@@ -1207,6 +1311,7 @@ void ReceiverWorker::RunLoop() {
         }
       } else if (has_scan_squelch) {
         audio_pcm_buffer.clear();
+        audio_demod_state = AudioDemodState{};
       }
     }
     if (hold_on_squelch && squelch_opened_at.has_value()) {
