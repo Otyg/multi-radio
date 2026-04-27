@@ -103,7 +103,6 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
                                          FmDiscriminatorState* state = nullptr);
 bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t audio_sample_rate_hz,
                      AudioDemodState* state, std::vector<int16_t>* pcm_out);
-bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64);
 
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
   if (modulation == Modulation::kWfm) {
@@ -445,40 +444,6 @@ std::string SanitizeToken(std::string text) {
   return text;
 }
 
-std::string Base64Encode(const std::vector<uint8_t>& data) {
-  static constexpr char kAlphabet[] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  out.reserve(((data.size() + 2) / 3) * 4);
-  size_t idx = 0;
-  while (idx + 3 <= data.size()) {
-    const uint32_t block = (static_cast<uint32_t>(data[idx]) << 16U) |
-                           (static_cast<uint32_t>(data[idx + 1]) << 8U) |
-                           static_cast<uint32_t>(data[idx + 2]);
-    out.push_back(kAlphabet[(block >> 18U) & 0x3fU]);
-    out.push_back(kAlphabet[(block >> 12U) & 0x3fU]);
-    out.push_back(kAlphabet[(block >> 6U) & 0x3fU]);
-    out.push_back(kAlphabet[block & 0x3fU]);
-    idx += 3;
-  }
-  const size_t remain = data.size() - idx;
-  if (remain == 1) {
-    const uint32_t block = static_cast<uint32_t>(data[idx]) << 16U;
-    out.push_back(kAlphabet[(block >> 18U) & 0x3fU]);
-    out.push_back(kAlphabet[(block >> 12U) & 0x3fU]);
-    out.push_back('=');
-    out.push_back('=');
-  } else if (remain == 2) {
-    const uint32_t block = (static_cast<uint32_t>(data[idx]) << 16U) |
-                           (static_cast<uint32_t>(data[idx + 1]) << 8U);
-    out.push_back(kAlphabet[(block >> 18U) & 0x3fU]);
-    out.push_back(kAlphabet[(block >> 12U) & 0x3fU]);
-    out.push_back(kAlphabet[(block >> 6U) & 0x3fU]);
-    out.push_back('=');
-  }
-  return out;
-}
-
 double EstimateSignalDbfs(const IQSampleBlock& iq) {
   if (iq.interleaved_iq.empty()) {
     return -120.0;
@@ -586,21 +551,6 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
     state->resampler.next_source_pos = 0.0;
   }
   return !pcm_out->empty();
-}
-
-bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64) {
-  if (payload_b64 == nullptr || pcm.empty()) {
-    return false;
-  }
-  std::vector<uint8_t> raw;
-  raw.reserve(pcm.size() * 2);
-  for (int16_t sample : pcm) {
-    const uint16_t word = static_cast<uint16_t>(sample);
-    raw.push_back(static_cast<uint8_t>(word & 0x00ffU));
-    raw.push_back(static_cast<uint8_t>((word >> 8U) & 0x00ffU));
-  }
-  *payload_b64 = Base64Encode(raw);
-  return true;
 }
 
 std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples,
@@ -1311,12 +1261,14 @@ void ReceiverWorker::RunLoop() {
         while (audio_pcm_buffer.size() >= audio_frame_samples) {
           const auto frame_end = audio_pcm_buffer.begin() +
                                  static_cast<std::vector<int16_t>::difference_type>(audio_frame_samples);
-          const std::vector<int16_t> frame_pcm(audio_pcm_buffer.begin(), frame_end);
-          std::string audio_b64;
-          if (EncodePcm16Base64(frame_pcm, &audio_b64)) {
-            std::ostringstream audio_msg;
-            audio_msg << "AUDIO_PCM16 sr=" << audio_sample_rate_hz << " data=" << audio_b64;
-            PublishEvent(EventKind::kInfo, audio_msg.str(), tuned_frequency_hz, false);
+          AudioFrame frame;
+          frame.unix_ms = UnixMillisNow();
+          frame.receiver_id = receiver_id_;
+          frame.sample_rate_hz = audio_sample_rate_hz;
+          frame.tuned_frequency_hz = tuned_frequency_hz;
+          frame.pcm_s16le.assign(audio_pcm_buffer.begin(), frame_end);
+          if (!frame.pcm_s16le.empty()) {
+            event_bus_->PublishAudioFrame(frame);
           }
           audio_pcm_buffer.erase(audio_pcm_buffer.begin(), frame_end);
         }

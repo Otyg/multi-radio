@@ -98,6 +98,14 @@ struct DecodedMessage {
   std::map<std::string, std::string> normalized_fields;
 };
 
+struct AudioFrame {
+  uint64_t unix_ms = 0;
+  uint32_t receiver_id = 0;
+  uint32_t sample_rate_hz = 0;
+  std::vector<int16_t> pcm_s16le;
+  double tuned_frequency_hz = 0.0;
+};
+
 struct IQSampleBlock {
   std::vector<int16_t> interleaved_iq;
   uint32_t sample_rate_hz = 0;
