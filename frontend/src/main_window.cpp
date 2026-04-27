@@ -1898,16 +1898,13 @@ void MainWindow::CompleteAutoSquelchCalibration() {
 
 void MainWindow::HandleAudioPcmEvent(const QString& message) {
 #if MR_HAS_QT_MULTIMEDIA
-  EnsureAudioOutputInitialized();
-  if (audio_output_disabled_) {
-    return;
-  }
-  if (audio_output_device_ == nullptr) {
-    return;
-  }
   bool sr_ok = false;
   const int sample_rate_hz = TokenValue(message, "sr").toInt(&sr_ok);
-  if (!sr_ok || sample_rate_hz <= 0) {
+  if (!sr_ok || sample_rate_hz <= 1000 || sample_rate_hz > 192000) {
+    return;
+  }
+  EnsureAudioOutputInitialized(sample_rate_hz);
+  if (audio_output_disabled_ || audio_output_device_ == nullptr) {
     return;
   }
   const QString data_b64 = TokenValue(message, "data");
@@ -1919,9 +1916,10 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
     return;
   }
   audio_pending_pcm_.append(pcm);
-  constexpr int kMaxBufferedAudioBytes = 16000 * 2 * 3;
-  if (audio_pending_pcm_.size() > kMaxBufferedAudioBytes) {
-    const int dropped = audio_pending_pcm_.size() - kMaxBufferedAudioBytes;
+  const int max_buffered_audio_bytes =
+      std::max(4096, sample_rate_hz * 2 * 3);
+  if (audio_pending_pcm_.size() > max_buffered_audio_bytes) {
+    const int dropped = audio_pending_pcm_.size() - max_buffered_audio_bytes;
     audio_pending_pcm_.remove(0, dropped);
     if (!audio_queue_overrun_logged_) {
       AppendLog(QString("Audio queue overrun: dropped %1 bytes").arg(dropped));
@@ -1936,9 +1934,21 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
 #endif
 }
 
-void MainWindow::EnsureAudioOutputInitialized() {
+void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
 #if MR_HAS_QT_MULTIMEDIA
-  if (audio_output_disabled_ || audio_output_device_ != nullptr || audio_sink_ != nullptr) {
+  if (audio_output_disabled_) {
+    return;
+  }
+  if (audio_sink_ != nullptr && audio_output_sample_rate_hz_ != sample_rate_hz) {
+    audio_sink_->stop();
+    audio_sink_->deleteLater();
+    audio_sink_ = nullptr;
+    audio_output_device_ = nullptr;
+    audio_pending_pcm_.clear();
+    audio_output_sample_rate_hz_ = 0;
+  }
+  if (audio_output_device_ != nullptr && audio_sink_ != nullptr &&
+      audio_output_sample_rate_hz_ == sample_rate_hz) {
     return;
   }
   const QAudioDevice default_output = QMediaDevices::defaultAudioOutput();
@@ -1948,19 +1958,22 @@ void MainWindow::EnsureAudioOutputInitialized() {
     return;
   }
   QAudioFormat audio_format;
-  audio_format.setSampleRate(16000);
+  audio_format.setSampleRate(sample_rate_hz);
   audio_format.setChannelCount(1);
   audio_format.setSampleFormat(QAudioFormat::Int16);
   audio_sink_ = new QAudioSink(default_output, audio_format, this);
-  audio_sink_->setBufferSize(16000 * 2 * 2);
+  audio_sink_->setBufferSize(std::max(4096, sample_rate_hz * 2 * 2));
   audio_output_device_ = audio_sink_->start();
   if (audio_output_device_ == nullptr) {
     audio_output_disabled_ = true;
     audio_sink_->deleteLater();
     audio_sink_ = nullptr;
     audio_pending_pcm_.clear();
+    audio_output_sample_rate_hz_ = 0;
     AppendLog("Audio output unavailable");
+    return;
   }
+  audio_output_sample_rate_hz_ = sample_rate_hz;
 #endif
 }
 

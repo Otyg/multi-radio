@@ -88,7 +88,7 @@ class MainWindow : public QMainWindow {
   QString ScanListChannelCardStyle(int index) const;
   bool IsSelectedReceiver(uint32_t receiver_id) const;
   void HandleAudioPcmEvent(const QString& message);
-  void EnsureAudioOutputInitialized();
+  void EnsureAudioOutputInitialized(int sample_rate_hz);
   void DrainAudioOutputQueue();
   void LoadScanListConfigFromSettings();
   void SaveScanListConfigToSettings() const;
@@ -162,6 +162,7 @@ class MainWindow : public QMainWindow {
   QAudioSink* audio_sink_ = nullptr;
 #endif
   QIODevice* audio_output_device_ = nullptr;
+  int audio_output_sample_rate_hz_ = 0;
   QByteArray audio_pending_pcm_;
   bool audio_queue_overrun_logged_ = false;
   bool audio_output_disabled_ = false;

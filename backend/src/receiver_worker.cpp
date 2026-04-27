@@ -37,9 +37,8 @@ constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 80;
-constexpr uint32_t kAudioSampleRateHz = 16000;
-constexpr size_t kAudioFrameSamples =
-    (static_cast<size_t>(kAudioSampleRateHz) * static_cast<size_t>(kAudioFrameIntervalMs)) / 1000U;
+constexpr uint32_t kAudioSampleRateNarrowbandHz = 16000;
+constexpr uint32_t kAudioSampleRateWfmHz = 48000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 
 struct IqLowPassState {
@@ -67,8 +66,24 @@ struct IqCenterNotchState {
 };
 
 std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_samples = 8192);
-bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector<int16_t>* pcm_out);
+bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t audio_sample_rate_hz,
+                     std::vector<int16_t>* pcm_out);
 bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64);
+
+uint32_t AudioSampleRateForModulation(Modulation modulation) {
+  if (modulation == Modulation::kWfm) {
+    return kAudioSampleRateWfmHz;
+  }
+  return kAudioSampleRateNarrowbandHz;
+}
+
+size_t AudioFrameSamplesForRate(uint32_t audio_sample_rate_hz) {
+  if (audio_sample_rate_hz == 0) {
+    return 0;
+  }
+  return (static_cast<size_t>(audio_sample_rate_hz) * static_cast<size_t>(kAudioFrameIntervalMs)) /
+         1000U;
+}
 
 void ApplyCascadedLowPass(std::vector<double>* samples, double sample_rate_hz, double cutoff_hz,
                           int stages) {
@@ -430,7 +445,8 @@ std::vector<double> BuildAmEnvelope(const IQSampleBlock& iq) {
   return envelope;
 }
 
-bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector<int16_t>* pcm_out) {
+bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t audio_sample_rate_hz,
+                     std::vector<int16_t>* pcm_out) {
   if (pcm_out == nullptr) {
     return false;
   }
@@ -464,7 +480,10 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector
   }
   RemoveDcOffset(&source);
 
-  const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(kAudioSampleRateHz);
+  if (audio_sample_rate_hz == 0) {
+    return false;
+  }
+  const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(audio_sample_rate_hz);
   if (ratio <= 0.0) {
     return false;
   }
@@ -1165,17 +1184,23 @@ void ReceiverWorker::RunLoop() {
 
       if (has_scan_squelch && squelch_open) {
         std::vector<int16_t> block_pcm;
-        if (BuildAudioPcm16(iq, scan_modulation, &block_pcm)) {
+        const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
+        const size_t audio_frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
+        if (audio_frame_samples == 0) {
+          audio_pcm_buffer.clear();
+          continue;
+        }
+        if (BuildAudioPcm16(iq, scan_modulation, audio_sample_rate_hz, &block_pcm)) {
           audio_pcm_buffer.insert(audio_pcm_buffer.end(), block_pcm.begin(), block_pcm.end());
         }
-        while (audio_pcm_buffer.size() >= kAudioFrameSamples) {
+        while (audio_pcm_buffer.size() >= audio_frame_samples) {
           const auto frame_end = audio_pcm_buffer.begin() +
-                                 static_cast<std::vector<int16_t>::difference_type>(kAudioFrameSamples);
+                                 static_cast<std::vector<int16_t>::difference_type>(audio_frame_samples);
           const std::vector<int16_t> frame_pcm(audio_pcm_buffer.begin(), frame_end);
           std::string audio_b64;
           if (EncodePcm16Base64(frame_pcm, &audio_b64)) {
             std::ostringstream audio_msg;
-            audio_msg << "AUDIO_PCM16 sr=" << kAudioSampleRateHz << " data=" << audio_b64;
+            audio_msg << "AUDIO_PCM16 sr=" << audio_sample_rate_hz << " data=" << audio_b64;
             PublishEvent(EventKind::kInfo, audio_msg.str(), tuned_frequency_hz, false);
           }
           audio_pcm_buffer.erase(audio_pcm_buffer.begin(), frame_end);
