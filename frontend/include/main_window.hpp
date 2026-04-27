@@ -170,6 +170,7 @@ class MainWindow : public QMainWindow {
   QByteArray audio_pending_pcm_;
   QTimer* audio_drain_timer_ = nullptr;
   bool audio_prefill_complete_ = false;
+  qint64 audio_prefill_started_at_ms_ = 0;
   bool audio_queue_overrun_logged_ = false;
   bool audio_output_disabled_ = false;
 };

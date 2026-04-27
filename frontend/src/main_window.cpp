@@ -50,7 +50,9 @@ constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
 constexpr double kDefaultScanListSquelchDb = -67.5;
-constexpr int kAudioPrefillMs = 220;
+constexpr int kAudioPrefillMs = 180;
+constexpr int kAudioPrefillMaxWaitMs = 450;
+constexpr int kAudioMinStartupMs = 40;
 constexpr int kAudioSinkBufferMs = 3000;
 constexpr int kAudioPendingMaxMs = 6000;
 constexpr int kAudioDrainIntervalMs = 10;
@@ -1929,6 +1931,9 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
   if (audio_output_disabled_ || audio_output_device_ == nullptr) {
     return;
   }
+  if (audio_pending_pcm_.isEmpty()) {
+    audio_prefill_started_at_ms_ = QDateTime::currentMSecsSinceEpoch();
+  }
   audio_pending_pcm_.append(pcm);
   const int max_buffered_audio_bytes =
       std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPendingMaxMs) / 1000);
@@ -1946,9 +1951,14 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
     audio_queue_overrun_logged_ = false;
   }
   if (!audio_prefill_complete_) {
-    const int prefill_bytes =
-        std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPrefillMs) / 1000);
-    if (audio_pending_pcm_.size() < prefill_bytes) {
+    const int prefill_bytes = std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPrefillMs) / 1000);
+    const int min_start_bytes =
+        std::max(1024, (sample_rate_hz * kAudioBytesPerSample * kAudioMinStartupMs) / 1000);
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    const bool prefill_timed_out = audio_prefill_started_at_ms_ > 0 &&
+                                   now_ms >= audio_prefill_started_at_ms_ + kAudioPrefillMaxWaitMs;
+    if (audio_pending_pcm_.size() < prefill_bytes &&
+        (!prefill_timed_out || audio_pending_pcm_.size() < min_start_bytes)) {
       return;
     }
     audio_prefill_complete_ = true;
@@ -1993,6 +2003,7 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
     audio_output_device_ = nullptr;
     audio_pending_pcm_.clear();
     audio_prefill_complete_ = false;
+    audio_prefill_started_at_ms_ = 0;
     audio_output_sample_rate_hz_ = 0;
   }
   if (audio_output_device_ != nullptr && audio_sink_ != nullptr &&
@@ -2019,11 +2030,13 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
     audio_sink_ = nullptr;
     audio_pending_pcm_.clear();
     audio_prefill_complete_ = false;
+    audio_prefill_started_at_ms_ = 0;
     audio_output_sample_rate_hz_ = 0;
     AppendLog("Audio output unavailable");
     return;
   }
   audio_prefill_complete_ = false;
+  audio_prefill_started_at_ms_ = 0;
   audio_output_sample_rate_hz_ = sample_rate_hz;
 #endif
 }

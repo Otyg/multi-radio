@@ -36,7 +36,7 @@ constexpr uint32_t kMaxCenterNotchWidthHz = 200000;
 constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
-constexpr uint32_t kAudioFrameIntervalMs = 40;
+constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioSampleRateHz = 48000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
@@ -1304,6 +1304,15 @@ void ReceiverWorker::RunLoop() {
         audio_pcm_buffer.clear();
         audio_demod_state = AudioDemodState{};
       }
+    }
+    if (has_scan_squelch && !audio_pcm_buffer.empty()) {
+      AudioFrame frame;
+      frame.unix_ms = UnixMillisNow();
+      frame.receiver_id = receiver_id_;
+      frame.sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
+      frame.tuned_frequency_hz = tuned_frequency_hz;
+      frame.pcm_s16le = audio_pcm_buffer;
+      event_bus_->PublishAudioFrame(frame);
     }
     if (has_scan_squelch) {
       audio_pcm_buffer.clear();
