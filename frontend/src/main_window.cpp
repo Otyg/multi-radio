@@ -1294,6 +1294,81 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     }
     return;
   }
+  if (message.startsWith("AUDIO_STATS ")) {
+    if (!IsSelectedReceiver(receiver_id)) {
+      return;
+    }
+    bool idx_ok = false;
+    const int channel_index = TokenValue(message, "idx").toInt(&idx_ok);
+    QString channel_label;
+    if (idx_ok && channel_index >= 0 && static_cast<size_t>(channel_index) < scan_list_channels_.size()) {
+      channel_label = scan_list_channels_[static_cast<size_t>(channel_index)].label.trimmed();
+    }
+    if (channel_label.isEmpty()) {
+      channel_label = TokenValue(message, "label");
+      channel_label.replace('_', ' ');
+      if (channel_label.isEmpty()) {
+        channel_label = idx_ok ? QString("Kanal %1").arg(channel_index + 1) : QString("Kanal ?");
+      }
+    }
+
+    const QString modulation = TokenValue(message, "mod");
+    bool sr_ok = false;
+    const int sample_rate_hz = TokenValue(message, "sr").toInt(&sr_ok);
+    bool gate_ok = false;
+    const int gate = TokenValue(message, "gate").toInt(&gate_ok);
+    bool squelch_ok = false;
+    const int squelch = TokenValue(message, "squelch").toInt(&squelch_ok);
+    bool signal_ok = false;
+    const double signal_db = TokenValue(message, "signal_db").toDouble(&signal_ok);
+    bool blocks_ok = false;
+    const qint64 blocks = TokenValue(message, "blocks").toLongLong(&blocks_ok);
+    bool open_blocks_ok = false;
+    const qint64 open_blocks = TokenValue(message, "gate_open_blocks").toLongLong(&open_blocks_ok);
+    bool demod_ok_blocks_ok = false;
+    const qint64 demod_ok_blocks = TokenValue(message, "demod_ok").toLongLong(&demod_ok_blocks_ok);
+    bool demod_empty_ok = false;
+    const qint64 demod_empty_blocks = TokenValue(message, "demod_empty").toLongLong(&demod_empty_ok);
+    bool gen_ok = false;
+    const qint64 generated_samples = TokenValue(message, "gen_samples").toLongLong(&gen_ok);
+    bool pub_frames_ok = false;
+    const qint64 published_frames = TokenValue(message, "pub_frames").toLongLong(&pub_frames_ok);
+    bool pub_samples_ok = false;
+    const qint64 published_samples = TokenValue(message, "pub_samples").toLongLong(&pub_samples_ok);
+    bool pending_ok = false;
+    const qint64 pending_samples = TokenValue(message, "pending_samples").toLongLong(&pending_ok);
+    bool clears_ok = false;
+    const qint64 clears = TokenValue(message, "clears").toLongLong(&clears_ok);
+    bool flush_frames_ok = false;
+    const qint64 flush_frames = TokenValue(message, "flush_frames").toLongLong(&flush_frames_ok);
+    bool flush_samples_ok = false;
+    const qint64 flush_samples = TokenValue(message, "flush_samples").toLongLong(&flush_samples_ok);
+
+    AppendLog(QString("[%1] RX%2 AUDIO_STATS ch=%3 idx=%4 mod=%5 sr=%6 gate=%7 sq=%8 sig=%9 dB "
+                      "blk=%10 open_blk=%11 demod_ok=%12 demod_empty=%13 gen=%14 pub_f=%15 pub_s=%16 "
+                      "pend=%17 clr=%18 flush_f=%19 flush_s=%20")
+                  .arg(ToLocalTime(unix_ms))
+                  .arg(receiver_id)
+                  .arg(channel_label)
+                  .arg(idx_ok ? channel_index : -1)
+                  .arg(modulation.isEmpty() ? "?" : modulation)
+                  .arg(sr_ok ? sample_rate_hz : -1)
+                  .arg(gate_ok ? gate : -1)
+                  .arg(squelch_ok ? squelch : -1)
+                  .arg(signal_ok ? QString::number(signal_db, 'f', 1) : "?")
+                  .arg(blocks_ok ? blocks : -1)
+                  .arg(open_blocks_ok ? open_blocks : -1)
+                  .arg(demod_ok_blocks_ok ? demod_ok_blocks : -1)
+                  .arg(demod_empty_ok ? demod_empty_blocks : -1)
+                  .arg(gen_ok ? generated_samples : -1)
+                  .arg(pub_frames_ok ? published_frames : -1)
+                  .arg(pub_samples_ok ? published_samples : -1)
+                  .arg(pending_ok ? pending_samples : -1)
+                  .arg(clears_ok ? clears : -1)
+                  .arg(flush_frames_ok ? flush_frames : -1)
+                  .arg(flush_samples_ok ? flush_samples : -1));
+    return;
+  }
 
   double peak_hz = 0.0;
   double peak_strength = 0.0;

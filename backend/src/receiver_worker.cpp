@@ -38,6 +38,7 @@ constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioSampleRateHz = 48000;
+constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
 constexpr uint32_t kSquelchCloseDebounceMs = 500;
@@ -108,6 +109,18 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
   (void)modulation;
   return kAudioSampleRateHz;
+}
+
+const char* ModulationToken(Modulation modulation) {
+  switch (modulation) {
+    case Modulation::kAm:
+      return "AM";
+    case Modulation::kWfm:
+      return "WFM";
+    case Modulation::kNfm:
+    default:
+      return "NFM";
+  }
 }
 
 size_t AudioFrameSamplesForRate(uint32_t audio_sample_rate_hz) {
@@ -1079,6 +1092,17 @@ void ReceiverWorker::RunLoop() {
     double last_signal_db = -120.0;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
+    auto next_audio_stats_emit = tune_started_at + std::chrono::milliseconds(kAudioStatsIntervalMs);
+    uint64_t audio_stats_iq_blocks = 0;
+    uint64_t audio_stats_gate_open_blocks = 0;
+    uint64_t audio_stats_demod_ok_blocks = 0;
+    uint64_t audio_stats_demod_empty_blocks = 0;
+    uint64_t audio_stats_generated_samples = 0;
+    uint64_t audio_stats_published_frames = 0;
+    uint64_t audio_stats_published_samples = 0;
+    uint64_t audio_stats_buffer_clears = 0;
+    uint64_t audio_stats_flush_frames = 0;
+    uint64_t audio_stats_flush_samples = 0;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
@@ -1216,6 +1240,12 @@ void ReceiverWorker::RunLoop() {
         }
       }
       const bool audio_gate_open = has_scan_squelch && (squelch_open || audio_gate_open_until_channel_hop);
+      if (has_scan_squelch) {
+        ++audio_stats_iq_blocks;
+        if (audio_gate_open) {
+          ++audio_stats_gate_open_blocks;
+        }
+      }
 
       double demod_peak_hz = 0.0;
       double demod_peak_strength = 0.0;
@@ -1284,7 +1314,11 @@ void ReceiverWorker::RunLoop() {
           continue;
         }
         if (BuildAudioPcm16(iq, scan_modulation, audio_sample_rate_hz, &audio_demod_state, &block_pcm)) {
+          ++audio_stats_demod_ok_blocks;
+          audio_stats_generated_samples += static_cast<uint64_t>(block_pcm.size());
           audio_pcm_buffer.insert(audio_pcm_buffer.end(), block_pcm.begin(), block_pcm.end());
+        } else {
+          ++audio_stats_demod_empty_blocks;
         }
         while (audio_pcm_buffer.size() >= audio_frame_samples) {
           const auto frame_end = audio_pcm_buffer.begin() +
@@ -1296,13 +1330,51 @@ void ReceiverWorker::RunLoop() {
           frame.tuned_frequency_hz = tuned_frequency_hz;
           frame.pcm_s16le.assign(audio_pcm_buffer.begin(), frame_end);
           if (!frame.pcm_s16le.empty()) {
+            ++audio_stats_published_frames;
+            audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
             event_bus_->PublishAudioFrame(frame);
           }
           audio_pcm_buffer.erase(audio_pcm_buffer.begin(), frame_end);
         }
       } else if (has_scan_squelch) {
+        ++audio_stats_buffer_clears;
         audio_pcm_buffer.clear();
         audio_demod_state = AudioDemodState{};
+      }
+
+      if (has_scan_squelch && now >= next_audio_stats_emit) {
+        const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
+        std::ostringstream audio_status;
+        audio_status << "AUDIO_STATS idx=" << scan_list_channel_index
+                     << " label=" << scan_list_channel_label_token
+                     << " mod=" << ModulationToken(scan_modulation)
+                     << " sr=" << audio_sample_rate_hz
+                     << " gate=" << (audio_gate_open ? "1" : "0")
+                     << " squelch=" << (squelch_open ? "1" : "0")
+                     << " signal_db=" << FormatDouble(signal_db, 1)
+                     << " blocks=" << audio_stats_iq_blocks
+                     << " gate_open_blocks=" << audio_stats_gate_open_blocks
+                     << " demod_ok=" << audio_stats_demod_ok_blocks
+                     << " demod_empty=" << audio_stats_demod_empty_blocks
+                     << " gen_samples=" << audio_stats_generated_samples
+                     << " pub_frames=" << audio_stats_published_frames
+                     << " pub_samples=" << audio_stats_published_samples
+                     << " pending_samples=" << audio_pcm_buffer.size()
+                     << " clears=" << audio_stats_buffer_clears
+                     << " flush_frames=" << audio_stats_flush_frames
+                     << " flush_samples=" << audio_stats_flush_samples;
+        PublishEvent(EventKind::kInfo, audio_status.str(), tuned_frequency_hz, false);
+        audio_stats_iq_blocks = 0;
+        audio_stats_gate_open_blocks = 0;
+        audio_stats_demod_ok_blocks = 0;
+        audio_stats_demod_empty_blocks = 0;
+        audio_stats_generated_samples = 0;
+        audio_stats_published_frames = 0;
+        audio_stats_published_samples = 0;
+        audio_stats_buffer_clears = 0;
+        audio_stats_flush_frames = 0;
+        audio_stats_flush_samples = 0;
+        next_audio_stats_emit = now + std::chrono::milliseconds(kAudioStatsIntervalMs);
       }
     }
     if (has_scan_squelch && !audio_pcm_buffer.empty()) {
@@ -1312,6 +1384,10 @@ void ReceiverWorker::RunLoop() {
       frame.sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
       frame.tuned_frequency_hz = tuned_frequency_hz;
       frame.pcm_s16le = audio_pcm_buffer;
+      ++audio_stats_flush_frames;
+      audio_stats_flush_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
+      ++audio_stats_published_frames;
+      audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
       event_bus_->PublishAudioFrame(frame);
     }
     if (has_scan_squelch) {
