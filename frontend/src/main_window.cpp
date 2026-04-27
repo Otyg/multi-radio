@@ -12,6 +12,7 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSplitter>
@@ -21,6 +22,27 @@
 namespace multi_radio {
 
 namespace {
+
+constexpr int kFixedModeTabIndex = 0;
+constexpr int kScanRangeModeTabIndex = 1;
+constexpr int kScanListModeTabIndex = 2;
+constexpr int kAirMarineModeTabIndex = 3;
+constexpr int kGlobalSettingsTabIndex = 4;
+
+v1::RadioMode ModeFromTabIndex(int tab_index) {
+  switch (tab_index) {
+    case kFixedModeTabIndex:
+      return v1::RADIO_MODE_FIXED;
+    case kScanRangeModeTabIndex:
+      return v1::RADIO_MODE_SCAN_RANGE;
+    case kScanListModeTabIndex:
+      return v1::RADIO_MODE_SCAN_LIST;
+    case kAirMarineModeTabIndex:
+      return v1::RADIO_MODE_AIR_MARINE_PLOT;
+    default:
+      return v1::RADIO_MODE_FIXED;
+  }
+}
 
 QString ToLocalTime(quint64 unix_ms) {
   return QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(unix_ms)).toLocalTime().toString("HH:mm:ss");
@@ -545,11 +567,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* control_layout = new QFormLayout(control_group);
 
   receiver_combo_ = new QComboBox(control_group);
-  mode_combo_ = new QComboBox(control_group);
-  mode_combo_->addItem("FIXED", QVariant::fromValue<int>(v1::RADIO_MODE_FIXED));
-  mode_combo_->addItem("SCAN_RANGE", QVariant::fromValue<int>(v1::RADIO_MODE_SCAN_RANGE));
-  mode_combo_->addItem("SCAN_LIST", QVariant::fromValue<int>(v1::RADIO_MODE_SCAN_LIST));
-  mode_combo_->addItem("AIR_MARINE_PLOT", QVariant::fromValue<int>(v1::RADIO_MODE_AIR_MARINE_PLOT));
 
   fixed_frequency_edit_ = new QLineEdit("162025000", control_group);
   range_start_edit_ = new QLineEdit("156000000", control_group);
@@ -602,6 +619,66 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   lo_offset_spin_->setSuffix(" Hz");
   lo_offset_spin_->setEnabled(false);
 
+  mode_tabs_ = new QTabWidget(control_group);
+  mode_tabs_->setUsesScrollButtons(false);
+
+  auto* fixed_tab = new QWidget(mode_tabs_);
+  auto* fixed_layout = new QFormLayout(fixed_tab);
+  fixed_layout->addRow("Fixed Hz", fixed_frequency_edit_);
+  mode_tabs_->addTab(fixed_tab, "FIXED");
+
+  auto* range_tab = new QWidget(mode_tabs_);
+  auto* range_layout = new QFormLayout(range_tab);
+  range_layout->addRow("Range Start Hz", range_start_edit_);
+  range_layout->addRow("Range End Hz", range_end_edit_);
+  range_layout->addRow("Range Step Hz", range_step_edit_);
+  mode_tabs_->addTab(range_tab, "SCAN_RANGE");
+
+  auto* list_tab = new QWidget(mode_tabs_);
+  auto* list_layout = new QFormLayout(list_tab);
+  list_layout->addRow("List Hz (comma)", list_frequencies_edit_);
+  mode_tabs_->addTab(list_tab, "SCAN_LIST");
+
+  auto* air_marine_tab = new QWidget(mode_tabs_);
+  auto* air_marine_layout = new QFormLayout(air_marine_tab);
+  signal_filter_combo_ = new QComboBox(air_marine_tab);
+  signal_filter_combo_->addItem("ALL");
+  signal_filter_combo_->addItem("SIGNAL_TYPE_AIS");
+  signal_filter_combo_->addItem("SIGNAL_TYPE_ADSB");
+  signal_filter_combo_->addItem("SIGNAL_TYPE_DSC");
+  receiver_filter_combo_ = new QComboBox(air_marine_tab);
+  receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
+  minutes_filter_spin_ = new QSpinBox(air_marine_tab);
+  minutes_filter_spin_->setRange(1, 240);
+  minutes_filter_spin_->setValue(30);
+  air_marine_layout->addRow(new QLabel("Uses built-in AIS + DSC channels.", air_marine_tab));
+  air_marine_layout->addRow(new QLabel("AIS: 162000000 Hz, DSC Ch 70: 156525000 Hz", air_marine_tab));
+  air_marine_layout->addRow("Signal", signal_filter_combo_);
+  air_marine_layout->addRow("Receiver", receiver_filter_combo_);
+  air_marine_layout->addRow("Last minutes", minutes_filter_spin_);
+  mode_tabs_->addTab(air_marine_tab, "AIR_MARINE_PLOT");
+
+  auto* global_tab = new QWidget(mode_tabs_);
+  auto* global_layout = new QFormLayout(global_tab);
+  global_layout->addRow("Dwell ms", dwell_ms_spin_);
+  global_layout->addRow("Sample rate", sample_rate_spin_);
+  global_layout->addRow("Channel bandwidth", channel_bandwidth_spin_);
+  global_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
+  global_layout->addRow("DC blocker", dc_blocker_checkbox_);
+  global_layout->addRow("DC cutoff", dc_blocker_cutoff_spin_);
+  global_layout->addRow("Center notch", center_notch_checkbox_);
+  global_layout->addRow("Notch width", center_notch_width_spin_);
+  global_layout->addRow("LO offset", lo_offset_checkbox_);
+  global_layout->addRow("LO offset Hz", lo_offset_spin_);
+  spectrum_source_combo_ = new QComboBox(global_tab);
+  spectrum_source_combo_->addItem("Demodulated", QVariant::fromValue(0));
+  spectrum_source_combo_->addItem("Receiver spectrum", QVariant::fromValue(1));
+  auto* visualization_settings_button = new QPushButton("Visualization settings...", global_tab);
+  global_layout->addRow("Spectrum view", spectrum_source_combo_);
+  global_layout->addRow(visualization_settings_button);
+  mode_tabs_->addTab(global_tab, "GLOBAL");
+  mode_tabs_->setCurrentIndex(kFixedModeTabIndex);
+
   auto* button_row = new QWidget(control_group);
   auto* button_layout = new QHBoxLayout(button_row);
   button_layout->setContentsMargins(0, 0, 0, 0);
@@ -615,51 +692,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   button_layout->addWidget(apply_button);
 
   control_layout->addRow("Receiver", receiver_combo_);
-  control_layout->addRow("Mode", mode_combo_);
-  control_layout->addRow("Fixed Hz", fixed_frequency_edit_);
-  control_layout->addRow("Range Start Hz", range_start_edit_);
-  control_layout->addRow("Range End Hz", range_end_edit_);
-  control_layout->addRow("Range Step Hz", range_step_edit_);
-  control_layout->addRow("List Hz (comma)", list_frequencies_edit_);
-  control_layout->addRow("Dwell ms", dwell_ms_spin_);
-  control_layout->addRow("Sample rate", sample_rate_spin_);
-  control_layout->addRow("Channel bandwidth", channel_bandwidth_spin_);
-  control_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
-  control_layout->addRow("DC blocker", dc_blocker_checkbox_);
-  control_layout->addRow("DC cutoff", dc_blocker_cutoff_spin_);
-  control_layout->addRow("Center notch", center_notch_checkbox_);
-  control_layout->addRow("Notch width", center_notch_width_spin_);
-  control_layout->addRow("LO offset", lo_offset_checkbox_);
-  control_layout->addRow("LO offset Hz", lo_offset_spin_);
+  control_layout->addRow("Mode settings", mode_tabs_);
   control_layout->addRow(button_row);
 
-  auto* filter_group = new QGroupBox("Message Filters", central);
-  auto* filter_layout = new QFormLayout(filter_group);
-  signal_filter_combo_ = new QComboBox(filter_group);
-  signal_filter_combo_->addItem("ALL");
-  signal_filter_combo_->addItem("SIGNAL_TYPE_AIS");
-  signal_filter_combo_->addItem("SIGNAL_TYPE_ADSB");
-  signal_filter_combo_->addItem("SIGNAL_TYPE_DSC");
-  spectrum_source_combo_ = new QComboBox(filter_group);
-  spectrum_source_combo_->addItem("Demodulated", QVariant::fromValue(0));
-  spectrum_source_combo_->addItem("Receiver spectrum", QVariant::fromValue(1));
-
-  receiver_filter_combo_ = new QComboBox(filter_group);
-  receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
-
-  minutes_filter_spin_ = new QSpinBox(filter_group);
-  minutes_filter_spin_->setRange(1, 240);
-  minutes_filter_spin_->setValue(30);
-  auto* visualization_settings_button = new QPushButton("Visualization settings...", filter_group);
-
-  filter_layout->addRow("Signal", signal_filter_combo_);
-  filter_layout->addRow("Spectrum view", spectrum_source_combo_);
-  filter_layout->addRow("Receiver", receiver_filter_combo_);
-  filter_layout->addRow("Last minutes", minutes_filter_spin_);
-  filter_layout->addRow(visualization_settings_button);
-
-  top_layout->addWidget(control_group, 2);
-  top_layout->addWidget(filter_group, 1);
+  top_layout->addWidget(control_group, 1);
 
   signal_visualization_ = new SignalVisualizationWidget(central);
 
@@ -716,6 +752,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     decoded_table_->setRowCount(0);
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
+    }
+  });
+  connect(mode_tabs_, &QTabWidget::currentChanged, this, [this](int index) {
+    if (index >= kFixedModeTabIndex && index <= kAirMarineModeTabIndex) {
+      last_mode_tab_index_ = index;
     }
   });
   connect(dc_blocker_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
@@ -805,7 +846,11 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  const v1::RadioMode mode = static_cast<v1::RadioMode>(mode_combo_->currentData().toInt());
+  int mode_tab_index = mode_tabs_->currentIndex();
+  if (mode_tab_index == kGlobalSettingsTabIndex) {
+    mode_tab_index = last_mode_tab_index_;
+  }
+  const v1::RadioMode mode = ModeFromTabIndex(mode_tab_index);
 
   std::string error;
   if (!client_->SetMode(receiver_id, mode, &error)) {

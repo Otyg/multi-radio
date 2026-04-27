@@ -13,6 +13,7 @@
 #include <QMap>
 #include <QPlainTextEdit>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTableWidget>
 
 #include "grpc_client.hpp"
@@ -65,7 +66,8 @@ class MainWindow : public QMainWindow {
   std::vector<MessageRow> all_rows_;
 
   QComboBox* receiver_combo_ = nullptr;
-  QComboBox* mode_combo_ = nullptr;
+  QTabWidget* mode_tabs_ = nullptr;
+  int last_mode_tab_index_ = 0;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;
