@@ -89,6 +89,10 @@ Then start the client:
 Optional overrides:
 - Custom config path with env: `MR_CLIENT_CONFIG=/path/to/client.ini ./build/frontend/multi_radio_client`
 - Custom config path with argument: `./build/frontend/multi_radio_client --config /path/to/client.ini`
+- On WSL, client auto-falls back to `QT_QPA_PLATFORM=xcb` to avoid known WSLg Wayland pointer/protocol issues.
+  You can still force Wayland explicitly with: `QT_QPA_PLATFORM=wayland ./build/frontend/multi_radio_client`
+- On WSL, client also auto-disables audio output by default to avoid Qt/GStreamer backend issues.
+  Re-enable explicitly with: `MR_ENABLE_AUDIO_OUTPUT=1 ./build/frontend/multi_radio_client`
 - Legacy env fallback still works:
 
 ```bash
@@ -115,6 +119,12 @@ Supported modulation values in import: `AM`, `NFM`, `FM`, `WFM`.
 
 `SCAN_LIST` also supports `Monitor mode` in the client. In this mode, each channel is treated as
 open for monitoring/audio while frequency hopping continues strictly on dwell timing (no squelch-hold on a channel).
+
+`SCAN_LIST` has a `Default squelch` control used for new channels and CSV imports.
+Each channel can either use that default or set its own squelch threshold in channel settings.
+Channels without an explicit squelch value use the default automatically.
+The active scan squelch threshold is shown as a dashed marker with value in the spectrum panel,
+and the marker follows live updates in the `Default squelch` field when default squelch is active.
 
 If the client crashes on startup around audio backend initialization, temporarily disable audio output:
 

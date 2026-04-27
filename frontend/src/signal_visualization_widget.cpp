@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include <QColor>
+#include <QFontMetrics>
 #include <QLinearGradient>
 #include <QPaintEvent>
 #include <QPainter>
@@ -148,6 +149,17 @@ void SignalVisualizationWidget::SetSpectrumSource(SpectrumSource source) {
   update();
 }
 
+void SignalVisualizationWidget::SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db) {
+  ReceiverState& state = states_[receiver_id];
+  const double clamped_db = std::clamp(threshold_db, -120.0, 0.0);
+  if (state.has_squelch_threshold_db && std::abs(state.squelch_threshold_db - clamped_db) < 0.05) {
+    return;
+  }
+  state.squelch_threshold_db = clamped_db;
+  state.has_squelch_threshold_db = true;
+  update();
+}
+
 void SignalVisualizationWidget::SetAutoNoiseReductionEnabled(bool enabled) {
   if (auto_noise_reduction_enabled_ == enabled) {
     return;
@@ -252,7 +264,8 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
   DrawWaveform(&painter, waveform_plot_rect, display.waveform);
   DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
-                    display.frequency_start_hz, display.frequency_end_hz, false);
+                    display.frequency_start_hz, display.frequency_end_hz, false,
+                    display.has_squelch_threshold_db, display.squelch_threshold_db);
   DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true,
               auto_noise_reduction_enabled_);
 }
@@ -459,7 +472,9 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
 
 void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect& area,
                                                   const QVector<double>& spectrum, double frequency_start_hz,
-                                                  double frequency_end_hz, bool suppress_below_mean) {
+                                                  double frequency_end_hz, bool suppress_below_mean,
+                                                  bool has_squelch_threshold_db,
+                                                  double squelch_threshold_db) {
   if (painter == nullptr || spectrum.isEmpty()) {
     return;
   }
@@ -507,6 +522,24 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   painter->setPen(QColor(178, 192, 214));
   painter->drawText(area.left() + 2, plot.top() - 2, "dB");
   painter->drawText(plot.right() - 64, area.bottom() - 4, "Freq (Hz)");
+
+  if (has_squelch_threshold_db) {
+    const double clamped_db = std::clamp(squelch_threshold_db, kMinDb, kMaxDb);
+    const int y = db_to_y(clamped_db);
+    painter->setPen(QPen(QColor(96, 216, 255), 1, Qt::DashLine));
+    painter->drawLine(plot.left(), y, plot.right(), y);
+
+    const QString label = QString("Squelch %1 dB").arg(clamped_db, 0, 'f', 1);
+    const QFontMetrics metrics(painter->font());
+    const int label_width = metrics.horizontalAdvance(label) + 10;
+    const int label_height = metrics.height() + 2;
+    const int x = std::max(plot.left() + 2, plot.right() - label_width - 2);
+    const int y_top = std::clamp(y - label_height - 2, plot.top() + 2, plot.bottom() - label_height - 2);
+    const QRect label_rect(x, y_top, label_width, label_height);
+    painter->fillRect(label_rect, QColor(9, 22, 34, 215));
+    painter->setPen(QColor(140, 232, 255));
+    painter->drawText(label_rect.adjusted(5, 0, -5, 0), Qt::AlignLeft | Qt::AlignVCenter, label);
+  }
 
   double mean_amplitude = 0.0;
   if (suppress_below_mean && !spectrum.isEmpty()) {
@@ -601,6 +634,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   display.signal_peak_hold = 0.0;
   display.frequency_start_hz = frequency_start_hz_;
   display.frequency_end_hz = frequency_end_hz_;
+  display.has_squelch_threshold_db = false;
+  display.squelch_threshold_db = -30.0;
 
   if (states_.isEmpty()) {
     PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
@@ -629,6 +664,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
         display.spectrogram_rows = selected.spectrogram_rows;
         display.waterfall_rows = selected.waterfall_rows;
       }
+      display.has_squelch_threshold_db = selected.has_squelch_threshold_db;
+      display.squelch_threshold_db = selected.squelch_threshold_db;
       if (display.spectrogram_rows.isEmpty()) {
         PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
       }
@@ -658,6 +695,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       display.spectrogram_rows = selected.spectrogram_rows;
       display.waterfall_rows = selected.waterfall_rows;
     }
+    display.has_squelch_threshold_db = selected.has_squelch_threshold_db;
+    display.squelch_threshold_db = selected.squelch_threshold_db;
     if (display.spectrogram_rows.isEmpty()) {
       PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
     }
@@ -674,6 +713,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   double frequency_end_sum = 0.0;
   double signal_level_sum = 0.0;
   double signal_peak_sum = 0.0;
+  double squelch_threshold_sum = 0.0;
+  int squelch_threshold_count = 0;
   for (const ReceiverState& state : state_values) {
     const QVector<double>& selected_spectrum =
         (spectrum_source_ == SpectrumSource::kReceiverInput) ? state.receiver_spectrum : state.spectrum;
@@ -689,6 +730,10 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     }
     signal_level_sum += state.signal_level;
     signal_peak_sum += state.signal_peak_hold;
+    if (state.has_squelch_threshold_db) {
+      squelch_threshold_sum += state.squelch_threshold_db;
+      ++squelch_threshold_count;
+    }
     if (spectrum_source_ == SpectrumSource::kReceiverInput && state.receiver_frequency_range_valid) {
       ++ranged_states;
       frequency_start_sum += state.receiver_frequency_start_hz;
@@ -711,6 +756,10 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     const double inv = 1.0 / static_cast<double>(ranged_states);
     display.frequency_start_hz = frequency_start_sum * inv;
     display.frequency_end_hz = frequency_end_sum * inv;
+  }
+  if (squelch_threshold_count > 0) {
+    display.has_squelch_threshold_db = true;
+    display.squelch_threshold_db = squelch_threshold_sum / static_cast<double>(squelch_threshold_count);
   }
 
   PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);

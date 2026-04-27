@@ -29,6 +29,7 @@ class SignalVisualizationWidget : public QWidget {
   void SetReceiverFilter(int receiver_filter_id);
   void SetVisualizationSettings(int fft_size, double frequency_start_hz, double frequency_end_hz);
   void SetSpectrumSource(SpectrumSource source);
+  void SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db);
   void SetAutoNoiseReductionEnabled(bool enabled);
   bool AutoNoiseReductionEnabled() const;
   SpectrumSource CurrentSpectrumSource() const;
@@ -57,6 +58,8 @@ class SignalVisualizationWidget : public QWidget {
     double signal_peak_hold = 0.0;
     double frequency_start_hz = 0.0;
     double frequency_end_hz = 20000.0;
+    bool has_squelch_threshold_db = false;
+    double squelch_threshold_db = -30.0;
   };
   struct ReceiverState {
     QVector<double> waveform;
@@ -72,6 +75,8 @@ class SignalVisualizationWidget : public QWidget {
     double receiver_frequency_start_hz = 0.0;
     double receiver_frequency_end_hz = 20000.0;
     bool receiver_frequency_range_valid = false;
+    bool has_squelch_threshold_db = false;
+    double squelch_threshold_db = -30.0;
   };
 
   void EnsureState(ReceiverState* state) const;
@@ -86,7 +91,8 @@ class SignalVisualizationWidget : public QWidget {
   static void DrawLevelMeter(QPainter* painter, const QRect& area, double level, double peak_hold);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
                                 double frequency_start_hz, double frequency_end_hz,
-                                bool suppress_below_mean);
+                                bool suppress_below_mean, bool has_squelch_threshold_db,
+                                double squelch_threshold_db);
   static void DrawHeatmap(QPainter* painter, const QRect& area, const QVector<QVector<double>>& rows,
                           bool newest_at_top, bool rainbow_colors, bool suppress_below_mean);
 

@@ -96,6 +96,7 @@ class MainWindow : public QMainWindow {
     int bandwidth_hz = 0;
     double squelch_threshold_db = -30.0;
     int dwell_ms = 0;
+    bool use_default_squelch = true;
   };
 
   enum class ScanListChannelState {
@@ -112,6 +113,7 @@ class MainWindow : public QMainWindow {
   int last_tab_index_ = -1;
   int last_mode_tab_index_ = 0;
   QCheckBox* scan_list_monitor_checkbox_ = nullptr;
+  QDoubleSpinBox* scan_list_default_squelch_spin_ = nullptr;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;

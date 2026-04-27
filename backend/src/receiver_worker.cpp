@@ -119,13 +119,18 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
         std::max<int32_t>(1000, static_cast<int32_t>(static_cast<double>(out.sample_rate_hz) * 0.45));
     out.lo_offset_hz = std::clamp(out.lo_offset_hz, -max_offset, max_offset);
   }
+  out.scan_list_default_squelch_db = std::clamp(out.scan_list_default_squelch_db, -120.0, 0.0);
   for (auto& channel : out.scan_list_channels) {
     if (channel.channel_bandwidth_hz == 0) {
       channel.channel_bandwidth_hz = DefaultBandwidthForModulation(channel.modulation);
     }
     channel.channel_bandwidth_hz =
         std::clamp(channel.channel_bandwidth_hz, kMinChannelBandwidthHz, kMaxChannelBandwidthHz);
-    channel.squelch_threshold_db = std::clamp(channel.squelch_threshold_db, -120.0, 0.0);
+    if (channel.use_default_squelch) {
+      channel.squelch_threshold_db = out.scan_list_default_squelch_db;
+    } else {
+      channel.squelch_threshold_db = std::clamp(channel.squelch_threshold_db, -120.0, 0.0);
+    }
     if (channel.dwell_ms > 0) {
       channel.dwell_ms = std::clamp<uint32_t>(channel.dwell_ms, 50, 60000);
     }

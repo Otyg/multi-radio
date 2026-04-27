@@ -3,6 +3,7 @@
 #include <string>
 
 #include <QApplication>
+#include <QByteArray>
 #include <QSettings>
 
 #include "main_window.hpp"
@@ -36,9 +37,19 @@ std::string ReadSettingOrFallback(const QSettings& settings, const QString& key,
   return fallback;
 }
 
+bool IsWslEnvironment() {
+  return std::getenv("WSL_DISTRO_NAME") != nullptr || std::getenv("WSL_INTEROP") != nullptr;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  // WSLg Wayland occasionally reports broken pointer/window state. Prefer X11 backend
+  // by default on WSL unless the user has explicitly chosen a Qt platform plugin.
+  if (IsWslEnvironment() && std::getenv("QT_QPA_PLATFORM") == nullptr) {
+    qputenv("QT_QPA_PLATFORM", QByteArray("xcb"));
+  }
+
   QApplication app(argc, argv);
 
   const std::string config_path =

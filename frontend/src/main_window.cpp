@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <optional>
 #include <sstream>
@@ -25,6 +26,7 @@
 #include <QIODevice>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSettings>
 #include <QSplitter>
 #include <QTextStream>
@@ -32,8 +34,10 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #if MR_HAS_QT_MULTIMEDIA
+#include <QAudioDevice>
 #include <QAudioFormat>
 #include <QAudioSink>
+#include <QMediaDevices>
 #endif
 
 namespace multi_radio {
@@ -45,6 +49,7 @@ constexpr int kScanRangeModeTabIndex = 1;
 constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
+constexpr double kDefaultScanListSquelchDb = -30.0;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
@@ -237,6 +242,10 @@ bool EnvFlagEnabled(const char* key) {
   }
   const QString normalized = QString::fromUtf8(value).trimmed().toLower();
   return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+bool IsWslEnvironment() {
+  return std::getenv("WSL_DISTRO_NAME") != nullptr || std::getenv("WSL_INTEROP") != nullptr;
 }
 
 struct ParsedAisNmeaSentence {
@@ -738,6 +747,18 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
                                               list_tab);
   scan_list_monitor_checkbox_->setChecked(false);
   list_layout->addWidget(scan_list_monitor_checkbox_);
+  auto* default_squelch_row = new QHBoxLayout();
+  auto* default_squelch_label = new QLabel("Default squelch", list_tab);
+  scan_list_default_squelch_spin_ = new QDoubleSpinBox(list_tab);
+  scan_list_default_squelch_spin_->setDecimals(1);
+  scan_list_default_squelch_spin_->setRange(-120.0, 0.0);
+  scan_list_default_squelch_spin_->setSingleStep(1.0);
+  scan_list_default_squelch_spin_->setSuffix(" dB");
+  scan_list_default_squelch_spin_->setValue(kDefaultScanListSquelchDb);
+  default_squelch_row->addWidget(default_squelch_label);
+  default_squelch_row->addWidget(scan_list_default_squelch_spin_);
+  default_squelch_row->addStretch(1);
+  list_layout->addLayout(default_squelch_row);
 
   auto* list_actions = new QHBoxLayout();
   auto* add_channel_button = new QPushButton("Add channel", list_tab);
@@ -763,6 +784,30 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(import_csv_button, &QPushButton::clicked, this, &MainWindow::ImportScanListCsv);
   connect(scan_list_monitor_checkbox_, &QCheckBox::toggled, this, [this](bool /*enabled*/) {
     SaveScanListConfigToSettings();
+    if (receiver_combo_->currentIndex() >= 0) {
+      ApplyModeAndConfig();
+    }
+  });
+  connect(scan_list_default_squelch_spin_,
+          static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged), this,
+          [this](double value) {
+            SaveScanListConfigToSettings();
+            RefreshScanListChannelCards();
+            if (receiver_combo_->currentIndex() >= 0) {
+              const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+              bool use_default_for_visual = true;
+              if (active_scan_list_channel_index_ >= 0 &&
+                  static_cast<size_t>(active_scan_list_channel_index_) < scan_list_channels_.size()) {
+                use_default_for_visual =
+                    scan_list_channels_[static_cast<size_t>(active_scan_list_channel_index_)]
+                        .use_default_squelch;
+              }
+              if (use_default_for_visual) {
+                signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id, value);
+              }
+            }
+          });
+  connect(scan_list_default_squelch_spin_, &QDoubleSpinBox::editingFinished, this, [this]() {
     if (receiver_combo_->currentIndex() >= 0) {
       ApplyModeAndConfig();
     }
@@ -863,6 +908,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   audio_output_disabled_ = EnvFlagEnabled("MR_DISABLE_AUDIO_OUTPUT");
   if (audio_output_disabled_) {
     AppendLog("Audio output disabled by MR_DISABLE_AUDIO_OUTPUT");
+  } else if (IsWslEnvironment() && !EnvFlagEnabled("MR_ENABLE_AUDIO_OUTPUT")) {
+    audio_output_disabled_ = true;
+    AppendLog("Audio output auto-disabled on WSL (set MR_ENABLE_AUDIO_OUTPUT=1 to override)");
   }
 
   connect(refresh_button, &QPushButton::clicked, this, &MainWindow::RefreshReceivers);
@@ -908,6 +956,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(receiver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
     active_scan_list_channel_index_ = -1;
     active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+    if (receiver_combo_->currentIndex() >= 0 && scan_list_default_squelch_spin_ != nullptr) {
+      const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+      signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id,
+                                                           scan_list_default_squelch_spin_->value());
+    }
     RefreshScanListChannelCards();
   });
   connect(mode_tabs_, &QTabWidget::currentChanged, this, [this](int index) {
@@ -1006,6 +1059,12 @@ void MainWindow::RefreshReceivers() {
       if (receiver.receiver_id() != selected_id) {
         continue;
       }
+      const double receiver_default_squelch_db =
+          std::clamp(receiver.mode_config().scan_list_default_squelch_db(), -120.0, 0.0);
+      if (scan_list_default_squelch_spin_ != nullptr) {
+        const QSignalBlocker blocker(scan_list_default_squelch_spin_);
+        scan_list_default_squelch_spin_->setValue(receiver_default_squelch_db);
+      }
       const auto& channels = receiver.mode_config().scan_list_channels();
       if (!channels.empty()) {
         std::vector<ScanListChannelConfig> updated_channels;
@@ -1017,13 +1076,21 @@ void MainWindow::RefreshReceivers() {
           updated.frequency_mhz = channel.frequency_hz() > 0.0 ? channel.frequency_hz() / 1000000.0 : 0.0;
           updated.modulation = channel.modulation();
           updated.bandwidth_hz = static_cast<int>(channel.channel_bandwidth_hz());
+          updated.use_default_squelch = channel.use_default_squelch();
           updated.squelch_threshold_db = channel.squelch_threshold_db();
+          if (updated.use_default_squelch) {
+            updated.squelch_threshold_db = receiver_default_squelch_db;
+          }
           updated.dwell_ms = static_cast<int>(channel.dwell_ms());
           updated_channels.push_back(std::move(updated));
         }
         scan_list_channels_ = std::move(updated_channels);
       }
       scan_list_monitor_checkbox_->setChecked(receiver.mode_config().scan_list_monitor_mode());
+      if (scan_list_default_squelch_spin_ != nullptr) {
+        signal_visualization_->SetReceiverSquelchThresholdDb(selected_id,
+                                                             scan_list_default_squelch_spin_->value());
+      }
       break;
     }
   }
@@ -1100,6 +1167,10 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
   config.set_scan_list_monitor_mode(
       scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
+  const double default_squelch_db =
+      (scan_list_default_squelch_spin_ != nullptr) ? scan_list_default_squelch_spin_->value()
+                                                   : kDefaultScanListSquelchDb;
+  config.set_scan_list_default_squelch_db(default_squelch_db);
 
   config.clear_scan_list_channels();
   config.clear_frequency_list_hz();
@@ -1109,7 +1180,9 @@ void MainWindow::ApplyModeAndConfig() {
     out->set_frequency_hz(channel.frequency_mhz * 1000000.0);
     out->set_modulation(channel.modulation);
     out->set_channel_bandwidth_hz(static_cast<uint32_t>(std::max(0, channel.bandwidth_hz)));
-    out->set_squelch_threshold_db(channel.squelch_threshold_db);
+    out->set_use_default_squelch(channel.use_default_squelch);
+    out->set_squelch_threshold_db(channel.use_default_squelch ? default_squelch_db
+                                                               : channel.squelch_threshold_db);
     out->set_dwell_ms(static_cast<uint32_t>(std::max(0, channel.dwell_ms)));
     if (channel.frequency_mhz > 0.0) {
       config.add_frequency_list_hz(channel.frequency_mhz * 1000000.0);
@@ -1316,13 +1389,16 @@ QString MainWindow::ScanListChannelCardText(int index) const {
   const QString freq_text =
       configured ? QString("%1 MHz").arg(channel.frequency_mhz, 0, 'f', 3)
                  : QString("Frekvens ej satt");
+  const QString squelch_text =
+      channel.use_default_squelch ? "SQ: Default"
+                                  : QString("SQ: %1 dB").arg(channel.squelch_threshold_db, 0, 'f', 1);
   QString status_text = configured ? "Vilar" : "Okonfigurerad";
   if (active_scan_list_channel_index_ == index) {
     status_text = (active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen)
                       ? "Squelch oppen"
                       : "Squelch stangd";
   }
-  return QString("%1\n%2\n%3").arg(label).arg(freq_text).arg(status_text);
+  return QString("%1\n%2\n%3\n%4").arg(label).arg(freq_text).arg(squelch_text).arg(status_text);
 }
 
 QString MainWindow::ScanListChannelCardStyle(int index) const {
@@ -1451,6 +1527,12 @@ void MainWindow::ConfigureScanListChannel(int index) {
   squelch_spin->setSingleStep(1.0);
   squelch_spin->setSuffix(" dB");
   squelch_spin->setValue(channel.squelch_threshold_db);
+  auto* use_default_squelch_checkbox = new QCheckBox("Use default squelch", &dialog);
+  use_default_squelch_checkbox->setChecked(channel.use_default_squelch);
+  if (channel.use_default_squelch && scan_list_default_squelch_spin_ != nullptr) {
+    squelch_spin->setValue(scan_list_default_squelch_spin_->value());
+  }
+  squelch_spin->setEnabled(!channel.use_default_squelch);
 
   auto* dwell_spin = new QSpinBox(&dialog);
   dwell_spin->setRange(0, 60000);
@@ -1462,11 +1544,18 @@ void MainWindow::ConfigureScanListChannel(int index) {
   connect(modulation_combo, &QComboBox::currentTextChanged, this, [bandwidth_spin](const QString& text) {
     bandwidth_spin->setValue(DefaultBandwidthHzForModulation(ModulationFromText(text)));
   });
+  connect(use_default_squelch_checkbox, &QCheckBox::toggled, this, [this, squelch_spin](bool checked) {
+    squelch_spin->setEnabled(!checked);
+    if (checked && scan_list_default_squelch_spin_ != nullptr) {
+      squelch_spin->setValue(scan_list_default_squelch_spin_->value());
+    }
+  });
 
   layout->addRow("Label", label_edit);
   layout->addRow("Frekvens", frequency_spin);
   layout->addRow("Modulation", modulation_combo);
   layout->addRow("Bandbredd", bandwidth_spin);
+  layout->addRow(use_default_squelch_checkbox);
   layout->addRow("Squelch threshold", squelch_spin);
   layout->addRow("Kanal dwell", dwell_spin);
 
@@ -1490,7 +1579,12 @@ void MainWindow::ConfigureScanListChannel(int index) {
   channel.frequency_mhz = frequency_spin->value();
   channel.modulation = ModulationFromText(modulation_combo->currentText());
   channel.bandwidth_hz = bandwidth_spin->value();
-  channel.squelch_threshold_db = squelch_spin->value();
+  channel.use_default_squelch = use_default_squelch_checkbox->isChecked();
+  if (channel.use_default_squelch && scan_list_default_squelch_spin_ != nullptr) {
+    channel.squelch_threshold_db = scan_list_default_squelch_spin_->value();
+  } else {
+    channel.squelch_threshold_db = squelch_spin->value();
+  }
   channel.dwell_ms = dwell_spin->value();
   scan_list_channels_[static_cast<size_t>(index)] = channel;
   SaveScanListConfigToSettings();
@@ -1506,6 +1600,10 @@ void MainWindow::AddScanListChannel() {
   channel.label = QString("Kanal %1").arg(scan_list_channels_.size() + 1);
   channel.modulation = v1::MODULATION_NFM;
   channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
+  channel.use_default_squelch = true;
+  if (scan_list_default_squelch_spin_ != nullptr) {
+    channel.squelch_threshold_db = scan_list_default_squelch_spin_->value();
+  }
   scan_list_channels_.push_back(channel);
   SaveScanListConfigToSettings();
   RefreshScanListChannelCards();
@@ -1543,6 +1641,9 @@ void MainWindow::ImportScanListCsv() {
   }
 
   QTextStream stream(&file);
+  const double default_squelch_db =
+      (scan_list_default_squelch_spin_ != nullptr) ? scan_list_default_squelch_spin_->value()
+                                                   : kDefaultScanListSquelchDb;
   std::vector<ScanListChannelConfig> imported;
   QStringList errors;
   int line_number = 0;
@@ -1581,8 +1682,9 @@ void MainWindow::ImportScanListCsv() {
       channel.label = QString("CSV %1").arg(imported.size() + 1);
     }
     channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
-    channel.squelch_threshold_db = -30.0;
+    channel.squelch_threshold_db = default_squelch_db;
     channel.dwell_ms = 0;
+    channel.use_default_squelch = true;
     imported.push_back(std::move(channel));
   }
 
@@ -1626,6 +1728,11 @@ void MainWindow::ImportScanListCsv() {
 }
 
 void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message) {
+  bool threshold_ok = false;
+  const double threshold_db = TokenValue(message, "threshold_db").toDouble(&threshold_ok);
+  if (threshold_ok) {
+    signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id, threshold_db);
+  }
   if (!IsSelectedReceiver(receiver_id)) {
     return;
   }
@@ -1677,14 +1784,22 @@ void MainWindow::EnsureAudioOutputInitialized() {
   if (audio_output_disabled_ || audio_output_device_ != nullptr || audio_sink_ != nullptr) {
     return;
   }
+  const QAudioDevice default_output = QMediaDevices::defaultAudioOutput();
+  if (default_output.isNull()) {
+    audio_output_disabled_ = true;
+    AppendLog("Audio output unavailable (no default output device)");
+    return;
+  }
   QAudioFormat audio_format;
   audio_format.setSampleRate(16000);
   audio_format.setChannelCount(1);
   audio_format.setSampleFormat(QAudioFormat::Int16);
-  audio_sink_ = new QAudioSink(audio_format, this);
+  audio_sink_ = new QAudioSink(default_output, audio_format, this);
   audio_output_device_ = audio_sink_->start();
   if (audio_output_device_ == nullptr) {
     audio_output_disabled_ = true;
+    audio_sink_->deleteLater();
+    audio_sink_ = nullptr;
     AppendLog("Audio output unavailable");
   }
 #endif
@@ -1698,7 +1813,14 @@ void MainWindow::LoadScanListConfigFromSettings() {
   if (saved_default_dwell > 0) {
     dwell_ms_spin_->setValue(saved_default_dwell);
   }
+  const double default_squelch_db = std::clamp(
+      settings.value("default_squelch_db", kDefaultScanListSquelchDb).toDouble(), -120.0, 0.0);
+  if (scan_list_default_squelch_spin_ != nullptr) {
+    const QSignalBlocker blocker(scan_list_default_squelch_spin_);
+    scan_list_default_squelch_spin_->setValue(default_squelch_db);
+  }
   if (scan_list_monitor_checkbox_ != nullptr) {
+    const QSignalBlocker blocker(scan_list_monitor_checkbox_);
     scan_list_monitor_checkbox_->setChecked(settings.value("monitor_mode", false).toBool());
   }
 
@@ -1726,13 +1848,30 @@ void MainWindow::LoadScanListConfigFromSettings() {
   scan_list_channels_.reserve(static_cast<size_t>(channel_count));
   for (int index = 0; index < channel_count; ++index) {
     ScanListChannelConfig channel;
+    channel.squelch_threshold_db = default_squelch_db;
     settings.beginGroup(QString("channel_%1").arg(index));
     channel.label = settings.value("label", channel.label).toString();
     channel.frequency_mhz =
         settings.value("frequency_mhz", channel.frequency_mhz).toDouble();
     channel.bandwidth_hz = settings.value("bandwidth_hz", channel.bandwidth_hz).toInt();
-    channel.squelch_threshold_db =
-        settings.value("squelch_threshold_db", channel.squelch_threshold_db).toDouble();
+    const bool has_use_default_flag = settings.contains("use_default_squelch");
+    const bool has_saved_squelch = settings.contains("squelch_threshold_db");
+    if (has_use_default_flag) {
+      channel.use_default_squelch = settings.value("use_default_squelch").toBool();
+    } else if (!has_saved_squelch) {
+      channel.use_default_squelch = true;
+    } else {
+      const double saved_squelch =
+          settings.value("squelch_threshold_db", channel.squelch_threshold_db).toDouble();
+      channel.use_default_squelch = std::abs(saved_squelch - default_squelch_db) < 0.05;
+    }
+    if (has_saved_squelch) {
+      channel.squelch_threshold_db =
+          settings.value("squelch_threshold_db", channel.squelch_threshold_db).toDouble();
+    }
+    if (channel.use_default_squelch) {
+      channel.squelch_threshold_db = default_squelch_db;
+    }
     channel.dwell_ms = settings.value("dwell_ms", channel.dwell_ms).toInt();
 
     const int modulation = settings.value("modulation", static_cast<int>(channel.modulation)).toInt();
@@ -1759,6 +1898,9 @@ void MainWindow::SaveScanListConfigToSettings() const {
   settings.beginGroup("scan_list");
   settings.remove("");
   settings.setValue("default_dwell_ms", dwell_ms_spin_->value());
+  settings.setValue("default_squelch_db", scan_list_default_squelch_spin_ != nullptr
+                                             ? scan_list_default_squelch_spin_->value()
+                                             : kDefaultScanListSquelchDb);
   settings.setValue("monitor_mode",
                     scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
   settings.setValue("count", static_cast<int>(scan_list_channels_.size()));
@@ -1769,7 +1911,12 @@ void MainWindow::SaveScanListConfigToSettings() const {
     settings.setValue("frequency_mhz", channel.frequency_mhz);
     settings.setValue("modulation", static_cast<int>(channel.modulation));
     settings.setValue("bandwidth_hz", channel.bandwidth_hz);
-    settings.setValue("squelch_threshold_db", channel.squelch_threshold_db);
+    settings.setValue("use_default_squelch", channel.use_default_squelch);
+    if (channel.use_default_squelch) {
+      settings.remove("squelch_threshold_db");
+    } else {
+      settings.setValue("squelch_threshold_db", channel.squelch_threshold_db);
+    }
     settings.setValue("dwell_ms", channel.dwell_ms);
     settings.endGroup();
   }

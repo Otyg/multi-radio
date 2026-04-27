@@ -52,6 +52,7 @@ message ModeConfig {
   int32 lo_offset_hz = 17;
   repeated ScanListChannel scan_list_channels = 18;
   bool scan_list_monitor_mode = 19;
+  double scan_list_default_squelch_db = 20;
 }
 
 message ScanListChannel {
@@ -61,6 +62,7 @@ message ScanListChannel {
   uint32 channel_bandwidth_hz = 4;
   double squelch_threshold_db = 5;
   uint32 dwell_ms = 6;
+  bool use_default_squelch = 7;
 }
 
 message ReceiverInfo {
