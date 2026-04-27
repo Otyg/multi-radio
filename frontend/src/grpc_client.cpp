@@ -6,6 +6,19 @@
 
 namespace multi_radio {
 
+namespace {
+
+constexpr auto kUnaryRpcTimeout = std::chrono::seconds(2);
+
+void SetUnaryDeadline(grpc::ClientContext* context) {
+  if (context == nullptr) {
+    return;
+  }
+  context->set_deadline(std::chrono::system_clock::now() + kUnaryRpcTimeout);
+}
+
+}  // namespace
+
 GrpcClient::GrpcClient(std::string target, std::string token, QObject* parent)
     : QObject(parent), token_(std::move(token)) {
   auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
@@ -18,6 +31,7 @@ GrpcClient::~GrpcClient() { StopStreaming(); }
 bool GrpcClient::ListReceivers(std::vector<v1::ReceiverInfo>* receivers, std::string* error) {
   grpc::ClientContext context;
   AddAuth(&context);
+  SetUnaryDeadline(&context);
   v1::ListReceiversRequest request;
   v1::ListReceiversResponse response;
   grpc::Status status = control_client_->ListReceivers(&context, request, &response);
@@ -37,6 +51,7 @@ bool GrpcClient::ListReceivers(std::vector<v1::ReceiverInfo>* receivers, std::st
 bool GrpcClient::StartReceiver(uint32_t receiver_id, std::string* error) {
   grpc::ClientContext context;
   AddAuth(&context);
+  SetUnaryDeadline(&context);
 
   v1::StartReceiverRequest request;
   request.set_receiver_id(receiver_id);
@@ -60,6 +75,7 @@ bool GrpcClient::StartReceiver(uint32_t receiver_id, std::string* error) {
 bool GrpcClient::StopReceiver(uint32_t receiver_id, std::string* error) {
   grpc::ClientContext context;
   AddAuth(&context);
+  SetUnaryDeadline(&context);
 
   v1::StopReceiverRequest request;
   request.set_receiver_id(receiver_id);
@@ -83,6 +99,7 @@ bool GrpcClient::StopReceiver(uint32_t receiver_id, std::string* error) {
 bool GrpcClient::SetMode(uint32_t receiver_id, v1::RadioMode mode, std::string* error) {
   grpc::ClientContext context;
   AddAuth(&context);
+  SetUnaryDeadline(&context);
 
   v1::SetModeRequest request;
   request.set_receiver_id(receiver_id);
@@ -107,6 +124,7 @@ bool GrpcClient::SetMode(uint32_t receiver_id, v1::RadioMode mode, std::string* 
 bool GrpcClient::SetModeConfig(uint32_t receiver_id, const v1::ModeConfig& config, std::string* error) {
   grpc::ClientContext context;
   AddAuth(&context);
+  SetUnaryDeadline(&context);
 
   v1::SetModeConfigRequest request;
   request.set_receiver_id(receiver_id);

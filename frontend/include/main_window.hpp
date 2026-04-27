@@ -78,6 +78,7 @@ class MainWindow : public QMainWindow {
   QString ScanListChannelCardStyle(int index) const;
   bool IsSelectedReceiver(uint32_t receiver_id) const;
   void HandleAudioPcmEvent(const QString& message);
+  void EnsureAudioOutputInitialized();
   void LoadScanListConfigFromSettings();
   void SaveScanListConfigToSettings() const;
 
@@ -135,6 +136,7 @@ class MainWindow : public QMainWindow {
   QAudioSink* audio_sink_ = nullptr;
 #endif
   QIODevice* audio_output_device_ = nullptr;
+  bool audio_output_disabled_ = false;
 };
 
 }  // namespace multi_radio

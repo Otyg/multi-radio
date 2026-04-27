@@ -73,10 +73,34 @@ MR_LOG_DIR=./logs \
 
 ## Run client
 
+Create `client.ini` (or point to another file path) with:
+
+```ini
+grpc_target=192.168.128.82:50051
+auth_token=multi-radio-dev-token
+```
+
+Then start the client:
+
+```bash
+./build/frontend/multi_radio_client
+```
+
+Optional overrides:
+- Custom config path with env: `MR_CLIENT_CONFIG=/path/to/client.ini ./build/frontend/multi_radio_client`
+- Custom config path with argument: `./build/frontend/multi_radio_client --config /path/to/client.ini`
+- Legacy env fallback still works:
+
 ```bash
 MR_GRPC_TARGET=192.168.128.82:50051 \
 MR_AUTH_TOKEN=multi-radio-dev-token \
 ./build/frontend/multi_radio_client
+```
+
+If the client crashes on startup around audio backend initialization, temporarily disable audio output:
+
+```bash
+MR_DISABLE_AUDIO_OUTPUT=1 ./build/frontend/multi_radio_client
 ```
 
 ## Tests

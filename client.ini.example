@@ -1,0 +1,2 @@
+grpc_target=127.0.0.1:50051
+auth_token=multi-radio-dev-token

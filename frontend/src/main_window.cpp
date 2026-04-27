@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <optional>
 #include <sstream>
 
@@ -20,6 +21,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QSplitter>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #if MR_HAS_QT_MULTIMEDIA
@@ -200,6 +202,15 @@ bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, doubl
     *frame_frequency_end_hz = 20000.0;
   }
   return true;
+}
+
+bool EnvFlagEnabled(const char* key) {
+  const char* value = std::getenv(key);
+  if (value == nullptr) {
+    return false;
+  }
+  const QString normalized = QString::fromUtf8(value).trimmed().toLower();
+  return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
 }
 
 struct ParsedAisNmeaSentence {
@@ -786,17 +797,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   LoadScanListConfigFromSettings();
   RefreshScanListChannelCards();
 
-#if MR_HAS_QT_MULTIMEDIA
-  QAudioFormat audio_format;
-  audio_format.setSampleRate(16000);
-  audio_format.setChannelCount(1);
-  audio_format.setSampleFormat(QAudioFormat::Int16);
-  audio_sink_ = new QAudioSink(audio_format, this);
-  audio_output_device_ = audio_sink_->start();
-  if (audio_output_device_ == nullptr) {
-    AppendLog("Audio output unavailable");
+  audio_output_disabled_ = EnvFlagEnabled("MR_DISABLE_AUDIO_OUTPUT");
+  if (audio_output_disabled_) {
+    AppendLog("Audio output disabled by MR_DISABLE_AUDIO_OUTPUT");
   }
-#endif
 
   connect(refresh_button, &QPushButton::clicked, this, &MainWindow::RefreshReceivers);
   connect(start_button, &QPushButton::clicked, this, &MainWindow::StartSelectedReceiver);
@@ -876,12 +880,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     lo_offset_spin_->setEnabled(enabled);
   });
 
-  connect(client_.get(), &GrpcClient::ReceiverEventReceived, this, &MainWindow::OnReceiverEvent);
-  connect(client_.get(), &GrpcClient::DecodedMessageReceived, this, &MainWindow::OnDecodedMessage);
-  connect(client_.get(), &GrpcClient::StreamError, this, &MainWindow::OnStreamError);
+  connect(client_.get(), &GrpcClient::ReceiverEventReceived, this, &MainWindow::OnReceiverEvent,
+          Qt::QueuedConnection);
+  connect(client_.get(), &GrpcClient::DecodedMessageReceived, this, &MainWindow::OnDecodedMessage,
+          Qt::QueuedConnection);
+  connect(client_.get(), &GrpcClient::StreamError, this, &MainWindow::OnStreamError,
+          Qt::QueuedConnection);
 
-  RefreshReceivers();
-  client_->StartStreaming();
+  QTimer::singleShot(0, this, [this]() {
+    RefreshReceivers();
+    client_->StartStreaming();
+  });
 }
 
 MainWindow::~MainWindow() { client_->StopStreaming(); }
@@ -1338,6 +1347,10 @@ void MainWindow::ConfigureScanListChannel(int index) {
   channel.dwell_ms = dwell_spin->value();
   SaveScanListConfigToSettings();
   RefreshScanListChannelCards();
+
+  if (receiver_combo_->currentIndex() >= 0) {
+    ApplyModeAndConfig();
+  }
 }
 
 void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message) {
@@ -1361,6 +1374,10 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
 
 void MainWindow::HandleAudioPcmEvent(const QString& message) {
 #if MR_HAS_QT_MULTIMEDIA
+  EnsureAudioOutputInitialized();
+  if (audio_output_disabled_) {
+    return;
+  }
   if (audio_output_device_ == nullptr) {
     return;
   }
@@ -1380,6 +1397,24 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
   audio_output_device_->write(pcm);
 #else
   Q_UNUSED(message);
+#endif
+}
+
+void MainWindow::EnsureAudioOutputInitialized() {
+#if MR_HAS_QT_MULTIMEDIA
+  if (audio_output_disabled_ || audio_output_device_ != nullptr || audio_sink_ != nullptr) {
+    return;
+  }
+  QAudioFormat audio_format;
+  audio_format.setSampleRate(16000);
+  audio_format.setChannelCount(1);
+  audio_format.setSampleFormat(QAudioFormat::Int16);
+  audio_sink_ = new QAudioSink(audio_format, this);
+  audio_output_device_ = audio_sink_->start();
+  if (audio_output_device_ == nullptr) {
+    audio_output_disabled_ = true;
+    AppendLog("Audio output unavailable");
+  }
 #endif
 }
 
