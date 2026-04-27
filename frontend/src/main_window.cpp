@@ -727,6 +727,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   air_marine_layout->addRow("Signal", signal_filter_combo_);
   air_marine_layout->addRow("Receiver", receiver_filter_combo_);
   air_marine_layout->addRow("Last minutes", minutes_filter_spin_);
+  decoded_table_ = new QTableWidget(0, 6, air_marine_tab);
+  decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload", "Decoded"});
+  decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+  decoded_table_->setMinimumHeight(280);
+  air_marine_layout->addRow(decoded_table_);
   mode_tabs_->addTab(air_marine_tab, "AIR_MARINE_PLOT");
 
   auto* global_tab = new QWidget(mode_tabs_);
@@ -769,21 +774,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   signal_visualization_ = new SignalVisualizationWidget(central);
 
-  decoded_table_ = new QTableWidget(0, 6, central);
-  decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload", "Decoded"});
-  decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-
   event_log_ = new QPlainTextEdit(central);
   event_log_->setReadOnly(true);
 
-  auto* splitter = new QSplitter(Qt::Vertical, central);
-  splitter->addWidget(decoded_table_);
-  splitter->addWidget(event_log_);
-  splitter->setSizes({450, 250});
-
   root_layout->addLayout(top_layout);
   root_layout->addWidget(signal_visualization_);
-  root_layout->addWidget(splitter);
+  root_layout->addWidget(event_log_);
 
   setCentralWidget(central);
   LoadScanListConfigFromSettings();

@@ -964,8 +964,15 @@ void ReceiverWorker::RunLoop() {
       double demod_peak_strength = 0.0;
       std::vector<double> demod_waveform;
       std::vector<double> demod_spectrum;
-      const bool have_demod_frame = BuildDemodVisualizationFrame(
+      bool have_demod_frame = BuildDemodVisualizationFrame(
           iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
+      if (has_scan_squelch && !squelch_open) {
+        demod_waveform.assign(kWaveformPoints, 0.5);
+        demod_spectrum.assign(kSpectrumBins, 0.0);
+        demod_peak_hz = 0.0;
+        demod_peak_strength = 0.0;
+        have_demod_frame = true;
+      }
 
       plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
         DecodedMessage msg;
