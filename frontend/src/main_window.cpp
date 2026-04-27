@@ -2019,12 +2019,6 @@ void MainWindow::DrainAudioOutputQueue() {
     }
     audio_pending_pcm_.remove(0, static_cast<int>(written));
   }
-  if (audio_sink_ != nullptr && audio_pending_pcm_.isEmpty()) {
-    const qint64 near_empty_threshold = static_cast<qint64>(audio_sink_->bufferSize() * 9 / 10);
-    if (audio_sink_->bytesFree() >= near_empty_threshold) {
-      audio_prefill_complete_ = false;
-    }
-  }
 #endif
 }
 
