@@ -653,6 +653,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   minutes_filter_spin_->setValue(30);
   air_marine_layout->addRow(new QLabel("Uses built-in AIS + DSC channels.", air_marine_tab));
   air_marine_layout->addRow(new QLabel("AIS: 162000000 Hz, DSC Ch 70: 156525000 Hz", air_marine_tab));
+  air_marine_layout->addRow("AIS+DSC bandbredd", channel_bandwidth_spin_);
   air_marine_layout->addRow("Signal", signal_filter_combo_);
   air_marine_layout->addRow("Receiver", receiver_filter_combo_);
   air_marine_layout->addRow("Last minutes", minutes_filter_spin_);
@@ -662,7 +663,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* global_layout = new QFormLayout(global_tab);
   global_layout->addRow("Dwell ms", dwell_ms_spin_);
   global_layout->addRow("Sample rate", sample_rate_spin_);
-  global_layout->addRow("Channel bandwidth", channel_bandwidth_spin_);
   global_layout->addRow("Hardware bandwidth", hardware_bandwidth_spin_);
   global_layout->addRow("DC blocker", dc_blocker_checkbox_);
   global_layout->addRow("DC cutoff", dc_blocker_cutoff_spin_);
