@@ -160,6 +160,17 @@ void SignalVisualizationWidget::SetReceiverSquelchThresholdDb(uint32_t receiver_
   update();
 }
 
+void SignalVisualizationWidget::SetReceiverSignalLevelDb(uint32_t receiver_id, double signal_level_db) {
+  ReceiverState& state = states_[receiver_id];
+  const double clamped_db = std::clamp(signal_level_db, -120.0, 0.0);
+  if (state.has_signal_level_db && std::abs(state.signal_level_db - clamped_db) < 0.05) {
+    return;
+  }
+  state.signal_level_db = clamped_db;
+  state.has_signal_level_db = true;
+  update();
+}
+
 void SignalVisualizationWidget::SetAutoNoiseReductionEnabled(bool enabled) {
   if (auto_noise_reduction_enabled_ == enabled) {
     return;
@@ -262,7 +273,8 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                                waveform_content.width(), meter_height);
 
   DrawWaveform(&painter, waveform_plot_rect, display.waveform);
-  DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold);
+  DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold,
+                 display.has_signal_level_db, display.signal_level_db);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
                     display.frequency_start_hz, display.frequency_end_hz, false,
                     display.has_squelch_threshold_db, display.squelch_threshold_db);
@@ -335,6 +347,10 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   state->receiver_frequency_start_hz = 0.0;
   state->receiver_frequency_end_hz = 20000.0;
   state->receiver_frequency_range_valid = false;
+  state->has_signal_level_db = false;
+  state->signal_level_db = -120.0;
+  state->has_squelch_threshold_db = false;
+  state->squelch_threshold_db = -30.0;
 }
 
 int SignalVisualizationWidget::NormalizeFftSize(int fft_size) {
@@ -432,13 +448,21 @@ void SignalVisualizationWidget::DrawWaveform(QPainter* painter, const QRect& are
 }
 
 void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& area, double level,
-                                               double peak_hold) {
+                                               double peak_hold, bool has_signal_level_db,
+                                               double signal_level_db) {
   if (painter == nullptr || !area.isValid()) {
     return;
   }
 
   const double clamped_level = Clamp01(level);
   const double clamped_peak = Clamp01(peak_hold);
+  auto amp_to_db = [](double amp) {
+    constexpr double kMinDb = -120.0;
+    constexpr double kMaxDb = 0.0;
+    return kMinDb + std::pow(Clamp01(amp), 0.42) * (kMaxDb - kMinDb);
+  };
+  const double level_db = has_signal_level_db ? std::clamp(signal_level_db, -120.0, 0.0)
+                                              : amp_to_db(clamped_level);
 
   painter->save();
   painter->setClipRect(area);
@@ -466,7 +490,7 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
   painter->setPen(QColor(178, 192, 214));
   painter->drawText(area.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, "Signal Level");
   painter->drawText(area.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignRight,
-                    QString("%1%").arg(static_cast<int>(std::round(clamped_level * 100.0))));
+                    QString("%1 dB").arg(level_db, 0, 'f', 1));
   painter->restore();
 }
 
@@ -634,6 +658,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   display.signal_peak_hold = 0.0;
   display.frequency_start_hz = frequency_start_hz_;
   display.frequency_end_hz = frequency_end_hz_;
+  display.has_signal_level_db = false;
+  display.signal_level_db = -120.0;
   display.has_squelch_threshold_db = false;
   display.squelch_threshold_db = -30.0;
 
@@ -664,6 +690,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
         display.spectrogram_rows = selected.spectrogram_rows;
         display.waterfall_rows = selected.waterfall_rows;
       }
+      display.has_signal_level_db = selected.has_signal_level_db;
+      display.signal_level_db = selected.signal_level_db;
       display.has_squelch_threshold_db = selected.has_squelch_threshold_db;
       display.squelch_threshold_db = selected.squelch_threshold_db;
       if (display.spectrogram_rows.isEmpty()) {
@@ -695,6 +723,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       display.spectrogram_rows = selected.spectrogram_rows;
       display.waterfall_rows = selected.waterfall_rows;
     }
+    display.has_signal_level_db = selected.has_signal_level_db;
+    display.signal_level_db = selected.signal_level_db;
     display.has_squelch_threshold_db = selected.has_squelch_threshold_db;
     display.squelch_threshold_db = selected.squelch_threshold_db;
     if (display.spectrogram_rows.isEmpty()) {
@@ -713,6 +743,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   double frequency_end_sum = 0.0;
   double signal_level_sum = 0.0;
   double signal_peak_sum = 0.0;
+  double signal_level_db_sum = 0.0;
+  int signal_level_db_count = 0;
   double squelch_threshold_sum = 0.0;
   int squelch_threshold_count = 0;
   for (const ReceiverState& state : state_values) {
@@ -730,6 +762,10 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     }
     signal_level_sum += state.signal_level;
     signal_peak_sum += state.signal_peak_hold;
+    if (state.has_signal_level_db) {
+      signal_level_db_sum += state.signal_level_db;
+      ++signal_level_db_count;
+    }
     if (state.has_squelch_threshold_db) {
       squelch_threshold_sum += state.squelch_threshold_db;
       ++squelch_threshold_count;
@@ -756,6 +792,10 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     const double inv = 1.0 / static_cast<double>(ranged_states);
     display.frequency_start_hz = frequency_start_sum * inv;
     display.frequency_end_hz = frequency_end_sum * inv;
+  }
+  if (signal_level_db_count > 0) {
+    display.has_signal_level_db = true;
+    display.signal_level_db = signal_level_db_sum / static_cast<double>(signal_level_db_count);
   }
   if (squelch_threshold_count > 0) {
     display.has_squelch_threshold_db = true;

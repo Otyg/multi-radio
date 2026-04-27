@@ -1076,8 +1076,15 @@ void MainWindow::RefreshReceivers() {
           updated.frequency_mhz = channel.frequency_hz() > 0.0 ? channel.frequency_hz() / 1000000.0 : 0.0;
           updated.modulation = channel.modulation();
           updated.bandwidth_hz = static_cast<int>(channel.channel_bandwidth_hz());
-          updated.use_default_squelch = channel.use_default_squelch();
-          updated.squelch_threshold_db = channel.squelch_threshold_db();
+          const double channel_squelch_db = channel.squelch_threshold_db();
+          bool use_default_squelch = channel.use_default_squelch();
+          if (!use_default_squelch &&
+              std::abs(channel_squelch_db - receiver_default_squelch_db) < 0.05) {
+            // Legacy configs had no explicit "use default" flag. Treat same-value channels as default.
+            use_default_squelch = true;
+          }
+          updated.use_default_squelch = use_default_squelch;
+          updated.squelch_threshold_db = channel_squelch_db;
           if (updated.use_default_squelch) {
             updated.squelch_threshold_db = receiver_default_squelch_db;
           }
@@ -1728,6 +1735,12 @@ void MainWindow::ImportScanListCsv() {
 }
 
 void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message) {
+  bool signal_ok = false;
+  const double signal_db = TokenValue(message, "signal_db").toDouble(&signal_ok);
+  if (signal_ok) {
+    signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_db);
+  }
+
   bool threshold_ok = false;
   const double threshold_db = TokenValue(message, "threshold_db").toDouble(&threshold_ok);
   if (threshold_ok) {
@@ -1846,6 +1859,7 @@ void MainWindow::LoadScanListConfigFromSettings() {
 
   scan_list_channels_.clear();
   scan_list_channels_.reserve(static_cast<size_t>(channel_count));
+  bool migrated_legacy_squelch_format = false;
   for (int index = 0; index < channel_count; ++index) {
     ScanListChannelConfig channel;
     channel.squelch_threshold_db = default_squelch_db;
@@ -1860,10 +1874,14 @@ void MainWindow::LoadScanListConfigFromSettings() {
       channel.use_default_squelch = settings.value("use_default_squelch").toBool();
     } else if (!has_saved_squelch) {
       channel.use_default_squelch = true;
+      migrated_legacy_squelch_format = true;
     } else {
       const double saved_squelch =
           settings.value("squelch_threshold_db", channel.squelch_threshold_db).toDouble();
       channel.use_default_squelch = std::abs(saved_squelch - default_squelch_db) < 0.05;
+      if (channel.use_default_squelch) {
+        migrated_legacy_squelch_format = true;
+      }
     }
     if (has_saved_squelch) {
       channel.squelch_threshold_db =
@@ -1891,6 +1909,10 @@ void MainWindow::LoadScanListConfigFromSettings() {
     settings.endGroup();
   }
   settings.endGroup();
+  if (migrated_legacy_squelch_format) {
+    SaveScanListConfigToSettings();
+    AppendLog("Migrated legacy scan-list squelch settings to default-aware format");
+  }
 }
 
 void MainWindow::SaveScanListConfigToSettings() const {

@@ -36,6 +36,7 @@ constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 80;
 constexpr uint32_t kAudioSampleRateHz = 16000;
+constexpr uint32_t kScanStatusIntervalMs = 250;
 
 struct IqLowPassState {
   double i = 0.0;
@@ -872,7 +873,7 @@ void ReceiverWorker::RunLoop() {
       std::ostringstream status;
       status << "SCAN_STATUS idx=" << scan_list_channel_index
              << " state=" << (scan_list_monitor_mode ? "open" : "closed")
-             << " signal_db=" << (scan_list_monitor_mode ? "0.0" : "-120.0")
+             << " signal_db=-120.0"
              << " threshold_db=" << FormatDouble(squelch_threshold_db, 1)
              << " monitor=" << (scan_list_monitor_mode ? "1" : "0");
       PublishEvent(EventKind::kInfo, status.str(), logical_tuned_frequency_hz, false);
@@ -891,6 +892,7 @@ void ReceiverWorker::RunLoop() {
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_audio_emit = std::chrono::steady_clock::time_point::min();
+    auto next_scan_status_emit = std::chrono::steady_clock::time_point::min();
 
     while (running_.load()) {
       const auto now = std::chrono::steady_clock::now();
@@ -969,6 +971,16 @@ void ReceiverWorker::RunLoop() {
         squelch_open = true;
         squelch_seen_open = true;
         squelch_closed_at.reset();
+        if (now >= next_scan_status_emit) {
+          std::ostringstream status;
+          status << "SCAN_STATUS idx=" << scan_list_channel_index
+                 << " state=open"
+                 << " signal_db=" << FormatDouble(signal_db, 1)
+                 << " threshold_db=" << FormatDouble(squelch_threshold_db, 1)
+                 << " monitor=1";
+          PublishEvent(EventKind::kInfo, status.str(), tuned_frequency_hz, false);
+          next_scan_status_emit = now + std::chrono::milliseconds(kScanStatusIntervalMs);
+        }
       }
 
       double demod_peak_hz = 0.0;

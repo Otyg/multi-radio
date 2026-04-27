@@ -30,6 +30,7 @@ class SignalVisualizationWidget : public QWidget {
   void SetVisualizationSettings(int fft_size, double frequency_start_hz, double frequency_end_hz);
   void SetSpectrumSource(SpectrumSource source);
   void SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db);
+  void SetReceiverSignalLevelDb(uint32_t receiver_id, double signal_level_db);
   void SetAutoNoiseReductionEnabled(bool enabled);
   bool AutoNoiseReductionEnabled() const;
   SpectrumSource CurrentSpectrumSource() const;
@@ -58,6 +59,8 @@ class SignalVisualizationWidget : public QWidget {
     double signal_peak_hold = 0.0;
     double frequency_start_hz = 0.0;
     double frequency_end_hz = 20000.0;
+    bool has_signal_level_db = false;
+    double signal_level_db = -120.0;
     bool has_squelch_threshold_db = false;
     double squelch_threshold_db = -30.0;
   };
@@ -75,6 +78,8 @@ class SignalVisualizationWidget : public QWidget {
     double receiver_frequency_start_hz = 0.0;
     double receiver_frequency_end_hz = 20000.0;
     bool receiver_frequency_range_valid = false;
+    bool has_signal_level_db = false;
+    double signal_level_db = -120.0;
     bool has_squelch_threshold_db = false;
     double squelch_threshold_db = -30.0;
   };
@@ -88,7 +93,8 @@ class SignalVisualizationWidget : public QWidget {
   static QColor HeatColor(double value);
   static QColor RainbowColor(double value);
   static void DrawWaveform(QPainter* painter, const QRect& area, const QVector<double>& waveform);
-  static void DrawLevelMeter(QPainter* painter, const QRect& area, double level, double peak_hold);
+  static void DrawLevelMeter(QPainter* painter, const QRect& area, double level, double peak_hold,
+                             bool has_signal_level_db, double signal_level_db);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
                                 double frequency_start_hz, double frequency_end_hz,
                                 bool suppress_below_mean, bool has_squelch_threshold_db,
