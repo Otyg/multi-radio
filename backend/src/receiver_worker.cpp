@@ -1074,6 +1074,7 @@ void ReceiverWorker::RunLoop() {
     bool squelch_open = scan_list_monitor_mode && has_scan_squelch;
     bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
+    bool audio_gate_open_until_channel_hop = scan_list_monitor_mode && has_scan_squelch;
     std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
     std::optional<std::chrono::steady_clock::time_point> squelch_close_candidate_at;
     double last_signal_db = -120.0;
@@ -1162,6 +1163,7 @@ void ReceiverWorker::RunLoop() {
         if (next_squelch_open != squelch_open) {
           squelch_open = next_squelch_open;
           if (squelch_open) {
+            audio_gate_open_until_channel_hop = true;
             squelch_close_candidate_at.reset();
             squelch_seen_open = true;
             squelch_closed_at.reset();
@@ -1175,8 +1177,6 @@ void ReceiverWorker::RunLoop() {
             PublishEvent(EventKind::kInfo, opened.str(), tuned_frequency_hz);
           } else {
             squelch_close_candidate_at.reset();
-            audio_pcm_buffer.clear();
-            audio_demod_state = AudioDemodState{};
             squelch_closed_at = std::chrono::steady_clock::now();
             if (squelch_opened_at.has_value()) {
               const auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1216,6 +1216,7 @@ void ReceiverWorker::RunLoop() {
           next_scan_status_emit = now + std::chrono::milliseconds(kScanStatusIntervalMs);
         }
       }
+      const bool audio_gate_open = has_scan_squelch && (squelch_open || audio_gate_open_until_channel_hop);
 
       double demod_peak_hz = 0.0;
       double demod_peak_strength = 0.0;
@@ -1223,7 +1224,7 @@ void ReceiverWorker::RunLoop() {
       std::vector<double> demod_spectrum;
       bool have_demod_frame = BuildDemodVisualizationFrame(
           iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
-      if (has_scan_squelch && !squelch_open) {
+      if (has_scan_squelch && !audio_gate_open) {
         demod_waveform.assign(kWaveformPoints, 0.5);
         demod_spectrum.assign(kSpectrumBins, 0.0);
         demod_peak_hz = 0.0;
@@ -1274,7 +1275,7 @@ void ReceiverWorker::RunLoop() {
         next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
       }
 
-      if (has_scan_squelch && squelch_open) {
+      if (audio_gate_open) {
         std::vector<int16_t> block_pcm;
         const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
         const size_t audio_frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
@@ -1304,6 +1305,10 @@ void ReceiverWorker::RunLoop() {
         audio_pcm_buffer.clear();
         audio_demod_state = AudioDemodState{};
       }
+    }
+    if (has_scan_squelch) {
+      audio_pcm_buffer.clear();
+      audio_demod_state = AudioDemodState{};
     }
     if (hold_on_squelch && squelch_opened_at.has_value()) {
       const auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
