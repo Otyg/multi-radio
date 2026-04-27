@@ -29,6 +29,8 @@ class SignalVisualizationWidget : public QWidget {
   void SetReceiverFilter(int receiver_filter_id);
   void SetVisualizationSettings(int fft_size, double frequency_start_hz, double frequency_end_hz);
   void SetSpectrumSource(SpectrumSource source);
+  void SetAutoNoiseReductionEnabled(bool enabled);
+  bool AutoNoiseReductionEnabled() const;
   SpectrumSource CurrentSpectrumSource() const;
   int FftSize() const;
   double FrequencyStartHz() const;
@@ -83,9 +85,10 @@ class SignalVisualizationWidget : public QWidget {
   static void DrawWaveform(QPainter* painter, const QRect& area, const QVector<double>& waveform);
   static void DrawLevelMeter(QPainter* painter, const QRect& area, double level, double peak_hold);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
-                                double frequency_start_hz, double frequency_end_hz);
+                                double frequency_start_hz, double frequency_end_hz,
+                                bool suppress_below_mean);
   static void DrawHeatmap(QPainter* painter, const QRect& area, const QVector<QVector<double>>& rows,
-                          bool newest_at_top, bool rainbow_colors);
+                          bool newest_at_top, bool rainbow_colors, bool suppress_below_mean);
 
   bool RequireExplicitSelection() const;
   DisplayState BuildDisplayState() const;
@@ -107,6 +110,7 @@ class SignalVisualizationWidget : public QWidget {
   double frequency_start_hz_ = 0.0;
   double frequency_end_hz_ = 20000.0;
   SpectrumSource spectrum_source_ = SpectrumSource::kDemodulated;
+  bool auto_noise_reduction_enabled_ = false;
   QTimer frame_timer_;
 };
 

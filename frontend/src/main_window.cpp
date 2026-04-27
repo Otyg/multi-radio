@@ -1054,9 +1054,13 @@ void MainWindow::OpenVisualizationSettingsDialog() {
   end_hz_spin->setSuffix(" Hz");
   end_hz_spin->setValue(signal_visualization_->FrequencyEndHz());
 
+  auto* auto_noise_checkbox = new QCheckBox("Waterfall: hide bins at/below mean", &dialog);
+  auto_noise_checkbox->setChecked(signal_visualization_->AutoNoiseReductionEnabled());
+
   layout->addRow("FFT size", fft_combo);
   layout->addRow("Frequency start", start_hz_spin);
   layout->addRow("Frequency end", end_hz_spin);
+  layout->addRow("Auto noise reduction", auto_noise_checkbox);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
   layout->addRow(buttons);
@@ -1070,11 +1074,14 @@ void MainWindow::OpenVisualizationSettingsDialog() {
   const int fft_size = fft_combo->currentData().toInt();
   const double start_hz = start_hz_spin->value();
   const double end_hz = end_hz_spin->value();
+  const bool auto_noise_reduction = auto_noise_checkbox->isChecked();
   signal_visualization_->SetVisualizationSettings(fft_size, start_hz, end_hz);
-  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz")
+  signal_visualization_->SetAutoNoiseReductionEnabled(auto_noise_reduction);
+  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz, waterfall-noise-filter=%4")
                 .arg(fft_size)
                 .arg(start_hz, 0, 'f', 0)
-                .arg(end_hz, 0, 'f', 0));
+                .arg(end_hz, 0, 'f', 0)
+                .arg(auto_noise_reduction ? "on" : "off"));
 }
 
 void MainWindow::AddMessageRow(const MessageRow& row) {

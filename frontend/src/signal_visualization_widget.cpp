@@ -148,6 +148,18 @@ void SignalVisualizationWidget::SetSpectrumSource(SpectrumSource source) {
   update();
 }
 
+void SignalVisualizationWidget::SetAutoNoiseReductionEnabled(bool enabled) {
+  if (auto_noise_reduction_enabled_ == enabled) {
+    return;
+  }
+  auto_noise_reduction_enabled_ = enabled;
+  update();
+}
+
+bool SignalVisualizationWidget::AutoNoiseReductionEnabled() const {
+  return auto_noise_reduction_enabled_;
+}
+
 SignalVisualizationWidget::SpectrumSource SignalVisualizationWidget::CurrentSpectrumSource() const {
   return spectrum_source_;
 }
@@ -240,8 +252,9 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
   DrawWaveform(&painter, waveform_plot_rect, display.waveform);
   DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
-                    display.frequency_start_hz, display.frequency_end_hz);
-  DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true);
+                    display.frequency_start_hz, display.frequency_end_hz, false);
+  DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true,
+              auto_noise_reduction_enabled_);
 }
 
 void SignalVisualizationWidget::OnFrameTick() {
@@ -446,7 +459,7 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
 
 void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect& area,
                                                   const QVector<double>& spectrum, double frequency_start_hz,
-                                                  double frequency_end_hz) {
+                                                  double frequency_end_hz, bool suppress_below_mean) {
   if (painter == nullptr || spectrum.isEmpty()) {
     return;
   }
@@ -495,27 +508,44 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   painter->drawText(area.left() + 2, plot.top() - 2, "dB");
   painter->drawText(plot.right() - 64, area.bottom() - 4, "Freq (Hz)");
 
+  double mean_amplitude = 0.0;
+  if (suppress_below_mean && !spectrum.isEmpty()) {
+    for (const double value : spectrum) {
+      mean_amplitude += Clamp01(value);
+    }
+    mean_amplitude /= static_cast<double>(spectrum.size());
+  }
+
   QPainterPath path;
+  bool segment_open = false;
   for (int i = 0; i < spectrum.size(); ++i) {
+    const double amplitude = Clamp01(spectrum[i]);
+    if (suppress_below_mean && amplitude < mean_amplitude) {
+      segment_open = false;
+      continue;
+    }
     const double t = (spectrum.size() <= 1) ? 0.0 : static_cast<double>(i) / (spectrum.size() - 1);
     const int x = plot.left() + static_cast<int>(t * (plot.width() - 1));
-    const double db = amp_to_db(spectrum[i]);
+    const double db = amp_to_db(amplitude);
     const int y = db_to_y(db);
-    if (i == 0) {
+    if (!segment_open) {
       path.moveTo(x, y);
+      segment_open = true;
     } else {
       path.lineTo(x, y);
     }
   }
 
-  painter->setPen(QPen(QColor(255, 176, 95), 2));
-  painter->drawPath(path);
+  if (!path.isEmpty()) {
+    painter->setPen(QPen(QColor(255, 176, 95), 2));
+    painter->drawPath(path);
+  }
   painter->restore();
 }
 
 void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area,
                                             const QVector<QVector<double>>& rows, bool newest_at_top,
-                                            bool rainbow_colors) {
+                                            bool rainbow_colors, bool suppress_below_mean) {
   if (painter == nullptr) {
     return;
   }
@@ -533,8 +563,20 @@ void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area
 
     for (int row = 0; row < row_count; ++row) {
       const int src_row = newest_at_top ? (row_count - 1 - row) : row;
+      double row_mean = 0.0;
+      if (suppress_below_mean) {
+        const QVector<double>& row_values = rows[src_row];
+        for (const double value : row_values) {
+          row_mean += Clamp01(value);
+        }
+        row_mean /= static_cast<double>(row_values.size());
+      }
       for (int col = 0; col < col_count; ++col) {
-        const QColor color = rainbow_colors ? RainbowColor(rows[src_row][col]) : HeatColor(rows[src_row][col]);
+        const double cell_value = Clamp01(rows[src_row][col]);
+        if (suppress_below_mean && cell_value <= row_mean) {
+          continue;
+        }
+        const QColor color = rainbow_colors ? RainbowColor(cell_value) : HeatColor(cell_value);
         const int x = area.left() + static_cast<int>(col * cell_w);
         const int y = area.top() + static_cast<int>(row * cell_h);
         const int w = static_cast<int>(std::ceil(cell_w));
