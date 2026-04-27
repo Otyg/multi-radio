@@ -70,6 +70,52 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
 bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector<int16_t>* pcm_out);
 bool EncodePcm16Base64(const std::vector<int16_t>& pcm, std::string* payload_b64);
 
+void ApplyCascadedLowPass(std::vector<double>* samples, double sample_rate_hz, double cutoff_hz,
+                          int stages) {
+  if (samples == nullptr || samples->empty() || sample_rate_hz <= 0.0 || cutoff_hz <= 0.0 || stages <= 0) {
+    return;
+  }
+  const double nyquist_hz = sample_rate_hz * 0.5;
+  const double bounded_cutoff_hz =
+      std::clamp(cutoff_hz, 5.0, std::max(5.0, nyquist_hz - 1.0));
+  const double alpha = std::clamp(1.0 - std::exp((-2.0 * kPi * bounded_cutoff_hz) / sample_rate_hz),
+                                  1.0e-6, 1.0);
+  for (int stage = 0; stage < stages; ++stage) {
+    double state = (*samples)[0];
+    for (size_t idx = 0; idx < samples->size(); ++idx) {
+      state += alpha * ((*samples)[idx] - state);
+      (*samples)[idx] = state;
+    }
+  }
+}
+
+void ApplyFmDeemphasis(std::vector<double>* samples, double sample_rate_hz, double tau_us) {
+  if (samples == nullptr || samples->empty() || sample_rate_hz <= 0.0 || tau_us <= 0.0) {
+    return;
+  }
+  const double tau_s = tau_us * 1.0e-6;
+  const double alpha = std::clamp(1.0 - std::exp(-1.0 / (sample_rate_hz * tau_s)), 1.0e-6, 1.0);
+  double state = (*samples)[0];
+  for (size_t idx = 0; idx < samples->size(); ++idx) {
+    state += alpha * ((*samples)[idx] - state);
+    (*samples)[idx] = state;
+  }
+}
+
+void RemoveDcOffset(std::vector<double>* samples) {
+  if (samples == nullptr || samples->empty()) {
+    return;
+  }
+  double mean = 0.0;
+  for (double value : *samples) {
+    mean += value;
+  }
+  mean /= static_cast<double>(samples->size());
+  for (double& value : *samples) {
+    value -= mean;
+  }
+}
+
 uint32_t DefaultBandwidthForModulation(Modulation modulation) {
   switch (modulation) {
     case Modulation::kAm:
@@ -401,6 +447,22 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, std::vector
   if (source.size() < 32) {
     return false;
   }
+
+  const double source_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
+  switch (modulation) {
+    case Modulation::kWfm:
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 7000.0, 4);
+      ApplyFmDeemphasis(&source, source_sample_rate_hz, 50.0);
+      break;
+    case Modulation::kAm:
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 4500.0, 3);
+      break;
+    case Modulation::kNfm:
+    default:
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 3400.0, 3);
+      break;
+  }
+  RemoveDcOffset(&source);
 
   const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(kAudioSampleRateHz);
   if (ratio <= 0.0) {

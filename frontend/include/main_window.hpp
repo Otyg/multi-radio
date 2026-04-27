@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include <QByteArray>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDateTime>
@@ -88,6 +89,7 @@ class MainWindow : public QMainWindow {
   bool IsSelectedReceiver(uint32_t receiver_id) const;
   void HandleAudioPcmEvent(const QString& message);
   void EnsureAudioOutputInitialized();
+  void DrainAudioOutputQueue();
   void LoadScanListConfigFromSettings();
   void SaveScanListConfigToSettings() const;
 
@@ -160,6 +162,8 @@ class MainWindow : public QMainWindow {
   QAudioSink* audio_sink_ = nullptr;
 #endif
   QIODevice* audio_output_device_ = nullptr;
+  QByteArray audio_pending_pcm_;
+  bool audio_queue_overrun_logged_ = false;
   bool audio_output_disabled_ = false;
 };
 

@@ -1918,7 +1918,19 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
   if (pcm.isEmpty()) {
     return;
   }
-  audio_output_device_->write(pcm);
+  audio_pending_pcm_.append(pcm);
+  constexpr int kMaxBufferedAudioBytes = 16000 * 2 * 3;
+  if (audio_pending_pcm_.size() > kMaxBufferedAudioBytes) {
+    const int dropped = audio_pending_pcm_.size() - kMaxBufferedAudioBytes;
+    audio_pending_pcm_.remove(0, dropped);
+    if (!audio_queue_overrun_logged_) {
+      AppendLog(QString("Audio queue overrun: dropped %1 bytes").arg(dropped));
+      audio_queue_overrun_logged_ = true;
+    }
+  } else {
+    audio_queue_overrun_logged_ = false;
+  }
+  DrainAudioOutputQueue();
 #else
   Q_UNUSED(message);
 #endif
@@ -1940,12 +1952,37 @@ void MainWindow::EnsureAudioOutputInitialized() {
   audio_format.setChannelCount(1);
   audio_format.setSampleFormat(QAudioFormat::Int16);
   audio_sink_ = new QAudioSink(default_output, audio_format, this);
+  audio_sink_->setBufferSize(16000 * 2 * 2);
   audio_output_device_ = audio_sink_->start();
   if (audio_output_device_ == nullptr) {
     audio_output_disabled_ = true;
     audio_sink_->deleteLater();
     audio_sink_ = nullptr;
+    audio_pending_pcm_.clear();
     AppendLog("Audio output unavailable");
+  }
+#endif
+}
+
+void MainWindow::DrainAudioOutputQueue() {
+#if MR_HAS_QT_MULTIMEDIA
+  if (audio_output_disabled_ || audio_output_device_ == nullptr || audio_pending_pcm_.isEmpty()) {
+    return;
+  }
+  while (!audio_pending_pcm_.isEmpty()) {
+    qint64 bytes_to_write = static_cast<qint64>(audio_pending_pcm_.size());
+    if (audio_sink_ != nullptr) {
+      const qint64 bytes_free = audio_sink_->bytesFree();
+      if (bytes_free <= 0) {
+        return;
+      }
+      bytes_to_write = std::min(bytes_to_write, bytes_free);
+    }
+    const qint64 written = audio_output_device_->write(audio_pending_pcm_.constData(), bytes_to_write);
+    if (written <= 0) {
+      return;
+    }
+    audio_pending_pcm_.remove(0, static_cast<int>(written));
   }
 #endif
 }
