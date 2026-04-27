@@ -152,8 +152,10 @@ void GrpcClient::StartStreaming() {
     return;
   }
 
+  audio_stream_supported_ = true;
   events_thread_ = std::thread([this]() { EventsLoop(); });
   messages_thread_ = std::thread([this]() { MessagesLoop(); });
+  audio_thread_ = std::thread([this]() { AudioLoop(); });
 }
 
 void GrpcClient::StopStreaming() {
@@ -167,6 +169,9 @@ void GrpcClient::StopStreaming() {
   }
   if (messages_thread_.joinable()) {
     messages_thread_.join();
+  }
+  if (audio_thread_.joinable()) {
+    audio_thread_.join();
   }
 }
 
@@ -219,6 +224,35 @@ void GrpcClient::MessagesLoop() {
     grpc::Status status = reader->Finish();
     if (!status.ok() && streaming_.load()) {
       emit StreamError(QString::fromStdString("Decoded stream error: " + status.error_message()));
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+  }
+}
+
+void GrpcClient::AudioLoop() {
+  while (streaming_.load() && audio_stream_supported_) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    v1::StreamAudioFramesRequest request;
+    request.set_include_all_receivers(true);
+
+    auto reader = telemetry_client_->StreamAudioFrames(&context, request);
+    v1::AudioFrame frame;
+    while (streaming_.load() && reader->Read(&frame)) {
+      const std::string& pcm = frame.pcm_s16le();
+      emit AudioFrameReceived(frame.receiver_id(), static_cast<int>(frame.sample_rate_hz()),
+                              QByteArray(pcm.data(), static_cast<int>(pcm.size())), frame.unix_ms(),
+                              frame.tuned_frequency_hz());
+    }
+
+    grpc::Status status = reader->Finish();
+    if (!status.ok() && streaming_.load()) {
+      if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED) {
+        audio_stream_supported_ = false;
+        emit StreamError("Audio stream unavailable on server; using event audio fallback.");
+        break;
+      }
+      emit StreamError(QString::fromStdString("Audio stream error: " + status.error_message()));
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
   }

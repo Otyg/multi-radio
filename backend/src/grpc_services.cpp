@@ -1,8 +1,12 @@
 #include <grpcpp/grpcpp.h>
 
+#include <array>
+#include <cctype>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "multi_radio/auth.hpp"
 #include "multi_radio/receiver_manager.hpp"
@@ -188,6 +192,126 @@ void FillPluginInfo(const PluginInfo& info, v1::PluginInfo* out) {
   }
 }
 
+bool IsAudioPcmEventMessage(const std::string& message) {
+  constexpr const char kPrefix[] = "AUDIO_PCM16 ";
+  return message.rfind(kPrefix, 0) == 0;
+}
+
+bool ExtractTokenValue(const std::string& message, const std::string& key, std::string* value) {
+  if (value == nullptr || key.empty()) {
+    return false;
+  }
+  const std::string prefix = key + "=";
+  size_t pos = message.find(prefix);
+  while (pos != std::string::npos) {
+    if (pos == 0 || std::isspace(static_cast<unsigned char>(message[pos - 1])) != 0) {
+      const size_t start = pos + prefix.size();
+      const size_t end = message.find(' ', start);
+      *value = message.substr(start, end == std::string::npos ? std::string::npos : end - start);
+      return true;
+    }
+    pos = message.find(prefix, pos + 1);
+  }
+  return false;
+}
+
+bool ParseUint32(const std::string& token, uint32_t* out) {
+  if (out == nullptr || token.empty()) {
+    return false;
+  }
+  uint64_t value = 0;
+  for (char c : token) {
+    if (c < '0' || c > '9') {
+      return false;
+    }
+    value = value * 10 + static_cast<uint64_t>(c - '0');
+    if (value > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+      return false;
+    }
+  }
+  *out = static_cast<uint32_t>(value);
+  return true;
+}
+
+bool Base64Decode(const std::string& encoded, std::vector<uint8_t>* out) {
+  if (out == nullptr || encoded.empty()) {
+    return false;
+  }
+  out->clear();
+  out->reserve((encoded.size() * 3U) / 4U);
+
+  static const std::array<int, 256> kDecodeTable = [] {
+    std::array<int, 256> table{};
+    table.fill(-1);
+    for (char c = 'A'; c <= 'Z'; ++c) {
+      table[static_cast<unsigned char>(c)] = c - 'A';
+    }
+    for (char c = 'a'; c <= 'z'; ++c) {
+      table[static_cast<unsigned char>(c)] = 26 + c - 'a';
+    }
+    for (char c = '0'; c <= '9'; ++c) {
+      table[static_cast<unsigned char>(c)] = 52 + c - '0';
+    }
+    table[static_cast<unsigned char>('+')] = 62;
+    table[static_cast<unsigned char>('/')] = 63;
+    return table;
+  }();
+
+  uint32_t accumulator = 0;
+  int bit_count = 0;
+  bool saw_padding = false;
+  for (char ch : encoded) {
+    if (std::isspace(static_cast<unsigned char>(ch)) != 0) {
+      continue;
+    }
+    if (ch == '=') {
+      saw_padding = true;
+      continue;
+    }
+    if (saw_padding) {
+      return false;
+    }
+    const int decoded = kDecodeTable[static_cast<unsigned char>(ch)];
+    if (decoded < 0) {
+      return false;
+    }
+    accumulator = (accumulator << 6U) | static_cast<uint32_t>(decoded);
+    bit_count += 6;
+    while (bit_count >= 8) {
+      bit_count -= 8;
+      out->push_back(static_cast<uint8_t>((accumulator >> bit_count) & 0xffU));
+    }
+  }
+  return !out->empty();
+}
+
+bool ParseAudioFrameFromEvent(const ReceiverEvent& event, v1::AudioFrame* out) {
+  if (out == nullptr || !IsAudioPcmEventMessage(event.message)) {
+    return false;
+  }
+  std::string sample_rate_token;
+  std::string data_token;
+  if (!ExtractTokenValue(event.message, "sr", &sample_rate_token) ||
+      !ExtractTokenValue(event.message, "data", &data_token)) {
+    return false;
+  }
+  uint32_t sample_rate_hz = 0;
+  if (!ParseUint32(sample_rate_token, &sample_rate_hz) || sample_rate_hz == 0) {
+    return false;
+  }
+  std::vector<uint8_t> pcm;
+  if (!Base64Decode(data_token, &pcm)) {
+    return false;
+  }
+
+  out->set_unix_ms(event.unix_ms);
+  out->set_receiver_id(event.receiver_id);
+  out->set_sample_rate_hz(sample_rate_hz);
+  out->set_pcm_s16le(pcm.data(), static_cast<int>(pcm.size()));
+  out->set_tuned_frequency_hz(event.tuned_frequency_hz);
+  return true;
+}
+
 class RadioControlServiceImpl final : public v1::RadioControlService::Service {
  public:
   RadioControlServiceImpl(ReceiverManager* receiver_manager, PluginHost* plugin_host,
@@ -338,6 +462,9 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
       if (!request->include_all_receivers() && event->receiver_id != request->receiver_id()) {
         continue;
       }
+      if (IsAudioPcmEventMessage(event->message)) {
+        continue;
+      }
 
       v1::ReceiverEvent response;
       response.set_unix_ms(event->unix_ms);
@@ -394,6 +521,34 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
       }
     }
 
+    return grpc::Status::OK;
+  }
+
+  grpc::Status StreamAudioFrames(grpc::ServerContext* context,
+                                 const v1::StreamAudioFramesRequest* request,
+                                 grpc::ServerWriter<v1::AudioFrame>* writer) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_)) {
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    }
+
+    size_t cursor = 0;
+    while (!context->IsCancelled()) {
+      auto event = event_bus_->WaitForReceiverEvent(&cursor, 1000);
+      if (!event.has_value()) {
+        continue;
+      }
+      if (!request->include_all_receivers() && event->receiver_id != request->receiver_id()) {
+        continue;
+      }
+
+      v1::AudioFrame frame;
+      if (!ParseAudioFrameFromEvent(*event, &frame)) {
+        continue;
+      }
+      if (!writer->Write(frame)) {
+        break;
+      }
+    }
     return grpc::Status::OK;
   }
 

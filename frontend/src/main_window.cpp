@@ -1018,6 +1018,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           Qt::QueuedConnection);
   connect(client_.get(), &GrpcClient::DecodedMessageReceived, this, &MainWindow::OnDecodedMessage,
           Qt::QueuedConnection);
+  connect(client_.get(), &GrpcClient::AudioFrameReceived, this, &MainWindow::OnAudioFrame,
+          Qt::QueuedConnection);
   connect(client_.get(), &GrpcClient::StreamError, this, &MainWindow::OnStreamError,
           Qt::QueuedConnection);
 
@@ -1236,6 +1238,7 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
                                  const QString& message, quint64 unix_ms) {
   if (message.startsWith("AUDIO_PCM16 ")) {
     if (IsSelectedReceiver(receiver_id)) {
+      // Backward compatibility with older servers where audio is sent over event stream.
       HandleAudioPcmEvent(message);
     }
     return;
@@ -1312,6 +1315,16 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
                 .arg(event_kind)
                 .arg(tuned_frequency_hz, 0, 'f', 0)
                 .arg(message));
+}
+
+void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& pcm_s16le,
+                              quint64 unix_ms, double tuned_frequency_hz) {
+  Q_UNUSED(unix_ms);
+  Q_UNUSED(tuned_frequency_hz);
+  if (!IsSelectedReceiver(receiver_id)) {
+    return;
+  }
+  HandleAudioPcmFrame(sample_rate_hz, pcm_s16le);
 }
 
 void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
@@ -1907,23 +1920,13 @@ void MainWindow::CompleteAutoSquelchCalibration() {
                 .arg(auto_squelch_sample_count_));
 }
 
-void MainWindow::HandleAudioPcmEvent(const QString& message) {
+void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) {
 #if MR_HAS_QT_MULTIMEDIA
-  bool sr_ok = false;
-  const int sample_rate_hz = TokenValue(message, "sr").toInt(&sr_ok);
-  if (!sr_ok || sample_rate_hz <= 1000 || sample_rate_hz > 192000) {
+  if (sample_rate_hz <= 1000 || sample_rate_hz > 192000 || pcm.isEmpty()) {
     return;
   }
   EnsureAudioOutputInitialized(sample_rate_hz);
   if (audio_output_disabled_ || audio_output_device_ == nullptr) {
-    return;
-  }
-  const QString data_b64 = TokenValue(message, "data");
-  if (data_b64.isEmpty()) {
-    return;
-  }
-  const QByteArray pcm = QByteArray::fromBase64(data_b64.toUtf8());
-  if (pcm.isEmpty()) {
     return;
   }
   audio_pending_pcm_.append(pcm);
@@ -1951,6 +1954,28 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
     audio_prefill_complete_ = true;
   }
   DrainAudioOutputQueue();
+#else
+  Q_UNUSED(sample_rate_hz);
+  Q_UNUSED(pcm);
+#endif
+}
+
+void MainWindow::HandleAudioPcmEvent(const QString& message) {
+#if MR_HAS_QT_MULTIMEDIA
+  bool sr_ok = false;
+  const int sample_rate_hz = TokenValue(message, "sr").toInt(&sr_ok);
+  if (!sr_ok || sample_rate_hz <= 1000 || sample_rate_hz > 192000) {
+    return;
+  }
+  const QString data_b64 = TokenValue(message, "data");
+  if (data_b64.isEmpty()) {
+    return;
+  }
+  const QByteArray pcm = QByteArray::fromBase64(data_b64.toUtf8());
+  if (pcm.isEmpty()) {
+    return;
+  }
+  HandleAudioPcmFrame(sample_rate_hz, pcm);
 #else
   Q_UNUSED(message);
 #endif

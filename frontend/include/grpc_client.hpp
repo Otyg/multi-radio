@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include <QByteArray>
 #include <QObject>
 #include <QVariantMap>
 #include <grpcpp/grpcpp.h>
@@ -39,20 +40,25 @@ class GrpcClient : public QObject {
                              QString message, quint64 unix_ms);
   void DecodedMessageReceived(uint32_t receiver_id, QString signal_type, double frequency_hz,
                               QString payload, QVariantMap fields, quint64 unix_ms);
+  void AudioFrameReceived(uint32_t receiver_id, int sample_rate_hz, QByteArray pcm_s16le, quint64 unix_ms,
+                          double tuned_frequency_hz);
   void StreamError(QString error);
 
  private:
   void AddAuth(grpc::ClientContext* context) const;
   void EventsLoop();
   void MessagesLoop();
+  void AudioLoop();
 
   std::string token_;
   std::unique_ptr<RadioControlClient> control_client_;
   std::unique_ptr<TelemetryClient> telemetry_client_;
 
   std::atomic<bool> streaming_{false};
+  bool audio_stream_supported_ = true;
   std::thread events_thread_;
   std::thread messages_thread_;
+  std::thread audio_thread_;
 };
 
 }  // namespace multi_radio

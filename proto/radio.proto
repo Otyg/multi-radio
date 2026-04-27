@@ -141,6 +141,15 @@ message StreamDecodedMessagesRequest {
   bool include_all_receivers = 2;
   repeated SignalType signal_filter = 3;
 }
+message StreamAudioFramesRequest { uint32 receiver_id = 1; bool include_all_receivers = 2; }
+
+message AudioFrame {
+  uint64 unix_ms = 1;
+  uint32 receiver_id = 2;
+  uint32 sample_rate_hz = 3;
+  bytes pcm_s16le = 4;
+  double tuned_frequency_hz = 5;
+}
 
 service RadioControlService {
   rpc ListReceivers(ListReceiversRequest) returns (ListReceiversResponse);
@@ -157,4 +166,5 @@ service RadioControlService {
 service TelemetryService {
   rpc StreamReceiverEvents(StreamReceiverEventsRequest) returns (stream ReceiverEvent);
   rpc StreamDecodedMessages(StreamDecodedMessagesRequest) returns (stream DecodedMessage);
+  rpc StreamAudioFrames(StreamAudioFramesRequest) returns (stream AudioFrame);
 }

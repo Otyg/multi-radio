@@ -55,6 +55,8 @@ class MainWindow : public QMainWindow {
                        const QString& message, quint64 unix_ms);
   void OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
                         const QString& payload, const QVariantMap& fields, quint64 unix_ms);
+  void OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& pcm_s16le,
+                    quint64 unix_ms, double tuned_frequency_hz);
   void OnStreamError(const QString& error);
 
  private:
@@ -88,6 +90,7 @@ class MainWindow : public QMainWindow {
   QString ScanListChannelCardText(int index) const;
   QString ScanListChannelCardStyle(int index) const;
   bool IsSelectedReceiver(uint32_t receiver_id) const;
+  void HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm);
   void HandleAudioPcmEvent(const QString& message);
   void EnsureAudioOutputInitialized(int sample_rate_hz);
   void DrainAudioOutputQueue();
