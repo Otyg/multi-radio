@@ -7,9 +7,12 @@
 #include <sstream>
 
 #include <QByteArray>
+#include <QAbstractButton>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -21,6 +24,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QSplitter>
+#include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -38,7 +42,6 @@ constexpr int kScanRangeModeTabIndex = 1;
 constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
-constexpr int kScanListChannelCount = 5;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
@@ -75,6 +78,26 @@ v1::Modulation ModulationFromText(const QString& text) {
     return v1::MODULATION_WFM;
   }
   return v1::MODULATION_NFM;
+}
+
+bool TryParseCsvModulation(const QString& text, v1::Modulation* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  const QString upper = text.trimmed().toUpper();
+  if (upper == "AM") {
+    *out = v1::MODULATION_AM;
+    return true;
+  }
+  if (upper == "WFM" || upper == "WIDEFM" || upper == "FM_BROADCAST") {
+    *out = v1::MODULATION_WFM;
+    return true;
+  }
+  if (upper == "NFM" || upper == "FM") {
+    *out = v1::MODULATION_NFM;
+    return true;
+  }
+  return false;
 }
 
 QString TokenValue(const QString& message, const QString& key) {
@@ -703,21 +726,44 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   auto* list_tab = new QWidget(mode_tabs_);
   auto* list_layout = new QVBoxLayout(list_tab);
-  auto* list_caption = new QLabel("Klicka pa en kanalruta for att konfigurera label, frekvens, modulation, bandbredd, squelch och dwell.", list_tab);
+  auto* list_caption = new QLabel(
+      "Klicka pa en kanalruta for att konfigurera label, frekvens, modulation, bandbredd, squelch och dwell.",
+      list_tab);
   list_caption->setWordWrap(true);
   list_layout->addWidget(list_caption);
-  auto* list_grid = new QGridLayout();
-  list_grid->setHorizontalSpacing(8);
-  list_grid->setVerticalSpacing(8);
-  for (int idx = 0; idx < kScanListChannelCount; ++idx) {
-    auto* channel_button = new QPushButton(list_tab);
-    channel_button->setMinimumHeight(110);
-    channel_button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    scan_list_channel_buttons_[static_cast<size_t>(idx)] = channel_button;
-    list_grid->addWidget(channel_button, idx / 3, idx % 3);
-    connect(channel_button, &QPushButton::clicked, this, [this, idx]() { ConfigureScanListChannel(idx); });
-  }
-  list_layout->addLayout(list_grid);
+
+  auto* list_actions = new QHBoxLayout();
+  auto* add_channel_button = new QPushButton("Add channel", list_tab);
+  auto* import_csv_button = new QPushButton("Import CSV", list_tab);
+  auto* clear_channels_button = new QPushButton("Clear channels", list_tab);
+  list_actions->addWidget(add_channel_button);
+  list_actions->addWidget(import_csv_button);
+  list_actions->addWidget(clear_channels_button);
+  list_actions->addStretch(1);
+  list_layout->addLayout(list_actions);
+
+  scan_list_grid_widget_ = new QWidget(list_tab);
+  scan_list_grid_layout_ = new QGridLayout(scan_list_grid_widget_);
+  scan_list_grid_layout_->setHorizontalSpacing(8);
+  scan_list_grid_layout_->setVerticalSpacing(8);
+  list_layout->addWidget(scan_list_grid_widget_);
+
+  connect(add_channel_button, &QPushButton::clicked, this, &MainWindow::AddScanListChannel);
+  connect(import_csv_button, &QPushButton::clicked, this, &MainWindow::ImportScanListCsv);
+  connect(clear_channels_button, &QPushButton::clicked, this, [this]() {
+    if (QMessageBox::question(this, "Clear channels",
+                              "Remove all scan-list channels?") != QMessageBox::Yes) {
+      return;
+    }
+    scan_list_channels_.clear();
+    active_scan_list_channel_index_ = -1;
+    active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+    SaveScanListConfigToSettings();
+    RefreshScanListChannelCards();
+    if (receiver_combo_->currentIndex() >= 0) {
+      ApplyModeAndConfig();
+    }
+  });
   mode_tabs_->addTab(list_tab, "SCAN_LIST");
 
   auto* air_marine_tab = new QWidget(mode_tabs_);
@@ -937,19 +983,20 @@ void MainWindow::RefreshReceivers() {
       }
       const auto& channels = receiver.mode_config().scan_list_channels();
       if (!channels.empty()) {
-        for (int index = 0; index < kScanListChannelCount; ++index) {
-          ScanListChannelConfig updated = scan_list_channels_[static_cast<size_t>(index)];
-          if (index < channels.size()) {
-            const auto& channel = channels.Get(index);
-            updated.label = QString::fromStdString(channel.label());
-            updated.frequency_mhz = channel.frequency_hz() > 0.0 ? channel.frequency_hz() / 1000000.0 : 0.0;
-            updated.modulation = channel.modulation();
-            updated.bandwidth_hz = static_cast<int>(channel.channel_bandwidth_hz());
-            updated.squelch_threshold_db = channel.squelch_threshold_db();
-            updated.dwell_ms = static_cast<int>(channel.dwell_ms());
-          }
-          scan_list_channels_[static_cast<size_t>(index)] = updated;
+        std::vector<ScanListChannelConfig> updated_channels;
+        updated_channels.reserve(static_cast<size_t>(channels.size()));
+        for (int index = 0; index < channels.size(); ++index) {
+          const auto& channel = channels.Get(index);
+          ScanListChannelConfig updated;
+          updated.label = QString::fromStdString(channel.label());
+          updated.frequency_mhz = channel.frequency_hz() > 0.0 ? channel.frequency_hz() / 1000000.0 : 0.0;
+          updated.modulation = channel.modulation();
+          updated.bandwidth_hz = static_cast<int>(channel.channel_bandwidth_hz());
+          updated.squelch_threshold_db = channel.squelch_threshold_db();
+          updated.dwell_ms = static_cast<int>(channel.dwell_ms());
+          updated_channels.push_back(std::move(updated));
         }
+        scan_list_channels_ = std::move(updated_channels);
       }
       break;
     }
@@ -1230,7 +1277,7 @@ bool MainWindow::IsSelectedReceiver(uint32_t receiver_id) const {
 }
 
 QString MainWindow::ScanListChannelCardText(int index) const {
-  if (index < 0 || index >= kScanListChannelCount) {
+  if (index < 0 || static_cast<size_t>(index) >= scan_list_channels_.size()) {
     return {};
   }
   const auto& channel = scan_list_channels_[static_cast<size_t>(index)];
@@ -1263,21 +1310,50 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
 }
 
 void MainWindow::RefreshScanListChannelCards() {
-  for (int index = 0; index < kScanListChannelCount; ++index) {
-    QPushButton* button = scan_list_channel_buttons_[static_cast<size_t>(index)];
+  if (scan_list_grid_layout_ == nullptr || scan_list_grid_widget_ == nullptr) {
+    return;
+  }
+
+  while (scan_list_channel_buttons_.size() > scan_list_channels_.size()) {
+    QPushButton* button = scan_list_channel_buttons_.back();
+    scan_list_channel_buttons_.pop_back();
+    scan_list_grid_layout_->removeWidget(button);
+    button->deleteLater();
+  }
+
+  while (scan_list_channel_buttons_.size() < scan_list_channels_.size()) {
+    auto* channel_button = new QPushButton(scan_list_grid_widget_);
+    channel_button->setMinimumHeight(110);
+    channel_button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    connect(channel_button, &QPushButton::clicked, this, [this, channel_button]() {
+      const auto it = std::find(scan_list_channel_buttons_.begin(), scan_list_channel_buttons_.end(),
+                                channel_button);
+      if (it == scan_list_channel_buttons_.end()) {
+        return;
+      }
+      const int index = static_cast<int>(std::distance(scan_list_channel_buttons_.begin(), it));
+      ConfigureScanListChannel(index);
+    });
+    scan_list_channel_buttons_.push_back(channel_button);
+  }
+
+  for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
+    QPushButton* button = scan_list_channel_buttons_[idx];
     if (button == nullptr) {
       continue;
     }
+    const int index = static_cast<int>(idx);
     button->setText(ScanListChannelCardText(index));
     button->setStyleSheet(ScanListChannelCardStyle(index));
+    scan_list_grid_layout_->addWidget(button, index / 3, index % 3);
   }
 }
 
 void MainWindow::ConfigureScanListChannel(int index) {
-  if (index < 0 || index >= kScanListChannelCount) {
+  if (index < 0 || static_cast<size_t>(index) >= scan_list_channels_.size()) {
     return;
   }
-  ScanListChannelConfig& channel = scan_list_channels_[static_cast<size_t>(index)];
+  ScanListChannelConfig channel = scan_list_channels_[static_cast<size_t>(index)];
 
   QDialog dialog(this);
   dialog.setWindowTitle(QString("Konfigurera kanal %1").arg(index + 1));
@@ -1331,11 +1407,18 @@ void MainWindow::ConfigureScanListChannel(int index) {
   layout->addRow("Kanal dwell", dwell_spin);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  auto* delete_button = buttons->addButton("Delete", QDialogButtonBox::DestructiveRole);
   layout->addRow(buttons);
   connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
   connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  connect(delete_button, &QPushButton::clicked, &dialog, [&dialog]() { dialog.done(1001); });
 
-  if (dialog.exec() != QDialog::Accepted) {
+  const int dialog_result = dialog.exec();
+  if (dialog_result == 1001) {
+    RemoveScanListChannel(index);
+    return;
+  }
+  if (dialog_result != QDialog::Accepted) {
     return;
   }
 
@@ -1345,11 +1428,136 @@ void MainWindow::ConfigureScanListChannel(int index) {
   channel.bandwidth_hz = bandwidth_spin->value();
   channel.squelch_threshold_db = squelch_spin->value();
   channel.dwell_ms = dwell_spin->value();
+  scan_list_channels_[static_cast<size_t>(index)] = channel;
   SaveScanListConfigToSettings();
   RefreshScanListChannelCards();
 
   if (receiver_combo_->currentIndex() >= 0) {
     ApplyModeAndConfig();
+  }
+}
+
+void MainWindow::AddScanListChannel() {
+  ScanListChannelConfig channel;
+  channel.label = QString("Kanal %1").arg(scan_list_channels_.size() + 1);
+  channel.modulation = v1::MODULATION_NFM;
+  channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
+  scan_list_channels_.push_back(channel);
+  SaveScanListConfigToSettings();
+  RefreshScanListChannelCards();
+}
+
+void MainWindow::RemoveScanListChannel(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= scan_list_channels_.size()) {
+    return;
+  }
+  scan_list_channels_.erase(scan_list_channels_.begin() + index);
+  if (active_scan_list_channel_index_ == index) {
+    active_scan_list_channel_index_ = -1;
+    active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+  } else if (active_scan_list_channel_index_ > index) {
+    --active_scan_list_channel_index_;
+  }
+  SaveScanListConfigToSettings();
+  RefreshScanListChannelCards();
+  if (receiver_combo_->currentIndex() >= 0) {
+    ApplyModeAndConfig();
+  }
+}
+
+void MainWindow::ImportScanListCsv() {
+  const QString path = QFileDialog::getOpenFileName(
+      this, "Import scan-list CSV", QString(), "CSV files (*.csv);;All files (*)");
+  if (path.isEmpty()) {
+    return;
+  }
+
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    QMessageBox::warning(this, "CSV import", QString("Could not open %1").arg(path));
+    return;
+  }
+
+  QTextStream stream(&file);
+  std::vector<ScanListChannelConfig> imported;
+  QStringList errors;
+  int line_number = 0;
+  while (!stream.atEnd()) {
+    const QString raw_line = stream.readLine();
+    ++line_number;
+    const QString line = raw_line.trimmed();
+    if (line.isEmpty() || line.startsWith('#')) {
+      continue;
+    }
+
+    const QStringList columns = line.split(';', Qt::KeepEmptyParts);
+    if (columns.size() < 3) {
+      errors.push_back(QString("Line %1: expected format MHz;modulation;label").arg(line_number));
+      continue;
+    }
+
+    bool frequency_ok = false;
+    const double frequency_mhz = columns[0].trimmed().toDouble(&frequency_ok);
+    if (!frequency_ok || frequency_mhz <= 0.0) {
+      errors.push_back(QString("Line %1: invalid frequency '%2'").arg(line_number).arg(columns[0].trimmed()));
+      continue;
+    }
+
+    v1::Modulation modulation = v1::MODULATION_NFM;
+    if (!TryParseCsvModulation(columns[1], &modulation)) {
+      errors.push_back(QString("Line %1: invalid modulation '%2'").arg(line_number).arg(columns[1].trimmed()));
+      continue;
+    }
+
+    ScanListChannelConfig channel;
+    channel.frequency_mhz = frequency_mhz;
+    channel.modulation = modulation;
+    channel.label = columns.mid(2).join(";").trimmed();
+    if (channel.label.isEmpty()) {
+      channel.label = QString("CSV %1").arg(imported.size() + 1);
+    }
+    channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
+    channel.squelch_threshold_db = -30.0;
+    channel.dwell_ms = 0;
+    imported.push_back(std::move(channel));
+  }
+
+  if (imported.empty()) {
+    const QString details = errors.isEmpty() ? "No channels found in file."
+                                             : errors.mid(0, 10).join("\n");
+    QMessageBox::warning(this, "CSV import", details);
+    return;
+  }
+
+  QMessageBox choice(this);
+  choice.setWindowTitle("CSV import");
+  choice.setText(QString("Imported %1 channels from CSV.").arg(imported.size()));
+  choice.setInformativeText("Do you want to replace existing channels or append to them?");
+  auto* replace_button = choice.addButton("Replace", QMessageBox::AcceptRole);
+  auto* append_button = choice.addButton("Append", QMessageBox::ActionRole);
+  choice.addButton(QMessageBox::Cancel);
+  choice.exec();
+  const QAbstractButton* clicked = choice.clickedButton();
+  if (clicked == nullptr || clicked == choice.button(QMessageBox::Cancel)) {
+    return;
+  }
+
+  if (clicked == replace_button) {
+    scan_list_channels_ = std::move(imported);
+  } else if (clicked == append_button) {
+    scan_list_channels_.insert(scan_list_channels_.end(), imported.begin(), imported.end());
+  } else {
+    return;
+  }
+
+  SaveScanListConfigToSettings();
+  RefreshScanListChannelCards();
+  if (receiver_combo_->currentIndex() >= 0) {
+    ApplyModeAndConfig();
+  }
+
+  if (!errors.isEmpty()) {
+    AppendLog(QString("CSV import warnings:\n%1").arg(errors.mid(0, 10).join("\n")));
   }
 }
 
@@ -1359,7 +1567,7 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
   }
   bool idx_ok = false;
   const int index = TokenValue(message, "idx").toInt(&idx_ok);
-  if (!idx_ok || index < 0 || index >= kScanListChannelCount) {
+  if (!idx_ok || index < 0 || static_cast<size_t>(index) >= scan_list_channels_.size()) {
     return;
   }
   const QString state = TokenValue(message, "state").trimmed().toLower();
@@ -1427,9 +1635,31 @@ void MainWindow::LoadScanListConfigFromSettings() {
     dwell_ms_spin_->setValue(saved_default_dwell);
   }
 
-  for (int index = 0; index < kScanListChannelCount; ++index) {
+  int channel_count = settings.value("count", -1).toInt();
+  if (channel_count < 0) {
+    int max_index = -1;
+    const QStringList groups = settings.childGroups();
+    for (const QString& group : groups) {
+      if (!group.startsWith("channel_")) {
+        continue;
+      }
+      bool ok = false;
+      const int idx = group.mid(8).toInt(&ok);
+      if (ok && idx > max_index) {
+        max_index = idx;
+      }
+    }
+    channel_count = max_index + 1;
+  }
+  if (channel_count <= 0) {
+    channel_count = 5;
+  }
+
+  scan_list_channels_.clear();
+  scan_list_channels_.reserve(static_cast<size_t>(channel_count));
+  for (int index = 0; index < channel_count; ++index) {
+    ScanListChannelConfig channel;
     settings.beginGroup(QString("channel_%1").arg(index));
-    ScanListChannelConfig channel = scan_list_channels_[static_cast<size_t>(index)];
     channel.label = settings.value("label", channel.label).toString();
     channel.frequency_mhz =
         settings.value("frequency_mhz", channel.frequency_mhz).toDouble();
@@ -1451,7 +1681,7 @@ void MainWindow::LoadScanListConfigFromSettings() {
         channel.modulation = v1::MODULATION_NFM;
         break;
     }
-    scan_list_channels_[static_cast<size_t>(index)] = channel;
+    scan_list_channels_.push_back(std::move(channel));
     settings.endGroup();
   }
   settings.endGroup();
@@ -1460,10 +1690,12 @@ void MainWindow::LoadScanListConfigFromSettings() {
 void MainWindow::SaveScanListConfigToSettings() const {
   QSettings settings("multi-radio", "multi-radio-client");
   settings.beginGroup("scan_list");
+  settings.remove("");
   settings.setValue("default_dwell_ms", dwell_ms_spin_->value());
-  for (int index = 0; index < kScanListChannelCount; ++index) {
-    const ScanListChannelConfig& channel = scan_list_channels_[static_cast<size_t>(index)];
-    settings.beginGroup(QString("channel_%1").arg(index));
+  settings.setValue("count", static_cast<int>(scan_list_channels_.size()));
+  for (size_t index = 0; index < scan_list_channels_.size(); ++index) {
+    const ScanListChannelConfig& channel = scan_list_channels_[index];
+    settings.beginGroup(QString("channel_%1").arg(static_cast<qulonglong>(index)));
     settings.setValue("label", channel.label);
     settings.setValue("frequency_mhz", channel.frequency_mhz);
     settings.setValue("modulation", static_cast<int>(channel.modulation));

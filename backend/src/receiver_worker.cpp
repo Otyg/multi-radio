@@ -34,7 +34,6 @@ constexpr uint32_t kMaxCenterNotchWidthHz = 200000;
 constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
-constexpr size_t kMaxScanListChannels = 5;
 constexpr uint32_t kAudioFrameIntervalMs = 80;
 constexpr uint32_t kAudioSampleRateHz = 16000;
 
@@ -119,9 +118,6 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
     const int32_t max_offset =
         std::max<int32_t>(1000, static_cast<int32_t>(static_cast<double>(out.sample_rate_hz) * 0.45));
     out.lo_offset_hz = std::clamp(out.lo_offset_hz, -max_offset, max_offset);
-  }
-  if (out.scan_list_channels.size() > kMaxScanListChannels) {
-    out.scan_list_channels.resize(kMaxScanListChannels);
   }
   for (auto& channel : out.scan_list_channels) {
     if (channel.channel_bandwidth_hz == 0) {

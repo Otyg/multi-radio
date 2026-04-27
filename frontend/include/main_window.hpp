@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -22,6 +21,7 @@
 #include "signal_visualization_widget.hpp"
 
 class QIODevice;
+class QGridLayout;
 #if !defined(MR_HAS_QT_MULTIMEDIA)
 #define MR_HAS_QT_MULTIMEDIA 0
 #endif
@@ -73,6 +73,9 @@ class MainWindow : public QMainWindow {
   bool PassesFilter(const MessageRow& row) const;
   void RefreshScanListChannelCards();
   void ConfigureScanListChannel(int index);
+  void AddScanListChannel();
+  void ImportScanListCsv();
+  void RemoveScanListChannel(int index);
   void ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message);
   QString ScanListChannelCardText(int index) const;
   QString ScanListChannelCardStyle(int index) const;
@@ -124,8 +127,10 @@ class MainWindow : public QMainWindow {
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
-  std::array<ScanListChannelConfig, 5> scan_list_channels_;
-  std::array<QPushButton*, 5> scan_list_channel_buttons_ = {nullptr, nullptr, nullptr, nullptr, nullptr};
+  std::vector<ScanListChannelConfig> scan_list_channels_;
+  std::vector<QPushButton*> scan_list_channel_buttons_;
+  QGridLayout* scan_list_grid_layout_ = nullptr;
+  QWidget* scan_list_grid_widget_ = nullptr;
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
 

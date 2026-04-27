@@ -97,6 +97,22 @@ MR_AUTH_TOKEN=multi-radio-dev-token \
 ./build/frontend/multi_radio_client
 ```
 
+### Scan-list CSV import
+
+`SCAN_LIST` is no longer capped to 5 channels. You can import channels from CSV in the client with:
+
+`<frequency MHz>;<modulation>;<label>`
+
+Examples:
+
+```text
+156.800;NFM;VHF 16
+118.300;AM;ATIS
+98.500;WFM;Broadcast FM
+```
+
+Supported modulation values in import: `AM`, `NFM`, `FM`, `WFM`.
+
 If the client crashes on startup around audio backend initialization, temporarily disable audio output:
 
 ```bash
