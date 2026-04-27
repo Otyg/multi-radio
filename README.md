@@ -113,6 +113,9 @@ Examples:
 
 Supported modulation values in import: `AM`, `NFM`, `FM`, `WFM`.
 
+`SCAN_LIST` also supports `Monitor mode` in the client. In this mode, each channel is treated as
+open for monitoring/audio while frequency hopping continues strictly on dwell timing (no squelch-hold on a channel).
+
 If the client crashes on startup around audio backend initialization, temporarily disable audio output:
 
 ```bash

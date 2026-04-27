@@ -22,6 +22,7 @@
 
 class QIODevice;
 class QGridLayout;
+class QScrollArea;
 #if !defined(MR_HAS_QT_MULTIMEDIA)
 #define MR_HAS_QT_MULTIMEDIA 0
 #endif
@@ -37,6 +38,9 @@ class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(std::string grpc_target, std::string token, QWidget* parent = nullptr);
   ~MainWindow() override;
+
+ protected:
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
  private slots:
   void RefreshReceivers();
@@ -107,6 +111,7 @@ class MainWindow : public QMainWindow {
   QTabWidget* mode_tabs_ = nullptr;
   int last_tab_index_ = -1;
   int last_mode_tab_index_ = 0;
+  QCheckBox* scan_list_monitor_checkbox_ = nullptr;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;
@@ -131,6 +136,7 @@ class MainWindow : public QMainWindow {
   std::vector<QPushButton*> scan_list_channel_buttons_;
   QGridLayout* scan_list_grid_layout_ = nullptr;
   QWidget* scan_list_grid_widget_ = nullptr;
+  QScrollArea* scan_list_scroll_area_ = nullptr;
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
 

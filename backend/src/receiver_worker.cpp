@@ -744,6 +744,7 @@ void ReceiverWorker::RunLoop() {
     uint32_t center_notch_width_hz = kDefaultCenterNotchWidthHz;
     bool lo_offset_enabled = false;
     int32_t lo_offset_hz = 0;
+    bool scan_list_monitor_mode = false;
     int scan_list_channel_index = -1;
     double squelch_threshold_db = -30.0;
     Modulation scan_modulation = Modulation::kNfm;
@@ -767,6 +768,7 @@ void ReceiverWorker::RunLoop() {
       center_notch_width_hz = mode_config_.center_notch_width_hz;
       lo_offset_enabled = mode_config_.lo_offset_enabled;
       lo_offset_hz = mode_config_.lo_offset_hz;
+      scan_list_monitor_mode = mode_config_.scan_list_monitor_mode;
       if (active_mode == RadioMode::kScanList && scan_list_channel_index >= 0 &&
           static_cast<size_t>(scan_list_channel_index) < mode_config_.scan_list_channels.size()) {
         const auto& channel = mode_config_.scan_list_channels[static_cast<size_t>(scan_list_channel_index)];
@@ -863,8 +865,11 @@ void ReceiverWorker::RunLoop() {
     PublishEvent(EventKind::kTuneHop, "tuned", logical_tuned_frequency_hz);
     if (has_scan_squelch) {
       std::ostringstream status;
-      status << "SCAN_STATUS idx=" << scan_list_channel_index << " state=closed"
-             << " signal_db=-120.0 threshold_db=" << FormatDouble(squelch_threshold_db, 1);
+      status << "SCAN_STATUS idx=" << scan_list_channel_index
+             << " state=" << (scan_list_monitor_mode ? "open" : "closed")
+             << " signal_db=" << (scan_list_monitor_mode ? "0.0" : "-120.0")
+             << " threshold_db=" << FormatDouble(squelch_threshold_db, 1)
+             << " monitor=" << (scan_list_monitor_mode ? "1" : "0");
       PublishEvent(EventKind::kInfo, status.str(), logical_tuned_frequency_hz, false);
     }
     lowpass_state.initialized = false;
@@ -876,17 +881,18 @@ void ReceiverWorker::RunLoop() {
     const auto tune_started_at = std::chrono::steady_clock::now();
     const auto dwell_deadline = tune_started_at + std::chrono::milliseconds(dwell_ms);
     std::optional<std::chrono::steady_clock::time_point> squelch_closed_at;
-    bool squelch_open = false;
-    bool squelch_seen_open = false;
+    bool squelch_open = scan_list_monitor_mode && has_scan_squelch;
+    bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
+    const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
     auto next_viz_emit = std::chrono::steady_clock::time_point::min();
     auto next_audio_emit = std::chrono::steady_clock::time_point::min();
 
     while (running_.load()) {
       const auto now = std::chrono::steady_clock::now();
-      if (!has_scan_squelch && now >= dwell_deadline) {
+      if (!hold_on_squelch && now >= dwell_deadline) {
         break;
       }
-      if (has_scan_squelch) {
+      if (hold_on_squelch) {
         if (!squelch_seen_open && now >= dwell_deadline) {
           break;
         }
@@ -937,7 +943,7 @@ void ReceiverWorker::RunLoop() {
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
       const double signal_db = EstimateSignalDbfs(iq);
 
-      if (has_scan_squelch) {
+      if (hold_on_squelch) {
         const bool next_squelch_open = signal_db >= squelch_threshold_db;
         if (next_squelch_open != squelch_open) {
           squelch_open = next_squelch_open;
@@ -954,6 +960,10 @@ void ReceiverWorker::RunLoop() {
                  << " threshold_db=" << FormatDouble(squelch_threshold_db, 1);
           PublishEvent(EventKind::kInfo, status.str(), tuned_frequency_hz, false);
         }
+      } else if (scan_list_monitor_mode && has_scan_squelch) {
+        squelch_open = true;
+        squelch_seen_open = true;
+        squelch_closed_at.reset();
       }
 
       double demod_peak_hz = 0.0;

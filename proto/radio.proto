@@ -51,6 +51,7 @@ message ModeConfig {
   bool lo_offset_enabled = 16;
   int32 lo_offset_hz = 17;
   repeated ScanListChannel scan_list_channels = 18;
+  bool scan_list_monitor_mode = 19;
 }
 
 message ScanListChannel {

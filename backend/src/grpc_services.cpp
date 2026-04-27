@@ -127,6 +127,7 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.center_notch_width_hz = config.center_notch_width_hz();
   out.lo_offset_enabled = config.lo_offset_enabled();
   out.lo_offset_hz = config.lo_offset_hz();
+  out.scan_list_monitor_mode = config.scan_list_monitor_mode();
   return out;
 }
 
@@ -145,6 +146,7 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_center_notch_width_hz(config.center_notch_width_hz);
   out->set_lo_offset_enabled(config.lo_offset_enabled);
   out->set_lo_offset_hz(config.lo_offset_hz);
+  out->set_scan_list_monitor_mode(config.scan_list_monitor_mode);
   out->clear_frequency_list_hz();
   for (double frequency : config.frequency_list_hz) {
     out->add_frequency_list_hz(frequency);

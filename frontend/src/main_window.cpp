@@ -13,6 +13,8 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QEvent>
+#include <QFontMetrics>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -22,6 +24,7 @@
 #include <QMessageBox>
 #include <QIODevice>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSplitter>
 #include <QTextStream>
@@ -731,6 +734,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       list_tab);
   list_caption->setWordWrap(true);
   list_layout->addWidget(list_caption);
+  scan_list_monitor_checkbox_ = new QCheckBox("Monitor mode (hold scan hopping, treat all channels as open)",
+                                              list_tab);
+  scan_list_monitor_checkbox_->setChecked(false);
+  list_layout->addWidget(scan_list_monitor_checkbox_);
 
   auto* list_actions = new QHBoxLayout();
   auto* add_channel_button = new QPushButton("Add channel", list_tab);
@@ -746,10 +753,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   scan_list_grid_layout_ = new QGridLayout(scan_list_grid_widget_);
   scan_list_grid_layout_->setHorizontalSpacing(8);
   scan_list_grid_layout_->setVerticalSpacing(8);
-  list_layout->addWidget(scan_list_grid_widget_);
+  scan_list_scroll_area_ = new QScrollArea(list_tab);
+  scan_list_scroll_area_->setWidgetResizable(true);
+  scan_list_scroll_area_->setWidget(scan_list_grid_widget_);
+  scan_list_scroll_area_->viewport()->installEventFilter(this);
+  list_layout->addWidget(scan_list_scroll_area_);
 
   connect(add_channel_button, &QPushButton::clicked, this, &MainWindow::AddScanListChannel);
   connect(import_csv_button, &QPushButton::clicked, this, &MainWindow::ImportScanListCsv);
+  connect(scan_list_monitor_checkbox_, &QCheckBox::toggled, this, [this](bool /*enabled*/) {
+    SaveScanListConfigToSettings();
+    if (receiver_combo_->currentIndex() >= 0) {
+      ApplyModeAndConfig();
+    }
+  });
   connect(clear_channels_button, &QPushButton::clicked, this, [this]() {
     if (QMessageBox::question(this, "Clear channels",
                               "Remove all scan-list channels?") != QMessageBox::Yes) {
@@ -941,6 +958,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
 MainWindow::~MainWindow() { client_->StopStreaming(); }
 
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+  if (scan_list_scroll_area_ != nullptr && watched == scan_list_scroll_area_->viewport() &&
+      event != nullptr && event->type() == QEvent::Resize) {
+    RefreshScanListChannelCards();
+  }
+  return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::RefreshReceivers() {
   std::vector<v1::ReceiverInfo> receivers;
   std::string error;
@@ -998,6 +1023,7 @@ void MainWindow::RefreshReceivers() {
         }
         scan_list_channels_ = std::move(updated_channels);
       }
+      scan_list_monitor_checkbox_->setChecked(receiver.mode_config().scan_list_monitor_mode());
       break;
     }
   }
@@ -1072,6 +1098,8 @@ void MainWindow::ApplyModeAndConfig() {
   config.set_center_notch_width_hz(static_cast<uint32_t>(center_notch_width_spin_->value()));
   config.set_lo_offset_enabled(lo_offset_checkbox_->isChecked());
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
+  config.set_scan_list_monitor_mode(
+      scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
 
   config.clear_scan_list_channels();
   config.clear_frequency_list_hz();
@@ -1323,8 +1351,8 @@ void MainWindow::RefreshScanListChannelCards() {
 
   while (scan_list_channel_buttons_.size() < scan_list_channels_.size()) {
     auto* channel_button = new QPushButton(scan_list_grid_widget_);
-    channel_button->setMinimumHeight(110);
-    channel_button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    channel_button->setMinimumHeight(84);
+    channel_button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     connect(channel_button, &QPushButton::clicked, this, [this, channel_button]() {
       const auto it = std::find(scan_list_channel_buttons_.begin(), scan_list_channel_buttons_.end(),
                                 channel_button);
@@ -1337,15 +1365,51 @@ void MainWindow::RefreshScanListChannelCards() {
     scan_list_channel_buttons_.push_back(channel_button);
   }
 
+  int max_text_width = 0;
   for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
     QPushButton* button = scan_list_channel_buttons_[idx];
     if (button == nullptr) {
       continue;
     }
     const int index = static_cast<int>(idx);
-    button->setText(ScanListChannelCardText(index));
+    const QString text = ScanListChannelCardText(index);
+    button->setText(text);
     button->setStyleSheet(ScanListChannelCardStyle(index));
-    scan_list_grid_layout_->addWidget(button, index / 3, index % 3);
+    const QFontMetrics metrics(button->font());
+    const QStringList lines = text.split('\n');
+    int button_text_width = 0;
+    for (const QString& line : lines) {
+      button_text_width = std::max(button_text_width, metrics.horizontalAdvance(line));
+    }
+    max_text_width = std::max(max_text_width, button_text_width);
+  }
+
+  const int button_width = std::max(220, max_text_width + 38);
+  int columns = 1;
+  if (scan_list_scroll_area_ != nullptr && scan_list_scroll_area_->viewport() != nullptr) {
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+    scan_list_grid_layout_->getContentsMargins(&left, &top, &right, &bottom);
+    int spacing = scan_list_grid_layout_->horizontalSpacing();
+    if (spacing < 0) {
+      spacing = 8;
+    }
+    const int available_width =
+        std::max(0, scan_list_scroll_area_->viewport()->width() - left - right);
+    columns = std::max(1, (available_width + spacing) / (button_width + spacing));
+  }
+
+  for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
+    QPushButton* button = scan_list_channel_buttons_[idx];
+    if (button == nullptr) {
+      continue;
+    }
+    button->setFixedWidth(button_width);
+    const int index = static_cast<int>(idx);
+    scan_list_grid_layout_->addWidget(button, index / columns, index % columns,
+                                      Qt::AlignLeft | Qt::AlignTop);
   }
 }
 
@@ -1634,6 +1698,9 @@ void MainWindow::LoadScanListConfigFromSettings() {
   if (saved_default_dwell > 0) {
     dwell_ms_spin_->setValue(saved_default_dwell);
   }
+  if (scan_list_monitor_checkbox_ != nullptr) {
+    scan_list_monitor_checkbox_->setChecked(settings.value("monitor_mode", false).toBool());
+  }
 
   int channel_count = settings.value("count", -1).toInt();
   if (channel_count < 0) {
@@ -1692,6 +1759,8 @@ void MainWindow::SaveScanListConfigToSettings() const {
   settings.beginGroup("scan_list");
   settings.remove("");
   settings.setValue("default_dwell_ms", dwell_ms_spin_->value());
+  settings.setValue("monitor_mode",
+                    scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
   settings.setValue("count", static_cast<int>(scan_list_channels_.size()));
   for (size_t index = 0; index < scan_list_channels_.size(); ++index) {
     const ScanListChannelConfig& channel = scan_list_channels_[index];

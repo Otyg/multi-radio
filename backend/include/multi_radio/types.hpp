@@ -62,6 +62,7 @@ struct ModeConfig {
   uint32_t center_notch_width_hz = 2000;
   bool lo_offset_enabled = false;
   int32_t lo_offset_hz = 0;
+  bool scan_list_monitor_mode = false;
 };
 
 struct ReceiverDescriptor {
