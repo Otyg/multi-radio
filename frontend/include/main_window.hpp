@@ -94,6 +94,7 @@ class MainWindow : public QMainWindow {
   void HandleAudioPcmEvent(const QString& message);
   void EnsureAudioOutputInitialized(int sample_rate_hz);
   void DrainAudioOutputQueue();
+  void MaybeEmitFrontendAudioStats();
   void LoadScanListConfigFromSettings();
   void SaveScanListConfigToSettings() const;
 
@@ -173,6 +174,18 @@ class MainWindow : public QMainWindow {
   qint64 audio_prefill_started_at_ms_ = 0;
   bool audio_queue_overrun_logged_ = false;
   bool audio_output_disabled_ = false;
+  qint64 audio_backend_stats_last_seen_at_ms_ = 0;
+  qint64 audio_frontend_stats_window_started_at_ms_ = 0;
+  int audio_frontend_last_rx_sample_rate_hz_ = 0;
+  quint64 audio_frontend_rx_frames_ = 0;
+  quint64 audio_frontend_rx_bytes_ = 0;
+  quint64 audio_frontend_filtered_frames_ = 0;
+  quint64 audio_frontend_prefill_wait_events_ = 0;
+  quint64 audio_frontend_prefill_complete_events_ = 0;
+  quint64 audio_frontend_write_calls_ = 0;
+  quint64 audio_frontend_written_bytes_ = 0;
+  quint64 audio_frontend_write_blocked_events_ = 0;
+  quint64 audio_frontend_overrun_dropped_bytes_ = 0;
 };
 
 }  // namespace multi_radio

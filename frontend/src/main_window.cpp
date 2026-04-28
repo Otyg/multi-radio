@@ -53,6 +53,7 @@ constexpr double kDefaultScanListSquelchDb = -67.5;
 constexpr int kAudioPrefillMs = 180;
 constexpr int kAudioPrefillMaxWaitMs = 450;
 constexpr int kAudioMinStartupMs = 40;
+constexpr int kAudioFrontendStatsIntervalMs = 1000;
 constexpr int kAudioSinkBufferMs = 3000;
 constexpr int kAudioPendingMaxMs = 6000;
 constexpr int kAudioDrainIntervalMs = 10;
@@ -1298,6 +1299,7 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     if (!IsSelectedReceiver(receiver_id)) {
       return;
     }
+    audio_backend_stats_last_seen_at_ms_ = QDateTime::currentMSecsSinceEpoch();
     bool idx_ok = false;
     const int channel_index = TokenValue(message, "idx").toInt(&idx_ok);
     QString channel_label;
@@ -1399,9 +1401,15 @@ void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QB
   Q_UNUSED(unix_ms);
   Q_UNUSED(tuned_frequency_hz);
   if (!IsSelectedReceiver(receiver_id)) {
+    ++audio_frontend_filtered_frames_;
+    MaybeEmitFrontendAudioStats();
     return;
   }
+  ++audio_frontend_rx_frames_;
+  audio_frontend_rx_bytes_ += static_cast<quint64>(pcm_s16le.size());
+  audio_frontend_last_rx_sample_rate_hz_ = sample_rate_hz;
   HandleAudioPcmFrame(sample_rate_hz, pcm_s16le);
+  MaybeEmitFrontendAudioStats();
 }
 
 void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
@@ -2017,6 +2025,7 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
     dropped -= dropped % kAudioBytesPerSample;
     if (dropped > 0) {
       audio_pending_pcm_.remove(0, dropped);
+      audio_frontend_overrun_dropped_bytes_ += static_cast<quint64>(dropped);
     }
     if (!audio_queue_overrun_logged_) {
       AppendLog(QString("Audio queue overrun: dropped %1 bytes").arg(dropped));
@@ -2034,11 +2043,15 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
                                    now_ms >= audio_prefill_started_at_ms_ + kAudioPrefillMaxWaitMs;
     if (audio_pending_pcm_.size() < prefill_bytes &&
         (!prefill_timed_out || audio_pending_pcm_.size() < min_start_bytes)) {
+      ++audio_frontend_prefill_wait_events_;
+      MaybeEmitFrontendAudioStats();
       return;
     }
     audio_prefill_complete_ = true;
+    ++audio_frontend_prefill_complete_events_;
   }
   DrainAudioOutputQueue();
+  MaybeEmitFrontendAudioStats();
 #else
   Q_UNUSED(sample_rate_hz);
   Q_UNUSED(pcm);
@@ -2120,6 +2133,7 @@ void MainWindow::DrainAudioOutputQueue() {
 #if MR_HAS_QT_MULTIMEDIA
   if (audio_output_disabled_ || audio_output_device_ == nullptr || !audio_prefill_complete_ ||
       audio_pending_pcm_.isEmpty()) {
+    MaybeEmitFrontendAudioStats();
     return;
   }
   while (!audio_pending_pcm_.isEmpty()) {
@@ -2127,25 +2141,90 @@ void MainWindow::DrainAudioOutputQueue() {
     if (audio_sink_ != nullptr) {
       const qint64 bytes_free = audio_sink_->bytesFree();
       if (bytes_free <= 0) {
+        ++audio_frontend_write_blocked_events_;
+        MaybeEmitFrontendAudioStats();
         return;
       }
       bytes_to_write = std::min(bytes_to_write, bytes_free);
     }
     bytes_to_write -= (bytes_to_write % kAudioBytesPerSample);
     if (bytes_to_write <= 0) {
+      ++audio_frontend_write_blocked_events_;
+      MaybeEmitFrontendAudioStats();
       return;
     }
     const qint64 written = audio_output_device_->write(audio_pending_pcm_.constData(), bytes_to_write);
     if (written <= 0) {
+      ++audio_frontend_write_blocked_events_;
+      MaybeEmitFrontendAudioStats();
       return;
     }
     const qint64 aligned_written = written - (written % kAudioBytesPerSample);
     if (aligned_written <= 0) {
+      ++audio_frontend_write_blocked_events_;
+      MaybeEmitFrontendAudioStats();
       return;
     }
+    ++audio_frontend_write_calls_;
+    audio_frontend_written_bytes_ += static_cast<quint64>(aligned_written);
     audio_pending_pcm_.remove(0, static_cast<int>(aligned_written));
   }
+  MaybeEmitFrontendAudioStats();
 #endif
+}
+
+void MainWindow::MaybeEmitFrontendAudioStats() {
+  const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+  if (audio_frontend_stats_window_started_at_ms_ <= 0) {
+    audio_frontend_stats_window_started_at_ms_ = now_ms;
+  }
+  if (now_ms < audio_frontend_stats_window_started_at_ms_ + kAudioFrontendStatsIntervalMs) {
+    return;
+  }
+
+  const qint64 pending_bytes = static_cast<qint64>(audio_pending_pcm_.size());
+#if MR_HAS_QT_MULTIMEDIA
+  const qint64 sink_bytes_free = (audio_sink_ != nullptr) ? audio_sink_->bytesFree() : -1;
+#else
+  const qint64 sink_bytes_free = -1;
+#endif
+  const int backend_seen_recent =
+      (audio_backend_stats_last_seen_at_ms_ > 0 &&
+       now_ms <= audio_backend_stats_last_seen_at_ms_ + (kAudioFrontendStatsIntervalMs * 2))
+          ? 1
+          : 0;
+
+  AppendLog(QString("AUDIO_FE_STATS rx_f=%1 rx_b=%2 filt_f=%3 rx_sr=%4 out_sr=%5 "
+                    "prefill=%6 wait=%7 ready=%8 pend_b=%9 write_c=%10 write_b=%11 "
+                    "blocked=%12 overrun_b=%13 out_dis=%14 out_dev=%15 sink_free=%16 backend_seen=%17")
+                .arg(audio_frontend_rx_frames_)
+                .arg(audio_frontend_rx_bytes_)
+                .arg(audio_frontend_filtered_frames_)
+                .arg(audio_frontend_last_rx_sample_rate_hz_)
+                .arg(audio_output_sample_rate_hz_)
+                .arg(audio_prefill_complete_ ? 1 : 0)
+                .arg(audio_frontend_prefill_wait_events_)
+                .arg(audio_frontend_prefill_complete_events_)
+                .arg(pending_bytes)
+                .arg(audio_frontend_write_calls_)
+                .arg(audio_frontend_written_bytes_)
+                .arg(audio_frontend_write_blocked_events_)
+                .arg(audio_frontend_overrun_dropped_bytes_)
+                .arg(audio_output_disabled_ ? 1 : 0)
+                .arg(audio_output_device_ != nullptr ? 1 : 0)
+                .arg(sink_bytes_free)
+                .arg(backend_seen_recent));
+
+  audio_frontend_rx_frames_ = 0;
+  audio_frontend_rx_bytes_ = 0;
+  audio_frontend_filtered_frames_ = 0;
+  audio_frontend_prefill_wait_events_ = 0;
+  audio_frontend_prefill_complete_events_ = 0;
+  audio_frontend_write_calls_ = 0;
+  audio_frontend_written_bytes_ = 0;
+  audio_frontend_write_blocked_events_ = 0;
+  audio_frontend_overrun_dropped_bytes_ = 0;
+  audio_frontend_stats_window_started_at_ms_ = now_ms;
 }
 
 void MainWindow::LoadScanListConfigFromSettings() {
