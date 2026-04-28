@@ -99,4 +99,9 @@ std::optional<AudioFrame> EventBus::WaitForAudioFrame(size_t* cursor, uint32_t t
   return value;
 }
 
+size_t EventBus::AudioFrameCursorNow() {
+  std::lock_guard<std::mutex> lock(audio_frames_mu_);
+  return audio_base_index_ + audio_frames_.size();
+}
+
 }  // namespace multi_radio

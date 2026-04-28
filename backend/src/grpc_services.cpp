@@ -404,7 +404,9 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
       return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
     }
 
-    size_t cursor = 0;
+    // Audio should be live-only for new subscribers. Starting from the current
+    // tail avoids replaying buffered historical frames at connect time.
+    size_t cursor = event_bus_->AudioFrameCursorNow();
     while (!context->IsCancelled()) {
       auto frame = event_bus_->WaitForAudioFrame(&cursor, 1000);
       if (!frame.has_value()) {

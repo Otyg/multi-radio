@@ -22,6 +22,7 @@ class EventBus {
   std::optional<ReceiverEvent> WaitForReceiverEvent(size_t* cursor, uint32_t timeout_ms);
   std::optional<DecodedMessage> WaitForDecodedMessage(size_t* cursor, uint32_t timeout_ms);
   std::optional<AudioFrame> WaitForAudioFrame(size_t* cursor, uint32_t timeout_ms);
+  size_t AudioFrameCursorNow();
 
  private:
   const size_t max_messages_;
