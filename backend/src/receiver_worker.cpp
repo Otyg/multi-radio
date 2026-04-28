@@ -37,9 +37,10 @@ constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
-// Keep a fixed, conservative output rate to avoid real-time underflow when the
-// receiver loop cannot sustain enough demodulated samples for 48 kHz output.
-constexpr uint32_t kAudioSampleRateHz = 16000;
+// Keep output rate low enough to match observed end-to-end throughput in scan mode.
+// This avoids persistent sink underflow (audible silence/chirps) when the receiver
+// loop cannot sustain higher real-time audio rates.
+constexpr uint32_t kAudioSampleRateHz = 6000;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
