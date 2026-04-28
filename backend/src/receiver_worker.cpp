@@ -40,7 +40,7 @@ constexpr uint32_t kAudioFrameIntervalMs = 20;
 // Keep output rate low enough to match observed end-to-end throughput in scan mode.
 // This avoids persistent sink underflow (audible silence/chirps) when the receiver
 // loop cannot sustain higher real-time audio rates.
-constexpr uint32_t kAudioSampleRateHz = 6000;
+constexpr uint32_t kAudioSampleRateHz = 16000;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;

@@ -1435,6 +1435,9 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   };
 
   const QString kind = field_text("kind");
+  if (kind == "candidate") {
+    return;
+  }
   if (signal_type == "SIGNAL_TYPE_AIS" && kind == "metric") {
     const QString channel = field_text("channel");
     auto parse_u64 = [&field_text](const QString& key, quint64 fallback = 0) -> quint64 {
