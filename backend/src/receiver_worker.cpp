@@ -1087,6 +1087,9 @@ void ReceiverWorker::RunLoop() {
     bool squelch_open = scan_list_monitor_mode && has_scan_squelch;
     bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
+    // Keep audio flowing for the full channel visit to avoid short, stitched clips when
+    // squelch state chatters or never reaches a stable "open" transition.
+    bool audio_gate_open_until_channel_hop = has_scan_squelch;
     std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
     std::optional<std::chrono::steady_clock::time_point> squelch_close_candidate_at;
     double last_signal_db = -120.0;
@@ -1149,6 +1152,17 @@ void ReceiverWorker::RunLoop() {
       }
       iq.center_frequency_hz = static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz));
 
+      double receiver_peak_hz = 0.0;
+      double receiver_peak_strength = 0.0;
+      double receiver_start_hz = 0.0;
+      double receiver_end_hz = 0.0;
+      std::vector<double> receiver_waveform;
+      std::vector<double> receiver_spectrum;
+      const bool have_receiver_frame =
+          BuildReceiverSpectrumFrame(iq, tuned_frequency_hz, channel_bandwidth_hz, &receiver_waveform,
+                                     &receiver_spectrum, &receiver_peak_hz, &receiver_peak_strength,
+                                     &receiver_start_hz, &receiver_end_hz);
+
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
       const double signal_db = EstimateSignalDbfs(iq);
       last_signal_db = signal_db;
@@ -1175,6 +1189,7 @@ void ReceiverWorker::RunLoop() {
         if (next_squelch_open != squelch_open) {
           squelch_open = next_squelch_open;
           if (squelch_open) {
+            audio_gate_open_until_channel_hop = true;
             squelch_close_candidate_at.reset();
             squelch_seen_open = true;
             squelch_closed_at.reset();
@@ -1227,9 +1242,7 @@ void ReceiverWorker::RunLoop() {
           next_scan_status_emit = now + std::chrono::milliseconds(kScanStatusIntervalMs);
         }
       }
-      const bool signal_gate_open = !has_scan_squelch || squelch_open;
-      const bool audio_gate_open = has_scan_squelch && squelch_open;
-      const bool emit_viz_this_tick = signal_gate_open && now >= next_viz_emit;
+      const bool audio_gate_open = has_scan_squelch && (squelch_open || audio_gate_open_until_channel_hop);
       if (has_scan_squelch) {
         ++audio_stats_iq_blocks;
         if (audio_gate_open) {
@@ -1237,74 +1250,60 @@ void ReceiverWorker::RunLoop() {
         }
       }
 
-      double receiver_peak_hz = 0.0;
-      double receiver_peak_strength = 0.0;
-      double receiver_start_hz = 0.0;
-      double receiver_end_hz = 0.0;
-      std::vector<double> receiver_waveform;
-      std::vector<double> receiver_spectrum;
-      bool have_receiver_frame = false;
-      if (emit_viz_this_tick) {
-        have_receiver_frame =
-            BuildReceiverSpectrumFrame(iq, tuned_frequency_hz, channel_bandwidth_hz, &receiver_waveform,
-                                       &receiver_spectrum, &receiver_peak_hz, &receiver_peak_strength,
-                                       &receiver_start_hz, &receiver_end_hz);
-      }
-
       double demod_peak_hz = 0.0;
       double demod_peak_strength = 0.0;
       std::vector<double> demod_waveform;
       std::vector<double> demod_spectrum;
-      bool have_demod_frame = false;
-      if (emit_viz_this_tick) {
-        have_demod_frame = BuildDemodVisualizationFrame(
-            iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
+      bool have_demod_frame = BuildDemodVisualizationFrame(
+          iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
+      if (has_scan_squelch && !audio_gate_open) {
+        demod_waveform.assign(kWaveformPoints, 0.5);
+        demod_spectrum.assign(kSpectrumBins, 0.0);
+        demod_peak_hz = 0.0;
+        demod_peak_strength = 0.0;
+        have_demod_frame = true;
       }
 
-      if (signal_gate_open) {
-        plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
-          DecodedMessage msg;
-          msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
-          msg.receiver_id = receiver_id_;
-          msg.signal_type = plugin_msg.signal_type;
-          msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? tuned_frequency_hz : plugin_msg.frequency_hz;
-          msg.payload = plugin_msg.payload;
-          msg.normalized_fields = plugin_msg.normalized_fields;
-          if (have_demod_frame) {
-            msg.normalized_fields["demod_peak_hz"] = FormatDouble(demod_peak_hz, 1);
-            msg.normalized_fields["demod_peak_strength"] = FormatDouble(demod_peak_strength, 3);
-          }
-          event_bus_->PublishDecodedMessage(msg);
-          logger_->LogDecodedMessage(msg);
-        });
-
-        if (emit_viz_this_tick) {
-          if (have_demod_frame) {
-            const double demod_start_hz = 0.0;
-            const double demod_end_hz =
-                std::max(1.0, std::min(20000.0, static_cast<double>(iq.sample_rate_hz) * 0.5 - 1.0));
-            std::ostringstream viz_message;
-            viz_message << "VIZ_FRAME source=demod start_hz=" << FormatDouble(demod_start_hz, 1)
-                        << " end_hz=" << FormatDouble(demod_end_hz, 1)
-                        << " peak_hz=" << FormatDouble(demod_peak_hz, 1)
-                        << " peak_strength=" << FormatDouble(demod_peak_strength, 3)
-                        << " waveform=" << FormatSeries(demod_waveform, 4)
-                        << " spectrum=" << FormatSeries(demod_spectrum, 4);
-            PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
-          }
-          if (have_receiver_frame) {
-            std::ostringstream viz_message;
-            viz_message << "VIZ_FRAME source=receiver start_hz=" << FormatDouble(receiver_start_hz, 1)
-                        << " end_hz=" << FormatDouble(receiver_end_hz, 1)
-                        << " peak_hz=" << FormatDouble(receiver_peak_hz, 1)
-                        << " peak_strength=" << FormatDouble(receiver_peak_strength, 3)
-                        << " waveform=" << FormatSeries(receiver_waveform, 4)
-                        << " spectrum=" << FormatSeries(receiver_spectrum, 4);
-            PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
-          }
+      plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
+        DecodedMessage msg;
+        msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
+        msg.receiver_id = receiver_id_;
+        msg.signal_type = plugin_msg.signal_type;
+        msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? tuned_frequency_hz : plugin_msg.frequency_hz;
+        msg.payload = plugin_msg.payload;
+        msg.normalized_fields = plugin_msg.normalized_fields;
+        if (have_demod_frame) {
+          msg.normalized_fields["demod_peak_hz"] = FormatDouble(demod_peak_hz, 1);
+          msg.normalized_fields["demod_peak_strength"] = FormatDouble(demod_peak_strength, 3);
         }
-      }
-      if (emit_viz_this_tick) {
+        event_bus_->PublishDecodedMessage(msg);
+        logger_->LogDecodedMessage(msg);
+      });
+
+      if (now >= next_viz_emit) {
+        if (have_demod_frame) {
+          const double demod_start_hz = 0.0;
+          const double demod_end_hz =
+              std::max(1.0, std::min(20000.0, static_cast<double>(iq.sample_rate_hz) * 0.5 - 1.0));
+          std::ostringstream viz_message;
+          viz_message << "VIZ_FRAME source=demod start_hz=" << FormatDouble(demod_start_hz, 1)
+                      << " end_hz=" << FormatDouble(demod_end_hz, 1)
+                      << " peak_hz=" << FormatDouble(demod_peak_hz, 1)
+                      << " peak_strength=" << FormatDouble(demod_peak_strength, 3)
+                      << " waveform=" << FormatSeries(demod_waveform, 4)
+                      << " spectrum=" << FormatSeries(demod_spectrum, 4);
+          PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+        }
+        if (have_receiver_frame) {
+          std::ostringstream viz_message;
+          viz_message << "VIZ_FRAME source=receiver start_hz=" << FormatDouble(receiver_start_hz, 1)
+                      << " end_hz=" << FormatDouble(receiver_end_hz, 1)
+                      << " peak_hz=" << FormatDouble(receiver_peak_hz, 1)
+                      << " peak_strength=" << FormatDouble(receiver_peak_strength, 3)
+                      << " waveform=" << FormatSeries(receiver_waveform, 4)
+                      << " spectrum=" << FormatSeries(receiver_spectrum, 4);
+          PublishEvent(EventKind::kInfo, viz_message.str(), tuned_frequency_hz, false);
+        }
         next_viz_emit = now + std::chrono::milliseconds(kVisualizationFrameIntervalMs);
       }
 
@@ -1381,7 +1380,7 @@ void ReceiverWorker::RunLoop() {
         next_audio_stats_emit = now + std::chrono::milliseconds(kAudioStatsIntervalMs);
       }
     }
-    if (has_scan_squelch && squelch_open && !audio_pcm_buffer.empty()) {
+    if (has_scan_squelch && !audio_pcm_buffer.empty()) {
       AudioFrame frame;
       frame.unix_ms = UnixMillisNow();
       frame.receiver_id = receiver_id_;
