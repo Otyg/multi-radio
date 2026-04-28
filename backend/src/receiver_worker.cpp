@@ -36,11 +36,10 @@ constexpr uint32_t kMaxCenterNotchWidthHz = 200000;
 constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
-constexpr uint32_t kAudioFrameIntervalMs = 20;
-// Keep output rate low enough to match observed end-to-end throughput in scan mode.
-// This avoids persistent sink underflow (audible silence/chirps) when the receiver
-// loop cannot sustain higher real-time audio rates.
-constexpr uint32_t kAudioSampleRateHz = 16000;
+constexpr uint32_t kAudioFrameIntervalMs = 40;
+// Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
+// stitched fragments when scan processing load spikes.
+constexpr uint32_t kAudioSampleRateHz = 8000;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
@@ -1087,9 +1086,8 @@ void ReceiverWorker::RunLoop() {
     bool squelch_open = scan_list_monitor_mode && has_scan_squelch;
     bool squelch_seen_open = scan_list_monitor_mode && has_scan_squelch;
     const bool hold_on_squelch = has_scan_squelch && !scan_list_monitor_mode;
-    // Keep audio flowing for the full channel visit to avoid short, stitched clips when
-    // squelch state chatters or never reaches a stable "open" transition.
-    bool audio_gate_open_until_channel_hop = has_scan_squelch;
+    // Latch media/decode gates after first squelch-open and keep them open until channel hop.
+    bool gate_open_until_channel_hop = scan_list_monitor_mode && has_scan_squelch;
     std::optional<std::chrono::steady_clock::time_point> squelch_opened_at;
     std::optional<std::chrono::steady_clock::time_point> squelch_close_candidate_at;
     double last_signal_db = -120.0;
@@ -1189,7 +1187,7 @@ void ReceiverWorker::RunLoop() {
         if (next_squelch_open != squelch_open) {
           squelch_open = next_squelch_open;
           if (squelch_open) {
-            audio_gate_open_until_channel_hop = true;
+            gate_open_until_channel_hop = true;
             squelch_close_candidate_at.reset();
             squelch_seen_open = true;
             squelch_closed_at.reset();
@@ -1242,7 +1240,8 @@ void ReceiverWorker::RunLoop() {
           next_scan_status_emit = now + std::chrono::milliseconds(kScanStatusIntervalMs);
         }
       }
-      const bool audio_gate_open = has_scan_squelch && (squelch_open || audio_gate_open_until_channel_hop);
+      const bool signal_gate_open = !has_scan_squelch || squelch_open || gate_open_until_channel_hop;
+      const bool audio_gate_open = has_scan_squelch && (squelch_open || gate_open_until_channel_hop);
       if (has_scan_squelch) {
         ++audio_stats_iq_blocks;
         if (audio_gate_open) {
@@ -1264,21 +1263,23 @@ void ReceiverWorker::RunLoop() {
         have_demod_frame = true;
       }
 
-      plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
-        DecodedMessage msg;
-        msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
-        msg.receiver_id = receiver_id_;
-        msg.signal_type = plugin_msg.signal_type;
-        msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? tuned_frequency_hz : plugin_msg.frequency_hz;
-        msg.payload = plugin_msg.payload;
-        msg.normalized_fields = plugin_msg.normalized_fields;
-        if (have_demod_frame) {
-          msg.normalized_fields["demod_peak_hz"] = FormatDouble(demod_peak_hz, 1);
-          msg.normalized_fields["demod_peak_strength"] = FormatDouble(demod_peak_strength, 3);
-        }
-        event_bus_->PublishDecodedMessage(msg);
-        logger_->LogDecodedMessage(msg);
-      });
+      if (signal_gate_open) {
+        plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
+          DecodedMessage msg;
+          msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
+          msg.receiver_id = receiver_id_;
+          msg.signal_type = plugin_msg.signal_type;
+          msg.frequency_hz = plugin_msg.frequency_hz == 0.0 ? tuned_frequency_hz : plugin_msg.frequency_hz;
+          msg.payload = plugin_msg.payload;
+          msg.normalized_fields = plugin_msg.normalized_fields;
+          if (have_demod_frame) {
+            msg.normalized_fields["demod_peak_hz"] = FormatDouble(demod_peak_hz, 1);
+            msg.normalized_fields["demod_peak_strength"] = FormatDouble(demod_peak_strength, 3);
+          }
+          event_bus_->PublishDecodedMessage(msg);
+          logger_->LogDecodedMessage(msg);
+        });
+      }
 
       if (now >= next_viz_emit) {
         if (have_demod_frame) {
