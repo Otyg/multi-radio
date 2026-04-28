@@ -173,6 +173,7 @@ class MainWindow : public QMainWindow {
   bool audio_prefill_complete_ = false;
   qint64 audio_prefill_started_at_ms_ = 0;
   bool audio_queue_overrun_logged_ = false;
+  bool audio_output_disabled_by_env_ = false;
   bool audio_output_disabled_ = false;
   qint64 audio_backend_stats_last_seen_at_ms_ = 0;
   qint64 audio_frontend_stats_window_started_at_ms_ = 0;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <sstream>
 
@@ -919,6 +920,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   RefreshScanListChannelCards();
 
   audio_output_disabled_ = EnvFlagEnabled("MR_DISABLE_AUDIO_OUTPUT");
+  audio_output_disabled_by_env_ = audio_output_disabled_;
   if (audio_output_disabled_) {
     AppendLog("Audio output disabled by MR_DISABLE_AUDIO_OUTPUT");
   } else if (IsWslEnvironment() && !EnvFlagEnabled("MR_ENABLE_AUDIO_OUTPUT")) {
@@ -2080,9 +2082,11 @@ void MainWindow::HandleAudioPcmEvent(const QString& message) {
 
 void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
 #if MR_HAS_QT_MULTIMEDIA
-  if (audio_output_disabled_) {
+  if (audio_output_disabled_ && audio_output_disabled_by_env_) {
     return;
   }
+  // Recover from transient init failures; only env flag should hard-disable audio.
+  audio_output_disabled_ = false;
   if (audio_sink_ != nullptr && audio_output_sample_rate_hz_ != sample_rate_hz) {
     audio_sink_->stop();
     audio_sink_->deleteLater();
@@ -2099,32 +2103,64 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
   }
   const QAudioDevice default_output = QMediaDevices::defaultAudioOutput();
   if (default_output.isNull()) {
-    audio_output_disabled_ = true;
-    AppendLog("Audio output unavailable (no default output device)");
+    AppendLog("Audio output unavailable: no default output device (will retry)");
     return;
   }
+
   QAudioFormat audio_format;
-  audio_format.setSampleRate(sample_rate_hz);
   audio_format.setChannelCount(1);
   audio_format.setSampleFormat(QAudioFormat::Int16);
+  audio_format.setSampleRate(sample_rate_hz);
+
+  if (!default_output.isFormatSupported(audio_format)) {
+    const int candidates[] = {sample_rate_hz, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000};
+    int selected_rate_hz = 0;
+    int selected_distance = std::numeric_limits<int>::max();
+    for (const int candidate_rate_hz : candidates) {
+      if (candidate_rate_hz <= 0) {
+        continue;
+      }
+      QAudioFormat candidate = audio_format;
+      candidate.setSampleRate(candidate_rate_hz);
+      if (!default_output.isFormatSupported(candidate)) {
+        continue;
+      }
+      const int distance = std::abs(candidate_rate_hz - sample_rate_hz);
+      if (distance < selected_distance) {
+        selected_distance = distance;
+        selected_rate_hz = candidate_rate_hz;
+      }
+    }
+    if (selected_rate_hz <= 0) {
+      const QAudioFormat preferred = default_output.preferredFormat();
+      AppendLog(QString("Audio output unavailable: mono s16le rates not supported (requested %1 Hz, preferred %2 Hz)")
+                    .arg(sample_rate_hz)
+                    .arg(preferred.sampleRate()));
+      return;
+    }
+    audio_format.setSampleRate(selected_rate_hz);
+    AppendLog(QString("Audio format fallback: requested %1 Hz, using %2 Hz")
+                  .arg(sample_rate_hz)
+                  .arg(selected_rate_hz));
+  }
   audio_sink_ = new QAudioSink(default_output, audio_format, this);
   audio_sink_->setBufferSize(
-      std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioSinkBufferMs) / 1000));
+      std::max(4096, (audio_format.sampleRate() * kAudioBytesPerSample * kAudioSinkBufferMs) / 1000));
   audio_output_device_ = audio_sink_->start();
   if (audio_output_device_ == nullptr) {
-    audio_output_disabled_ = true;
     audio_sink_->deleteLater();
     audio_sink_ = nullptr;
     audio_pending_pcm_.clear();
     audio_prefill_complete_ = false;
     audio_prefill_started_at_ms_ = 0;
     audio_output_sample_rate_hz_ = 0;
-    AppendLog("Audio output unavailable");
+    AppendLog(QString("Audio output unavailable: sink start failed for %1 Hz (will retry)")
+                  .arg(audio_format.sampleRate()));
     return;
   }
   audio_prefill_complete_ = false;
   audio_prefill_started_at_ms_ = 0;
-  audio_output_sample_rate_hz_ = sample_rate_hz;
+  audio_output_sample_rate_hz_ = audio_format.sampleRate();
 #endif
 }
 
