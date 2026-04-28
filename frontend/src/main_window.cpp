@@ -922,8 +922,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   if (audio_output_disabled_) {
     AppendLog("Audio output disabled by MR_DISABLE_AUDIO_OUTPUT");
   } else if (IsWslEnvironment() && !EnvFlagEnabled("MR_ENABLE_AUDIO_OUTPUT")) {
-    audio_output_disabled_ = true;
-    AppendLog("Audio output auto-disabled on WSL (set MR_ENABLE_AUDIO_OUTPUT=1 to override)");
+    AppendLog("WSL environment detected; attempting audio output (set MR_DISABLE_AUDIO_OUTPUT=1 to disable)");
   }
 #if MR_HAS_QT_MULTIMEDIA
   audio_drain_timer_ = new QTimer(this);
