@@ -555,7 +555,9 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
     const size_t next_idx = std::min(idx + 1, source.size() - 1);
     const double frac = pos - static_cast<double>(idx);
     const double mixed = source[idx] + (source[next_idx] - source[idx]) * frac;
-    const double sample = std::clamp(mixed * 9000.0, -30000.0, 30000.0);
+    const double gain =
+        (modulation == Modulation::kWfm) ? 13000.0 : ((modulation == Modulation::kAm) ? 11000.0 : 10000.0);
+    const double sample = std::clamp(mixed * gain, -30000.0, 30000.0);
     pcm_out->push_back(static_cast<int16_t>(std::lrint(sample)));
     pos += step;
   }
@@ -1150,16 +1152,20 @@ void ReceiverWorker::RunLoop() {
       }
       iq.center_frequency_hz = static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz));
 
+      const bool emit_viz_this_tick = now >= next_viz_emit;
       double receiver_peak_hz = 0.0;
       double receiver_peak_strength = 0.0;
       double receiver_start_hz = 0.0;
       double receiver_end_hz = 0.0;
       std::vector<double> receiver_waveform;
       std::vector<double> receiver_spectrum;
-      const bool have_receiver_frame =
-          BuildReceiverSpectrumFrame(iq, tuned_frequency_hz, channel_bandwidth_hz, &receiver_waveform,
-                                     &receiver_spectrum, &receiver_peak_hz, &receiver_peak_strength,
-                                     &receiver_start_hz, &receiver_end_hz);
+      bool have_receiver_frame = false;
+      if (emit_viz_this_tick) {
+        have_receiver_frame =
+            BuildReceiverSpectrumFrame(iq, tuned_frequency_hz, channel_bandwidth_hz, &receiver_waveform,
+                                       &receiver_spectrum, &receiver_peak_hz, &receiver_peak_strength,
+                                       &receiver_start_hz, &receiver_end_hz);
+      }
 
       ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
       const double signal_db = EstimateSignalDbfs(iq);
@@ -1253,14 +1259,17 @@ void ReceiverWorker::RunLoop() {
       double demod_peak_strength = 0.0;
       std::vector<double> demod_waveform;
       std::vector<double> demod_spectrum;
-      bool have_demod_frame = BuildDemodVisualizationFrame(
-          iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
-      if (has_scan_squelch && !audio_gate_open) {
-        demod_waveform.assign(kWaveformPoints, 0.5);
-        demod_spectrum.assign(kSpectrumBins, 0.0);
-        demod_peak_hz = 0.0;
-        demod_peak_strength = 0.0;
-        have_demod_frame = true;
+      bool have_demod_frame = false;
+      if (emit_viz_this_tick) {
+        have_demod_frame = BuildDemodVisualizationFrame(
+            iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
+        if (has_scan_squelch && !audio_gate_open) {
+          demod_waveform.assign(kWaveformPoints, 0.5);
+          demod_spectrum.assign(kSpectrumBins, 0.0);
+          demod_peak_hz = 0.0;
+          demod_peak_strength = 0.0;
+          have_demod_frame = true;
+        }
       }
 
       if (signal_gate_open) {
@@ -1281,7 +1290,7 @@ void ReceiverWorker::RunLoop() {
         });
       }
 
-      if (now >= next_viz_emit) {
+      if (emit_viz_this_tick) {
         if (have_demod_frame) {
           const double demod_start_hz = 0.0;
           const double demod_end_hz =
