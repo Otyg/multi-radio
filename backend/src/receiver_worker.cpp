@@ -17,9 +17,9 @@ namespace multi_radio {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr int kWaveformPoints = 200;
-constexpr int kSpectrumBins = 256;
-constexpr uint32_t kVisualizationFrameIntervalMs = 50;
+constexpr int kWaveformPoints = 120;
+constexpr int kSpectrumBins = 128;
+constexpr uint32_t kVisualizationFrameIntervalMs = 100;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kMinSampleRateHz = 225000;
 constexpr uint32_t kMaxSampleRateHz = 3200000;
@@ -632,7 +632,7 @@ bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* 
     return false;
   }
 
-  const std::vector<double> discriminator = BuildFmDiscriminator(iq);
+  const std::vector<double> discriminator = BuildFmDiscriminator(iq, 4096);
   if (discriminator.size() < 32) {
     return false;
   }
@@ -705,7 +705,7 @@ bool BuildReceiverSpectrumFrame(const IQSampleBlock& iq, double tuned_frequency_
   }
 
   const size_t available_samples = iq.interleaved_iq.size() / 2;
-  const size_t sample_count = std::min(available_samples, static_cast<size_t>(4096));
+  const size_t sample_count = std::min(available_samples, static_cast<size_t>(2048));
   if (sample_count < 64) {
     return false;
   }
@@ -1274,6 +1274,10 @@ void ReceiverWorker::RunLoop() {
 
       if (signal_gate_open) {
         plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
+          const auto kind_it = plugin_msg.normalized_fields.find("kind");
+          if (kind_it != plugin_msg.normalized_fields.end() && kind_it->second == "candidate") {
+            return;
+          }
           DecodedMessage msg;
           msg.unix_ms = plugin_msg.unix_ms == 0 ? UnixMillisNow() : plugin_msg.unix_ms;
           msg.receiver_id = receiver_id_;
