@@ -117,6 +117,79 @@ bool TryParseCsvModulation(const QString& text, v1::Modulation* out) {
   return false;
 }
 
+bool ResampleMonoPcmS16Le(const QByteArray& input_pcm, int input_sample_rate_hz,
+                          int output_sample_rate_hz, QByteArray* output_pcm) {
+  if (output_pcm == nullptr) {
+    return false;
+  }
+  output_pcm->clear();
+  if (input_pcm.isEmpty() || input_sample_rate_hz <= 0 || output_sample_rate_hz <= 0) {
+    return false;
+  }
+  const int input_byte_count = input_pcm.size() - (input_pcm.size() % kAudioBytesPerSample);
+  if (input_byte_count <= 0) {
+    return false;
+  }
+  if (input_sample_rate_hz == output_sample_rate_hz) {
+    output_pcm->append(input_pcm.constData(), input_byte_count);
+    return true;
+  }
+
+  const int input_sample_count = input_byte_count / kAudioBytesPerSample;
+  if (input_sample_count < 2) {
+    output_pcm->append(input_pcm.constData(), input_byte_count);
+    return true;
+  }
+
+  std::vector<int16_t> input_samples(static_cast<size_t>(input_sample_count), 0);
+  for (int sample_idx = 0; sample_idx < input_sample_count; ++sample_idx) {
+    const int byte_idx = sample_idx * kAudioBytesPerSample;
+    const uint16_t lo = static_cast<uint8_t>(input_pcm.at(byte_idx));
+    const uint16_t hi = static_cast<uint8_t>(input_pcm.at(byte_idx + 1));
+    input_samples[static_cast<size_t>(sample_idx)] =
+        static_cast<int16_t>((hi << 8) | lo);
+  }
+
+  const double ratio = static_cast<double>(input_sample_rate_hz) /
+                       static_cast<double>(output_sample_rate_hz);
+  if (ratio <= 0.0 || !std::isfinite(ratio)) {
+    return false;
+  }
+
+  const double estimated_output_samples =
+      (static_cast<double>(input_sample_count) * static_cast<double>(output_sample_rate_hz)) /
+      static_cast<double>(input_sample_rate_hz);
+  std::vector<int16_t> output_samples;
+  output_samples.reserve(std::max<size_t>(
+      1, static_cast<size_t>(std::ceil(estimated_output_samples)) + 2U));
+
+  for (double pos = 0.0; pos < static_cast<double>(input_sample_count); pos += ratio) {
+    const size_t index = static_cast<size_t>(pos);
+    const size_t next_index = std::min(index + 1, input_samples.size() - 1);
+    const double frac = pos - static_cast<double>(index);
+    const double mixed =
+        static_cast<double>(input_samples[index]) +
+        (static_cast<double>(input_samples[next_index]) -
+         static_cast<double>(input_samples[index])) *
+            frac;
+    output_samples.push_back(static_cast<int16_t>(
+        std::lrint(std::clamp(mixed, -32768.0, 32767.0))));
+  }
+  if (output_samples.empty()) {
+    output_samples.push_back(input_samples.back());
+  }
+
+  output_pcm->resize(static_cast<int>(output_samples.size() * kAudioBytesPerSample));
+  for (size_t idx = 0; idx < output_samples.size(); ++idx) {
+    const uint16_t sample_bits = static_cast<uint16_t>(output_samples[idx]);
+    (*output_pcm)[static_cast<int>(idx * kAudioBytesPerSample)] =
+        static_cast<char>(sample_bits & 0xFFU);
+    (*output_pcm)[static_cast<int>(idx * kAudioBytesPerSample + 1)] =
+        static_cast<char>((sample_bits >> 8) & 0xFFU);
+  }
+  return true;
+}
+
 QString TokenValue(const QString& message, const QString& key) {
   const QStringList tokens = message.split(' ', Qt::SkipEmptyParts);
   const QString prefix = key + "=";
@@ -2018,12 +2091,25 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
   if (audio_output_disabled_ || audio_output_device_ == nullptr) {
     return;
   }
+  QByteArray playback_pcm;
+  int playback_sample_rate_hz = sample_rate_hz;
+  if (audio_output_sample_rate_hz_ > 0 && audio_output_sample_rate_hz_ != sample_rate_hz) {
+    if (!ResampleMonoPcmS16Le(pcm, sample_rate_hz, audio_output_sample_rate_hz_, &playback_pcm)) {
+      return;
+    }
+    playback_sample_rate_hz = audio_output_sample_rate_hz_;
+  } else {
+    playback_pcm = pcm;
+  }
+  if (playback_pcm.isEmpty()) {
+    return;
+  }
   if (audio_pending_pcm_.isEmpty()) {
     audio_prefill_started_at_ms_ = QDateTime::currentMSecsSinceEpoch();
   }
-  audio_pending_pcm_.append(pcm);
+  audio_pending_pcm_.append(playback_pcm);
   const int max_buffered_audio_bytes =
-      std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPendingMaxMs) / 1000);
+      std::max(4096, (playback_sample_rate_hz * kAudioBytesPerSample * kAudioPendingMaxMs) / 1000);
   if (audio_pending_pcm_.size() > max_buffered_audio_bytes) {
     int dropped = audio_pending_pcm_.size() - max_buffered_audio_bytes;
     dropped -= dropped % kAudioBytesPerSample;
@@ -2039,9 +2125,10 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
     audio_queue_overrun_logged_ = false;
   }
   if (!audio_prefill_complete_) {
-    const int prefill_bytes = std::max(4096, (sample_rate_hz * kAudioBytesPerSample * kAudioPrefillMs) / 1000);
+    const int prefill_bytes =
+        std::max(4096, (playback_sample_rate_hz * kAudioBytesPerSample * kAudioPrefillMs) / 1000);
     const int min_start_bytes =
-        std::max(1024, (sample_rate_hz * kAudioBytesPerSample * kAudioMinStartupMs) / 1000);
+        std::max(1024, (playback_sample_rate_hz * kAudioBytesPerSample * kAudioMinStartupMs) / 1000);
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
     const bool prefill_timed_out = audio_prefill_started_at_ms_ > 0 &&
                                    now_ms >= audio_prefill_started_at_ms_ + kAudioPrefillMaxWaitMs;
