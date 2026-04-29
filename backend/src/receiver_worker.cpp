@@ -93,6 +93,8 @@ struct AudioDcBlockState {
 
 struct AudioResamplerState {
   double next_source_pos = 0.0;
+  bool has_prev_sample = false;
+  double prev_sample = 0.0;
 };
 
 struct AudioDemodState {
@@ -107,6 +109,9 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
                                          FmDiscriminatorState* state = nullptr);
 bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t audio_sample_rate_hz,
                      AudioDemodState* state, std::vector<int16_t>* pcm_out);
+bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, Modulation modulation,
+                                  std::vector<double>* waveform, std::vector<double>* spectrum,
+                                  double* peak_hz, double* peak_strength);
 
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
   (void)modulation;
@@ -546,28 +551,51 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
     return false;
   }
   const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(audio_sample_rate_hz);
-  if (ratio <= 0.0) {
+  if (ratio <= 0.0 || !std::isfinite(ratio)) {
     return false;
   }
   const double step = std::max(1.0, ratio);
-  pcm_out->reserve(static_cast<size_t>(static_cast<double>(source.size()) / step) + 2U);
-  double pos = std::clamp(state->resampler.next_source_pos, 0.0, step);
-  while (pos < static_cast<double>(source.size())) {
+  const bool have_prev_sample =
+      state->resampler.has_prev_sample && std::isfinite(state->resampler.prev_sample);
+  const double source_base_offset = have_prev_sample ? 1.0 : 0.0;
+  const double source_virtual_size = static_cast<double>(source.size()) + source_base_offset;
+  if (source_virtual_size < 2.0) {
+    return false;
+  }
+  auto source_at = [&](size_t virtual_idx) -> double {
+    if (have_prev_sample) {
+      if (virtual_idx == 0) {
+        return state->resampler.prev_sample;
+      }
+      const size_t source_idx = std::min(virtual_idx - 1, source.size() - 1);
+      return source[source_idx];
+    }
+    const size_t source_idx = std::min(virtual_idx, source.size() - 1);
+    return source[source_idx];
+  };
+
+  pcm_out->reserve(static_cast<size_t>(source_virtual_size / step) + 2U);
+  double pos = std::clamp(state->resampler.next_source_pos, 0.0, step) + source_base_offset;
+  while (pos < source_virtual_size) {
     const size_t idx = static_cast<size_t>(pos);
-    const size_t next_idx = std::min(idx + 1, source.size() - 1);
+    const size_t next_idx = std::min(idx + 1, static_cast<size_t>(source_virtual_size - 1.0));
     const double frac = pos - static_cast<double>(idx);
-    const double mixed = source[idx] + (source[next_idx] - source[idx]) * frac;
+    const double sample_a = source_at(idx);
+    const double sample_b = source_at(next_idx);
+    const double mixed = sample_a + (sample_b - sample_a) * frac;
     const double gain =
         (modulation == Modulation::kWfm) ? 13000.0 : ((modulation == Modulation::kAm) ? 11000.0 : 10000.0);
     const double sample = std::clamp(mixed * gain, -30000.0, 30000.0);
     pcm_out->push_back(static_cast<int16_t>(std::lrint(sample)));
     pos += step;
   }
-  state->resampler.next_source_pos = pos - static_cast<double>(source.size());
+  state->resampler.next_source_pos = pos - source_virtual_size;
   if (!std::isfinite(state->resampler.next_source_pos) || state->resampler.next_source_pos < 0.0 ||
       state->resampler.next_source_pos >= step) {
     state->resampler.next_source_pos = 0.0;
   }
+  state->resampler.prev_sample = source.back();
+  state->resampler.has_prev_sample = true;
   return !pcm_out->empty();
 }
 
@@ -627,28 +655,35 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
   return discriminator;
 }
 
-bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* waveform,
-                                  std::vector<double>* spectrum, double* peak_hz,
-                                  double* peak_strength) {
+bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, Modulation modulation,
+                                  std::vector<double>* waveform, std::vector<double>* spectrum,
+                                  double* peak_hz, double* peak_strength) {
   if (waveform == nullptr || spectrum == nullptr || peak_hz == nullptr || peak_strength == nullptr) {
     return false;
   }
 
-  const std::vector<double> discriminator = BuildFmDiscriminator(iq, 4096);
-  if (discriminator.size() < 32) {
+  const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(modulation);
+  if (audio_sample_rate_hz == 0) {
+    return false;
+  }
+
+  std::vector<int16_t> audio_pcm;
+  AudioDemodState demod_state;
+  if (!BuildAudioPcm16(iq, modulation, audio_sample_rate_hz, &demod_state, &audio_pcm) ||
+      audio_pcm.size() < 32) {
     return false;
   }
 
   waveform->assign(kWaveformPoints, 0.5);
   for (int i = 0; i < kWaveformPoints; ++i) {
-    const size_t idx = static_cast<size_t>((static_cast<double>(i) * (discriminator.size() - 1)) /
+    const size_t idx = static_cast<size_t>((static_cast<double>(i) * (audio_pcm.size() - 1)) /
                                            static_cast<double>(kWaveformPoints - 1));
-    const double raw = discriminator[idx];
-    const double normalized = std::clamp((raw / 1.25 + 1.0) * 0.5, 0.0, 1.0);
+    const double raw = static_cast<double>(audio_pcm[idx]) / 32768.0;
+    const double normalized = std::clamp((raw + 1.0) * 0.5, 0.0, 1.0);
     (*waveform)[static_cast<size_t>(i)] = normalized;
   }
 
-  const double sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
+  const double sample_rate_hz = static_cast<double>(audio_sample_rate_hz);
   const double nyquist_hz = sample_rate_hz * 0.5;
   const double min_hz = 0.0;
   const double max_hz = std::min(20000.0, nyquist_hz - 1.0);
@@ -667,8 +702,9 @@ bool BuildDemodVisualizationFrame(const IQSampleBlock& iq, std::vector<double>* 
     double q0 = 0.0;
     double q1 = 0.0;
     double q2 = 0.0;
-    for (double sample : discriminator) {
-      q0 = coeff * q1 - q2 + sample;
+    for (int16_t sample : audio_pcm) {
+      const double sample_norm = static_cast<double>(sample) / 32768.0;
+      q0 = coeff * q1 - q2 + sample_norm;
       q2 = q1;
       q1 = q0;
     }
@@ -1264,7 +1300,7 @@ void ReceiverWorker::RunLoop() {
       bool have_demod_frame = false;
       if (emit_viz_this_tick) {
         have_demod_frame = BuildDemodVisualizationFrame(
-            iq, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
+            iq, scan_modulation, &demod_waveform, &demod_spectrum, &demod_peak_hz, &demod_peak_strength);
         if (has_scan_squelch && !audio_gate_open) {
           demod_waveform.assign(kWaveformPoints, 0.5);
           demod_spectrum.assign(kSpectrumBins, 0.0);
@@ -1299,8 +1335,11 @@ void ReceiverWorker::RunLoop() {
       if (emit_viz_this_tick) {
         if (have_demod_frame) {
           const double demod_start_hz = 0.0;
+          const uint32_t demod_audio_sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
+          const double demod_nyquist_hz =
+              std::max(1.0, static_cast<double>(demod_audio_sample_rate_hz) * 0.5);
           const double demod_end_hz =
-              std::max(1.0, std::min(20000.0, static_cast<double>(iq.sample_rate_hz) * 0.5 - 1.0));
+              std::max(1.0, std::min(20000.0, demod_nyquist_hz - 1.0));
           std::ostringstream viz_message;
           viz_message << "VIZ_FRAME source=demod start_hz=" << FormatDouble(demod_start_hz, 1)
                       << " end_hz=" << FormatDouble(demod_end_hz, 1)
