@@ -39,7 +39,7 @@ constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 40;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
-constexpr uint32_t kAudioSampleRateHz = 8000;
+constexpr uint32_t kAudioSampleRateHz = 16000;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
@@ -527,8 +527,9 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   const double source_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
   switch (modulation) {
     case Modulation::kWfm:
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 7000.0, 4, &state->lowpass);
-      ApplyFmDeemphasis(&source, source_sample_rate_hz, 50.0, &state->deemphasis);
+      // Favor voice intelligibility for scanner-style WFM monitoring.
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 4200.0, 4, &state->lowpass);
+      ApplyFmDeemphasis(&source, source_sample_rate_hz, 75.0, &state->deemphasis);
       break;
     case Modulation::kAm:
       ApplyCascadedLowPass(&source, source_sample_rate_hz, 4500.0, 3, &state->lowpass);
@@ -538,7 +539,8 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
       ApplyCascadedLowPass(&source, source_sample_rate_hz, 3400.0, 3, &state->lowpass);
       break;
   }
-  ApplyAudioDcBlock(&source, source_sample_rate_hz, 30.0, &state->dc_block);
+  const double dc_block_cutoff_hz = (modulation == Modulation::kWfm) ? 120.0 : 30.0;
+  ApplyAudioDcBlock(&source, source_sample_rate_hz, dc_block_cutoff_hz, &state->dc_block);
 
   if (audio_sample_rate_hz == 0) {
     return false;
