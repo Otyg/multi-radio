@@ -190,6 +190,10 @@ class MainWindow : public QMainWindow {
   quint64 audio_frontend_written_bytes_ = 0;
   quint64 audio_frontend_write_blocked_events_ = 0;
   quint64 audio_frontend_overrun_dropped_bytes_ = 0;
+  quint64 audio_frontend_gap_fill_bytes_ = 0;
+  qint64 audio_stream_last_frame_unix_ms_ = -1;
+  int audio_stream_last_sample_rate_hz_ = 0;
+  double audio_stream_last_frame_duration_ms_ = 0.0;
 };
 
 }  // namespace multi_radio

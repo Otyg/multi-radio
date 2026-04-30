@@ -1505,13 +1505,49 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
 
 void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& pcm_s16le,
                               quint64 unix_ms, double tuned_frequency_hz) {
-  Q_UNUSED(unix_ms);
   Q_UNUSED(tuned_frequency_hz);
   if (!IsSelectedReceiver(receiver_id)) {
     ++audio_frontend_filtered_frames_;
     MaybeEmitFrontendAudioStats();
     return;
   }
+
+  // Conceal short transport/jitter gaps by inserting silence so playback stays
+  // continuous instead of producing abrupt underrun clicks.
+  const int frame_bytes = pcm_s16le.size();
+  const int frame_samples = frame_bytes / kAudioBytesPerSample;
+  if (sample_rate_hz > 0 && frame_samples > 0) {
+    const double frame_duration_ms =
+        (1000.0 * static_cast<double>(frame_samples)) / static_cast<double>(sample_rate_hz);
+    if (audio_stream_last_frame_unix_ms_ >= 0 && audio_stream_last_sample_rate_hz_ == sample_rate_hz &&
+        frame_duration_ms > 0.1) {
+      const qint64 expected_next_unix_ms = static_cast<qint64>(std::llround(
+          static_cast<double>(audio_stream_last_frame_unix_ms_) + audio_stream_last_frame_duration_ms_));
+      const qint64 gap_ms = static_cast<qint64>(unix_ms) - expected_next_unix_ms;
+      const double max_jitter_fill_ms = 250.0;
+      if (gap_ms > static_cast<qint64>(std::llround(frame_duration_ms * 0.75)) &&
+          static_cast<double>(gap_ms) <= max_jitter_fill_ms) {
+        int silence_samples = static_cast<int>(std::llround(
+            (static_cast<double>(gap_ms) * static_cast<double>(sample_rate_hz)) / 1000.0));
+        silence_samples = std::max(0, silence_samples);
+        int silence_bytes = silence_samples * kAudioBytesPerSample;
+        silence_bytes -= silence_bytes % kAudioBytesPerSample;
+        if (silence_bytes > 0) {
+          QByteArray silence_pcm(silence_bytes, '\0');
+          audio_frontend_gap_fill_bytes_ += static_cast<quint64>(silence_bytes);
+          HandleAudioPcmFrame(sample_rate_hz, silence_pcm);
+        }
+      }
+    }
+    audio_stream_last_frame_unix_ms_ = static_cast<qint64>(unix_ms);
+    audio_stream_last_sample_rate_hz_ = sample_rate_hz;
+    audio_stream_last_frame_duration_ms_ = frame_duration_ms;
+  } else {
+    audio_stream_last_frame_unix_ms_ = -1;
+    audio_stream_last_sample_rate_hz_ = 0;
+    audio_stream_last_frame_duration_ms_ = 0.0;
+  }
+
   ++audio_frontend_rx_frames_;
   audio_frontend_rx_bytes_ += static_cast<quint64>(pcm_s16le.size());
   audio_frontend_last_rx_sample_rate_hz_ = sample_rate_hz;
@@ -2380,7 +2416,7 @@ void MainWindow::MaybeEmitFrontendAudioStats() {
 
   AppendLog(QString("AUDIO_FE_STATS rx_f=%1 rx_b=%2 filt_f=%3 rx_sr=%4 out_sr=%5 "
                     "prefill=%6 wait=%7 ready=%8 pend_b=%9 write_c=%10 write_b=%11 "
-                    "blocked=%12 overrun_b=%13 out_dis=%14 out_dev=%15 sink_free=%16 backend_seen=%17")
+                    "blocked=%12 overrun_b=%13 gap_fill_b=%14 out_dis=%15 out_dev=%16 sink_free=%17 backend_seen=%18")
                 .arg(audio_frontend_rx_frames_)
                 .arg(audio_frontend_rx_bytes_)
                 .arg(audio_frontend_filtered_frames_)
@@ -2394,6 +2430,7 @@ void MainWindow::MaybeEmitFrontendAudioStats() {
                 .arg(audio_frontend_written_bytes_)
                 .arg(audio_frontend_write_blocked_events_)
                 .arg(audio_frontend_overrun_dropped_bytes_)
+                .arg(audio_frontend_gap_fill_bytes_)
                 .arg(audio_output_disabled_ ? 1 : 0)
                 .arg(audio_output_device_ != nullptr ? 1 : 0)
                 .arg(sink_bytes_free)
@@ -2408,6 +2445,7 @@ void MainWindow::MaybeEmitFrontendAudioStats() {
   audio_frontend_written_bytes_ = 0;
   audio_frontend_write_blocked_events_ = 0;
   audio_frontend_overrun_dropped_bytes_ = 0;
+  audio_frontend_gap_fill_bytes_ = 0;
   audio_frontend_stats_window_started_at_ms_ = now_ms;
 }
 
