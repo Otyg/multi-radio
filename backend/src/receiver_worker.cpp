@@ -1051,6 +1051,8 @@ void ReceiverWorker::RunLoop() {
       dc_block_state.initialized = false;
       center_notch_state.initialized = false;
       frequency_shift_state.phase_rad = 0.0;
+      iq_rate_estimate_hz_ = static_cast<double>(desired_sample_rate_hz);
+      iq_rate_estimate_valid_ = false;
       std::ostringstream msg;
       msg << "sample-rate updated to " << desired_sample_rate_hz << " Hz";
       PublishEvent(EventKind::kInfo, msg.str());
@@ -1169,7 +1171,8 @@ void ReceiverWorker::RunLoop() {
     uint32_t audio_stats_last_iq_sample_rate_hz = 0;
     size_t audio_stats_last_iq_complex_samples = 0;
     uint32_t audio_stats_configured_sample_rate_hz = desired_sample_rate_hz;
-    double audio_stats_estimated_iq_sample_rate_hz = static_cast<double>(desired_sample_rate_hz);
+    double audio_stats_estimated_iq_sample_rate_hz =
+        iq_rate_estimate_valid_ ? iq_rate_estimate_hz_ : static_cast<double>(desired_sample_rate_hz);
     std::optional<std::chrono::steady_clock::time_point> last_iq_read_completed_at;
     uint64_t iq_rate_window_samples = 0;
     double iq_rate_window_seconds = 0.0;
@@ -1216,9 +1219,15 @@ void ReceiverWorker::RunLoop() {
             if (std::isfinite(raw_rate_hz) &&
                 raw_rate_hz >= static_cast<double>(kMinSampleRateHz) * 0.5 &&
                 raw_rate_hz <= static_cast<double>(kMaxSampleRateHz) * 1.25) {
-              const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
-              const double alpha = 0.08;
-              audio_stats_estimated_iq_sample_rate_hz += alpha * (raw_rate_hz - prev_rate_hz);
+              if (!iq_rate_estimate_valid_) {
+                // Fast-lock startup: avoid long audible speed ramp from configured SR.
+                audio_stats_estimated_iq_sample_rate_hz = raw_rate_hz;
+                iq_rate_estimate_valid_ = true;
+              } else {
+                const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
+                const double alpha = 0.08;
+                audio_stats_estimated_iq_sample_rate_hz += alpha * (raw_rate_hz - prev_rate_hz);
+              }
             }
             iq_rate_window_samples = 0;
             iq_rate_window_seconds = 0.0;
@@ -1226,6 +1235,7 @@ void ReceiverWorker::RunLoop() {
         }
       }
       last_iq_read_completed_at = iq_read_completed_at;
+      iq_rate_estimate_hz_ = audio_stats_estimated_iq_sample_rate_hz;
       const uint32_t effective_iq_sample_rate_hz = static_cast<uint32_t>(std::llround(std::clamp(
           audio_stats_estimated_iq_sample_rate_hz, static_cast<double>(kMinSampleRateHz),
           static_cast<double>(kMaxSampleRateHz))));

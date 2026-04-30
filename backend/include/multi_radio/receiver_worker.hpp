@@ -50,6 +50,8 @@ class ReceiverWorker {
   ModeConfig mode_config_;
   ScanScheduler scheduler_;
   std::string last_error_;
+  double iq_rate_estimate_hz_ = 0.0;
+  bool iq_rate_estimate_valid_ = false;
 };
 
 }  // namespace multi_radio
