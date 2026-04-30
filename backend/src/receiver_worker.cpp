@@ -25,7 +25,6 @@ constexpr bool kBackendVisualizationEnabled = false;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kMinSampleRateHz = 225000;
 constexpr uint32_t kMaxSampleRateHz = 3200000;
-constexpr uint32_t kMaxScanAudioSampleRateHz = 1024000;
 constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kMinChannelBandwidthHz = 2000;
 constexpr uint32_t kMaxChannelBandwidthHz = 500000;
@@ -990,7 +989,6 @@ ReceiverStatus ReceiverWorker::Status() const {
 }
 
 void ReceiverWorker::RunLoop() {
-  uint32_t applied_sample_rate_hz = std::numeric_limits<uint32_t>::max();
   uint32_t applied_hardware_bandwidth_hz = std::numeric_limits<uint32_t>::max();
   uint32_t applied_tune_hz = std::numeric_limits<uint32_t>::max();
   IqLowPassState lowpass_state;
@@ -1004,7 +1002,6 @@ void ReceiverWorker::RunLoop() {
     std::optional<double> frequency_hz;
     RadioMode active_mode = RadioMode::kFixed;
     uint32_t dwell_ms = 500;
-    uint32_t desired_sample_rate_hz = kDefaultSampleRateHz;
     uint32_t channel_bandwidth_hz = kDefaultChannelBandwidthHz;
     uint32_t desired_hardware_bandwidth_hz = 0;
     bool dc_blocker_enabled = false;
@@ -1033,7 +1030,6 @@ void ReceiverWorker::RunLoop() {
         scan_list_channel_frequency_hz = target->frequency_hz;
       }
       channel_bandwidth_hz = mode_config_.channel_bandwidth_hz;
-      desired_sample_rate_hz = mode_config_.sample_rate_hz;
       desired_hardware_bandwidth_hz = mode_config_.hardware_bandwidth_hz;
       dc_blocker_enabled = mode_config_.dc_blocker_enabled;
       dc_blocker_cutoff_hz = mode_config_.dc_blocker_cutoff_hz;
@@ -1059,37 +1055,7 @@ void ReceiverWorker::RunLoop() {
       }
     }
     const std::string scan_list_channel_label_token = SanitizeToken(scan_list_channel_label);
-    if (has_scan_squelch) {
-      desired_sample_rate_hz =
-          std::min<uint32_t>(desired_sample_rate_hz, kMaxScanAudioSampleRateHz);
-    }
-
     std::string error;
-    if (desired_sample_rate_hz != applied_sample_rate_hz) {
-      if (!device_->SetSampleRateHz(desired_sample_rate_hz, &error)) {
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          last_error_ = error;
-        }
-        std::ostringstream msg;
-        msg << "sample-rate update failed (" << desired_sample_rate_hz
-            << " Hz): " << error;
-        PublishEvent(EventKind::kError, msg.str());
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        continue;
-      }
-      applied_sample_rate_hz = desired_sample_rate_hz;
-      lowpass_state.initialized = false;
-      dc_block_state.initialized = false;
-      center_notch_state.initialized = false;
-      frequency_shift_state.phase_rad = 0.0;
-      audio_pcm_buffer.clear();
-      audio_demod_state = AudioDemodState{};
-      std::ostringstream msg;
-      msg << "sample-rate updated to " << desired_sample_rate_hz << " Hz";
-      PublishEvent(EventKind::kInfo, msg.str());
-    }
-
     if (desired_hardware_bandwidth_hz != applied_hardware_bandwidth_hz) {
       if (!device_->SetHardwareBandwidthHz(desired_hardware_bandwidth_hz, &error)) {
         {
@@ -1208,7 +1174,7 @@ void ReceiverWorker::RunLoop() {
     uint64_t audio_stream_sample_index = 0;
     uint32_t audio_stats_last_iq_sample_rate_hz = 0;
     size_t audio_stats_last_iq_complex_samples = 0;
-    uint32_t audio_stats_configured_sample_rate_hz = desired_sample_rate_hz;
+    uint32_t audio_stats_configured_sample_rate_hz = 0;
     double audio_stats_estimated_iq_sample_rate_hz =
         iq_rate_estimate_valid_ ? iq_rate_estimate_hz_ : 0.0;
     double audio_stats_last_gen_ratio = 1.0;
