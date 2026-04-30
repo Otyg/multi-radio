@@ -1180,7 +1180,6 @@ void ReceiverWorker::RunLoop() {
         iq_rate_estimate_valid_ ? iq_rate_estimate_hz_ : 0.0;
     double audio_stats_last_gen_ratio = 1.0;
     double audio_stats_last_rate_correction = 1.0;
-    std::optional<double> locked_audio_iq_rate_hz;
     std::optional<std::chrono::steady_clock::time_point> audio_iq_last_read_at;
     bool audio_pacer_primed = false;
     auto next_audio_frame_deadline = tune_started_at;
@@ -1358,25 +1357,6 @@ void ReceiverWorker::RunLoop() {
       }
       const bool signal_gate_open = !has_scan_squelch || squelch_open || gate_open_until_channel_hop;
       const bool audio_gate_open = has_scan_squelch && (squelch_open || gate_open_until_channel_hop);
-      if (audio_gate_open) {
-        if (!locked_audio_iq_rate_hz.has_value()) {
-          const double lock_rate_hz = audio_stats_estimated_iq_sample_rate_hz;
-          if (std::isfinite(lock_rate_hz) && lock_rate_hz > 0.0) {
-            locked_audio_iq_rate_hz = lock_rate_hz;
-          }
-        }
-      } else {
-        locked_audio_iq_rate_hz.reset();
-      }
-      if (locked_audio_iq_rate_hz.has_value()) {
-        const uint32_t locked_iq_sr = static_cast<uint32_t>(std::llround(std::clamp(
-            *locked_audio_iq_rate_hz, static_cast<double>(kMinSampleRateHz),
-            static_cast<double>(kMaxSampleRateHz))));
-        if (locked_iq_sr > 0) {
-          iq.sample_rate_hz = locked_iq_sr;
-          audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
-        }
-      }
       if (has_scan_squelch) {
         ++audio_stats_iq_blocks;
         if (audio_gate_open) {
@@ -1578,8 +1558,8 @@ void ReceiverWorker::RunLoop() {
                      << " cfg_sr=" << audio_stats_configured_sample_rate_hz
                      << " iq_sr=" << audio_stats_last_iq_sample_rate_hz
                      << " iq_est_sr=" << FormatDouble(audio_stats_estimated_iq_sample_rate_hz, 0)
-                     << " iq_lock=" << (locked_audio_iq_rate_hz.has_value() ? "1" : "0")
-                     << " iq_lock_sr=" << FormatDouble(locked_audio_iq_rate_hz.value_or(0.0), 0)
+                     << " iq_lock=0"
+                     << " iq_lock_sr=0"
                      << " win_ms=" << stats_window_ms
                      << " gen_ratio=" << FormatDouble(audio_stats_last_gen_ratio, 3)
                      << " rate_corr=" << FormatDouble(audio_stats_last_rate_correction, 4)
