@@ -22,7 +22,6 @@ constexpr int kWaveformPoints = 120;
 constexpr int kSpectrumBins = 128;
 constexpr uint32_t kVisualizationFrameIntervalMs = 100;
 constexpr bool kBackendVisualizationEnabled = false;
-constexpr size_t kMaxPacedAudioFramesPerLoop = 4;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kMinSampleRateHz = 225000;
 constexpr uint32_t kMaxSampleRateHz = 3200000;
@@ -39,10 +38,10 @@ constexpr uint32_t kMaxCenterNotchWidthHz = 200000;
 constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
-constexpr uint32_t kAudioFrameIntervalMs = 40;
+constexpr uint32_t kAudioFrameIntervalMs = 20;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
-constexpr uint32_t kAudioSampleRateHz = 8000;
+constexpr uint32_t kAudioSampleRateHz = 4000;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
@@ -1454,53 +1453,49 @@ void ReceiverWorker::RunLoop() {
           audio_pacer_primed = true;
           next_audio_frame_deadline = now;
         }
-        if (audio_pacer_primed) {
-          size_t paced_frames_this_loop = 0;
-          while (now >= next_audio_frame_deadline &&
-                 paced_frames_this_loop < kMaxPacedAudioFramesPerLoop) {
-            AudioFrame frame;
-            frame.unix_ms = UnixMillisNow();
-            frame.receiver_id = receiver_id_;
-            frame.sample_rate_hz = audio_sample_rate_hz;
-            frame.tuned_frequency_hz = tuned_frequency_hz;
-            frame.pcm_s16le.reserve(audio_frame_samples);
-
-            const size_t take = std::min(audio_frame_samples, audio_pcm_buffer.size());
-            if (take > 0) {
-              frame.pcm_s16le.insert(frame.pcm_s16le.end(), audio_pcm_buffer.begin(),
-                                     audio_pcm_buffer.begin() +
-                                         static_cast<std::vector<int16_t>::difference_type>(take));
-              audio_pcm_buffer.erase(
-                  audio_pcm_buffer.begin(),
-                  audio_pcm_buffer.begin() + static_cast<std::vector<int16_t>::difference_type>(take));
-            }
-
-            if (frame.pcm_s16le.size() < audio_frame_samples) {
-              const size_t need = audio_frame_samples - frame.pcm_s16le.size();
-              int16_t fill_sample = 0;
-              if (!frame.pcm_s16le.empty()) {
-                fill_sample = frame.pcm_s16le.back();
-              } else if (audio_pacer_has_last_sample) {
-                fill_sample = audio_pacer_last_sample;
-              }
-              frame.pcm_s16le.insert(frame.pcm_s16le.end(), need, fill_sample);
-              audio_stats_conceal_samples += static_cast<uint64_t>(need);
-            }
-
-            if (!frame.pcm_s16le.empty()) {
-              audio_pacer_last_sample = frame.pcm_s16le.back();
-              audio_pacer_has_last_sample = true;
-              frame.sequence = audio_stream_sequence++;
-              frame.sample_index = audio_stream_sample_index;
-              audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
-              ++audio_stats_published_frames;
-              audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
-              event_bus_->PublishAudioFrame(frame);
-            }
-
-            next_audio_frame_deadline += std::chrono::milliseconds(kAudioFrameIntervalMs);
-            ++paced_frames_this_loop;
+        if (audio_pacer_primed && now >= next_audio_frame_deadline) {
+          const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
+          const auto max_late = frame_interval * 2;
+          if (now - next_audio_frame_deadline > max_late) {
+            // Avoid catch-up bursts after scheduler hiccups; realign pacing to "now".
+            next_audio_frame_deadline = now;
           }
+
+          AudioFrame frame;
+          frame.unix_ms = UnixMillisNow();
+          frame.receiver_id = receiver_id_;
+          frame.sample_rate_hz = audio_sample_rate_hz;
+          frame.tuned_frequency_hz = tuned_frequency_hz;
+          frame.pcm_s16le.reserve(audio_frame_samples);
+
+          const size_t take = std::min(audio_frame_samples, audio_pcm_buffer.size());
+          if (take > 0) {
+            frame.pcm_s16le.insert(frame.pcm_s16le.end(), audio_pcm_buffer.begin(),
+                                   audio_pcm_buffer.begin() +
+                                       static_cast<std::vector<int16_t>::difference_type>(take));
+            audio_pcm_buffer.erase(
+                audio_pcm_buffer.begin(),
+                audio_pcm_buffer.begin() + static_cast<std::vector<int16_t>::difference_type>(take));
+          }
+
+          if (frame.pcm_s16le.size() < audio_frame_samples) {
+            const size_t need = audio_frame_samples - frame.pcm_s16le.size();
+            frame.pcm_s16le.insert(frame.pcm_s16le.end(), need, static_cast<int16_t>(0));
+            audio_stats_conceal_samples += static_cast<uint64_t>(need);
+          }
+
+          if (!frame.pcm_s16le.empty()) {
+            audio_pacer_last_sample = frame.pcm_s16le.back();
+            audio_pacer_has_last_sample = true;
+            frame.sequence = audio_stream_sequence++;
+            frame.sample_index = audio_stream_sample_index;
+            audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
+            ++audio_stats_published_frames;
+            audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
+            event_bus_->PublishAudioFrame(frame);
+          }
+
+          next_audio_frame_deadline += frame_interval;
         }
       } else if (has_scan_squelch) {
         ++audio_stats_buffer_clears;
