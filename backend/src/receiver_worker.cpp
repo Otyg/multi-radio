@@ -1165,6 +1165,8 @@ void ReceiverWorker::RunLoop() {
     uint64_t audio_stats_buffer_clears = 0;
     uint64_t audio_stats_flush_frames = 0;
     uint64_t audio_stats_flush_samples = 0;
+    uint32_t audio_stats_last_iq_sample_rate_hz = 0;
+    size_t audio_stats_last_iq_complex_samples = 0;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
@@ -1194,6 +1196,8 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
+      audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
+      audio_stats_last_iq_complex_samples = iq.interleaved_iq.size() / 2;
       if (effective_lo_offset_hz != 0) {
         ApplyIqFrequencyShift(&iq, effective_lo_offset_hz, &frequency_shift_state);
       } else {
@@ -1428,6 +1432,8 @@ void ReceiverWorker::RunLoop() {
                      << " label=" << scan_list_channel_label_token
                      << " mod=" << ModulationToken(scan_modulation)
                      << " sr=" << audio_sample_rate_hz
+                     << " iq_sr=" << audio_stats_last_iq_sample_rate_hz
+                     << " iq_n=" << audio_stats_last_iq_complex_samples
                      << " gate=" << (audio_gate_open ? "1" : "0")
                      << " squelch=" << (squelch_open ? "1" : "0")
                      << " signal_db=" << FormatDouble(signal_db, 1)

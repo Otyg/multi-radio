@@ -73,7 +73,11 @@ class RtlSdrDevice final : public IRadioDevice {
       }
       return false;
     }
-    sample_rate_hz_ = sample_rate_hz;
+    // Use the effective rate reported by the device so downstream DSP timing
+    // matches real throughput.
+    const uint32_t applied_sample_rate_hz = rtlsdr_get_sample_rate(dev_);
+    sample_rate_hz_ = applied_sample_rate_hz > 0 ? applied_sample_rate_hz : sample_rate_hz;
+    rtlsdr_reset_buffer(dev_);
     return true;
   }
 
