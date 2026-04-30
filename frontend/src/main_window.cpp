@@ -1466,6 +1466,8 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     const qint64 published_samples = TokenValue(message, "pub_samples").toLongLong(&pub_samples_ok);
     bool pending_ok = false;
     const qint64 pending_samples = TokenValue(message, "pending_samples").toLongLong(&pending_ok);
+    bool conceal_ok = false;
+    const qint64 conceal_samples = TokenValue(message, "conceal_samples").toLongLong(&conceal_ok);
     bool clears_ok = false;
     const qint64 clears = TokenValue(message, "clears").toLongLong(&clears_ok);
     bool flush_frames_ok = false;
@@ -1476,7 +1478,7 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     AppendLog(QString("[%1] RX%2 AUDIO_STATS ch=%3 idx=%4 mod=%5 sr=%6 cfg_sr=%7 iq_sr=%8 iq_est=%9 "
                       "win_ms=%10 gen_hz=%11 pub_hz=%12 gate=%13 sq=%14 sig=%15 dB "
                       "blk=%16 open_blk=%17 demod_ok=%18 demod_empty=%19 gen=%20 pub_f=%21 pub_s=%22 "
-                      "pend=%23 clr=%24 flush_f=%25 flush_s=%26")
+                      "pend=%23 conceal=%24 clr=%25 flush_f=%26 flush_s=%27")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
                   .arg(channel_label)
@@ -1500,6 +1502,7 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
                   .arg(pub_frames_ok ? published_frames : -1)
                   .arg(pub_samples_ok ? published_samples : -1)
                   .arg(pending_ok ? pending_samples : -1)
+                  .arg(conceal_ok ? conceal_samples : -1)
                   .arg(clears_ok ? clears : -1)
                   .arg(flush_frames_ok ? flush_frames : -1)
                   .arg(flush_samples_ok ? flush_samples : -1));

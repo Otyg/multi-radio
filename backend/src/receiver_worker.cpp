@@ -22,6 +22,7 @@ constexpr int kWaveformPoints = 120;
 constexpr int kSpectrumBins = 128;
 constexpr uint32_t kVisualizationFrameIntervalMs = 100;
 constexpr bool kBackendVisualizationEnabled = false;
+constexpr size_t kMaxPacedAudioFramesPerLoop = 4;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kMinSampleRateHz = 225000;
 constexpr uint32_t kMaxSampleRateHz = 3200000;
@@ -1193,6 +1194,7 @@ void ReceiverWorker::RunLoop() {
     uint64_t audio_stats_buffer_clears = 0;
     uint64_t audio_stats_flush_frames = 0;
     uint64_t audio_stats_flush_samples = 0;
+    uint64_t audio_stats_conceal_samples = 0;
     uint32_t audio_gate_open_stats_windows = 0;
     uint64_t audio_stream_sequence = 0;
     uint64_t audio_stream_sample_index = 0;
@@ -1204,6 +1206,10 @@ void ReceiverWorker::RunLoop() {
     double audio_stats_last_gen_ratio = 1.0;
     double audio_stats_last_rate_correction = 1.0;
     std::optional<double> locked_audio_iq_rate_hz;
+    bool audio_pacer_primed = false;
+    auto next_audio_frame_deadline = tune_started_at;
+    bool audio_pacer_has_last_sample = false;
+    int16_t audio_pacer_last_sample = 0;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
@@ -1475,29 +1481,66 @@ void ReceiverWorker::RunLoop() {
         } else {
           ++audio_stats_demod_empty_blocks;
         }
-        while (audio_pcm_buffer.size() >= audio_frame_samples) {
-          const auto frame_end = audio_pcm_buffer.begin() +
-                                 static_cast<std::vector<int16_t>::difference_type>(audio_frame_samples);
-          AudioFrame frame;
-          frame.unix_ms = UnixMillisNow();
-          frame.receiver_id = receiver_id_;
-          frame.sample_rate_hz = audio_sample_rate_hz;
-          frame.tuned_frequency_hz = tuned_frequency_hz;
-          frame.pcm_s16le.assign(audio_pcm_buffer.begin(), frame_end);
-          if (!frame.pcm_s16le.empty()) {
-            frame.sequence = audio_stream_sequence++;
-            frame.sample_index = audio_stream_sample_index;
-            audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
-            ++audio_stats_published_frames;
-            audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
-            event_bus_->PublishAudioFrame(frame);
+        if (!audio_pacer_primed && !audio_pcm_buffer.empty()) {
+          audio_pacer_primed = true;
+          next_audio_frame_deadline = now;
+        }
+        if (audio_pacer_primed) {
+          size_t paced_frames_this_loop = 0;
+          while (now >= next_audio_frame_deadline &&
+                 paced_frames_this_loop < kMaxPacedAudioFramesPerLoop) {
+            AudioFrame frame;
+            frame.unix_ms = UnixMillisNow();
+            frame.receiver_id = receiver_id_;
+            frame.sample_rate_hz = audio_sample_rate_hz;
+            frame.tuned_frequency_hz = tuned_frequency_hz;
+            frame.pcm_s16le.reserve(audio_frame_samples);
+
+            const size_t take = std::min(audio_frame_samples, audio_pcm_buffer.size());
+            if (take > 0) {
+              frame.pcm_s16le.insert(frame.pcm_s16le.end(), audio_pcm_buffer.begin(),
+                                     audio_pcm_buffer.begin() +
+                                         static_cast<std::vector<int16_t>::difference_type>(take));
+              audio_pcm_buffer.erase(
+                  audio_pcm_buffer.begin(),
+                  audio_pcm_buffer.begin() + static_cast<std::vector<int16_t>::difference_type>(take));
+            }
+
+            if (frame.pcm_s16le.size() < audio_frame_samples) {
+              const size_t need = audio_frame_samples - frame.pcm_s16le.size();
+              int16_t fill_sample = 0;
+              if (!frame.pcm_s16le.empty()) {
+                fill_sample = frame.pcm_s16le.back();
+              } else if (audio_pacer_has_last_sample) {
+                fill_sample = audio_pacer_last_sample;
+              }
+              frame.pcm_s16le.insert(frame.pcm_s16le.end(), need, fill_sample);
+              audio_stats_conceal_samples += static_cast<uint64_t>(need);
+            }
+
+            if (!frame.pcm_s16le.empty()) {
+              audio_pacer_last_sample = frame.pcm_s16le.back();
+              audio_pacer_has_last_sample = true;
+              frame.sequence = audio_stream_sequence++;
+              frame.sample_index = audio_stream_sample_index;
+              audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
+              ++audio_stats_published_frames;
+              audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
+              event_bus_->PublishAudioFrame(frame);
+            }
+
+            next_audio_frame_deadline += std::chrono::milliseconds(kAudioFrameIntervalMs);
+            ++paced_frames_this_loop;
           }
-          audio_pcm_buffer.erase(audio_pcm_buffer.begin(), frame_end);
         }
       } else if (has_scan_squelch) {
         ++audio_stats_buffer_clears;
         audio_pcm_buffer.clear();
         audio_demod_state = AudioDemodState{};
+        audio_pacer_primed = false;
+        audio_pacer_has_last_sample = false;
+        audio_pacer_last_sample = 0;
+        next_audio_frame_deadline = now;
       }
 
       if (has_scan_squelch && now >= next_audio_stats_emit) {
@@ -1556,6 +1599,7 @@ void ReceiverWorker::RunLoop() {
                      << " pub_frames=" << audio_stats_published_frames
                      << " pub_samples=" << audio_stats_published_samples
                      << " pending_samples=" << audio_pcm_buffer.size()
+                     << " conceal_samples=" << audio_stats_conceal_samples
                      << " clears=" << audio_stats_buffer_clears
                      << " flush_frames=" << audio_stats_flush_frames
                      << " flush_samples=" << audio_stats_flush_samples;
@@ -1567,6 +1611,7 @@ void ReceiverWorker::RunLoop() {
         audio_stats_generated_samples = 0;
         audio_stats_published_frames = 0;
         audio_stats_published_samples = 0;
+        audio_stats_conceal_samples = 0;
         audio_stats_buffer_clears = 0;
         audio_stats_flush_frames = 0;
         audio_stats_flush_samples = 0;
