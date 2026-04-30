@@ -1169,6 +1169,7 @@ void ReceiverWorker::RunLoop() {
     uint64_t audio_stats_buffer_clears = 0;
     uint64_t audio_stats_flush_frames = 0;
     uint64_t audio_stats_flush_samples = 0;
+    uint32_t audio_gate_open_stats_windows = 0;
     uint32_t audio_stats_last_iq_sample_rate_hz = 0;
     size_t audio_stats_last_iq_complex_samples = 0;
     uint32_t audio_stats_configured_sample_rate_hz = desired_sample_rate_hz;
@@ -1466,6 +1467,11 @@ void ReceiverWorker::RunLoop() {
         const double stats_window_s = std::max(
             1.0e-3, std::chrono::duration<double>(now - audio_stats_last_emit_at).count());
         audio_stats_last_emit_at = now;
+        if (audio_gate_open) {
+          ++audio_gate_open_stats_windows;
+        } else {
+          audio_gate_open_stats_windows = 0;
+        }
         audio_stats_last_gen_ratio = 1.0;
         audio_stats_last_rate_correction = 1.0;
         if (audio_gate_open && audio_sample_rate_hz > 0 && audio_stats_generated_samples > 0) {
@@ -1476,13 +1482,13 @@ void ReceiverWorker::RunLoop() {
             const double gen_ratio =
                 std::clamp(generated_samples / target_generated_samples, 0.75, 1.25);
             audio_stats_last_gen_ratio = gen_ratio;
-            // Closed-loop correction: if generated < target, lower IQ rate estimate to increase
-            // audio output. Keep this active even when audio rate is latched during open squelch.
-            const bool large_error = (gen_ratio < 0.85 || gen_ratio > 1.15);
-            const double proportional = large_error ? 0.90 : 0.50;
-            const double correction = large_error
-                                          ? std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.90, 1.10)
-                                          : std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.97, 1.03);
+            // Fast startup convergence: in first open-gate windows, apply direct ratio
+            // correction (bounded) so audio rate reaches target within a few seconds.
+            // After startup, switch to gentler tracking to avoid oscillation.
+            const bool startup_window = audio_gate_open_stats_windows <= 4;
+            const double correction = startup_window
+                                          ? std::clamp(gen_ratio, 0.65, 1.35)
+                                          : std::clamp(1.0 + 0.45 * (gen_ratio - 1.0), 0.97, 1.03);
             audio_stats_last_rate_correction = correction;
             const double base_iq_rate_hz = locked_audio_iq_rate_hz.has_value()
                                                ? *locked_audio_iq_rate_hz
