@@ -528,10 +528,13 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   // Reduce demod CPU load by decimating already channel-filtered IQ before audio
   // demodulation. This keeps audio timing math correct (ratio uses demod sample
   // rate) but helps the worker keep real-time pace.
-  if (iq.sample_rate_hz >= 768000U && iq.interleaved_iq.size() >= 2U * 128U) {
-    constexpr uint32_t kDemodTargetSampleRateHz = 384000U;
+  if (iq.sample_rate_hz >= 384000U && iq.interleaved_iq.size() >= 2U * 128U) {
+    // Push more work out of the hot path by demodding at a lower intermediate
+    // IQ rate; this primarily targets scan-mode speech intelligibility under
+    // CPU pressure (reduced concealment).
+    constexpr uint32_t kDemodTargetSampleRateHz = 128000U;
     uint32_t decim = iq.sample_rate_hz / kDemodTargetSampleRateHz;
-    decim = std::clamp<uint32_t>(decim, 1U, 16U);
+    decim = std::clamp<uint32_t>(decim, 1U, 32U);
     if (decim > 1U) {
       const size_t in_complex = iq.interleaved_iq.size() / 2U;
       const size_t out_complex = in_complex / static_cast<size_t>(decim);
