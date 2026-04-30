@@ -39,7 +39,7 @@ constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
-constexpr size_t kMaxPacedAudioFramesPerLoop = 4;
+constexpr size_t kMaxPacedAudioFramesPerLoop = 8;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
 constexpr uint32_t kAudioSampleRateHz = 8000;
@@ -1484,7 +1484,7 @@ void ReceiverWorker::RunLoop() {
         if (audio_pacer_primed) {
           const auto pace_now = std::chrono::steady_clock::now();
           const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
-          const auto max_late = frame_interval * 2;
+          const auto max_late = std::chrono::milliseconds(400);
           if (pace_now - next_audio_frame_deadline > max_late) {
             // Avoid catch-up bursts after scheduler hiccups; realign pacing to "now".
             next_audio_frame_deadline = pace_now;
