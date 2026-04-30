@@ -39,6 +39,7 @@ constexpr uint32_t kDefaultNfmBandwidthHz = 12500;
 constexpr uint32_t kDefaultWfmBandwidthHz = 180000;
 constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
+constexpr size_t kMaxPacedAudioFramesPerLoop = 4;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
 constexpr uint32_t kAudioSampleRateHz = 8000;
@@ -1480,49 +1481,54 @@ void ReceiverWorker::RunLoop() {
           audio_pacer_primed = true;
           next_audio_frame_deadline = now;
         }
-        if (audio_pacer_primed && now >= next_audio_frame_deadline) {
+        if (audio_pacer_primed) {
+          const auto pace_now = std::chrono::steady_clock::now();
           const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
           const auto max_late = frame_interval * 2;
-          if (now - next_audio_frame_deadline > max_late) {
+          if (pace_now - next_audio_frame_deadline > max_late) {
             // Avoid catch-up bursts after scheduler hiccups; realign pacing to "now".
-            next_audio_frame_deadline = now;
+            next_audio_frame_deadline = pace_now;
           }
+          size_t paced_frames_this_loop = 0;
+          while (std::chrono::steady_clock::now() >= next_audio_frame_deadline &&
+                 paced_frames_this_loop < kMaxPacedAudioFramesPerLoop) {
+            AudioFrame frame;
+            frame.unix_ms = UnixMillisNow();
+            frame.receiver_id = receiver_id_;
+            frame.sample_rate_hz = audio_sample_rate_hz;
+            frame.tuned_frequency_hz = tuned_frequency_hz;
+            frame.pcm_s16le.reserve(audio_frame_samples);
 
-          AudioFrame frame;
-          frame.unix_ms = UnixMillisNow();
-          frame.receiver_id = receiver_id_;
-          frame.sample_rate_hz = audio_sample_rate_hz;
-          frame.tuned_frequency_hz = tuned_frequency_hz;
-          frame.pcm_s16le.reserve(audio_frame_samples);
+            const size_t take = std::min(audio_frame_samples, audio_pcm_buffer.size());
+            if (take > 0) {
+              frame.pcm_s16le.insert(frame.pcm_s16le.end(), audio_pcm_buffer.begin(),
+                                     audio_pcm_buffer.begin() +
+                                         static_cast<std::vector<int16_t>::difference_type>(take));
+              audio_pcm_buffer.erase(
+                  audio_pcm_buffer.begin(),
+                  audio_pcm_buffer.begin() + static_cast<std::vector<int16_t>::difference_type>(take));
+            }
 
-          const size_t take = std::min(audio_frame_samples, audio_pcm_buffer.size());
-          if (take > 0) {
-            frame.pcm_s16le.insert(frame.pcm_s16le.end(), audio_pcm_buffer.begin(),
-                                   audio_pcm_buffer.begin() +
-                                       static_cast<std::vector<int16_t>::difference_type>(take));
-            audio_pcm_buffer.erase(
-                audio_pcm_buffer.begin(),
-                audio_pcm_buffer.begin() + static_cast<std::vector<int16_t>::difference_type>(take));
+            if (frame.pcm_s16le.size() < audio_frame_samples) {
+              const size_t need = audio_frame_samples - frame.pcm_s16le.size();
+              frame.pcm_s16le.insert(frame.pcm_s16le.end(), need, static_cast<int16_t>(0));
+              audio_stats_conceal_samples += static_cast<uint64_t>(need);
+            }
+
+            if (!frame.pcm_s16le.empty()) {
+              audio_pacer_last_sample = frame.pcm_s16le.back();
+              audio_pacer_has_last_sample = true;
+              frame.sequence = audio_stream_sequence++;
+              frame.sample_index = audio_stream_sample_index;
+              audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
+              ++audio_stats_published_frames;
+              audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
+              event_bus_->PublishAudioFrame(frame);
+            }
+
+            next_audio_frame_deadline += frame_interval;
+            ++paced_frames_this_loop;
           }
-
-          if (frame.pcm_s16le.size() < audio_frame_samples) {
-            const size_t need = audio_frame_samples - frame.pcm_s16le.size();
-            frame.pcm_s16le.insert(frame.pcm_s16le.end(), need, static_cast<int16_t>(0));
-            audio_stats_conceal_samples += static_cast<uint64_t>(need);
-          }
-
-          if (!frame.pcm_s16le.empty()) {
-            audio_pacer_last_sample = frame.pcm_s16le.back();
-            audio_pacer_has_last_sample = true;
-            frame.sequence = audio_stream_sequence++;
-            frame.sample_index = audio_stream_sample_index;
-            audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
-            ++audio_stats_published_frames;
-            audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
-            event_bus_->PublishAudioFrame(frame);
-          }
-
-          next_audio_frame_deadline += frame_interval;
         }
       } else if (has_scan_squelch) {
         ++audio_stats_buffer_clears;
