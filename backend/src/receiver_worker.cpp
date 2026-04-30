@@ -1176,9 +1176,6 @@ void ReceiverWorker::RunLoop() {
         iq_rate_estimate_valid_ ? iq_rate_estimate_hz_ : static_cast<double>(desired_sample_rate_hz);
     double audio_stats_last_gen_ratio = 1.0;
     double audio_stats_last_rate_correction = 1.0;
-    std::optional<std::chrono::steady_clock::time_point> last_iq_read_completed_at;
-    uint64_t iq_rate_window_samples = 0;
-    double iq_rate_window_seconds = 0.0;
     std::optional<double> locked_audio_iq_rate_hz;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
@@ -1209,47 +1206,13 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
-      const auto iq_read_completed_at = std::chrono::steady_clock::now();
       const size_t iq_complex_samples = iq.interleaved_iq.size() / 2;
-      if (last_iq_read_completed_at.has_value() && iq_complex_samples > 0) {
-        const double dt_s =
-            std::chrono::duration<double>(iq_read_completed_at - *last_iq_read_completed_at).count();
-        if (dt_s > 1.0e-4) {
-          iq_rate_window_samples += static_cast<uint64_t>(iq_complex_samples);
-          iq_rate_window_seconds += dt_s;
-          const double lock_window_s = iq_rate_estimate_valid_ ? 0.75 : 0.15;
-          if (iq_rate_window_seconds >= lock_window_s && iq_rate_window_samples > 0) {
-            const double raw_rate_hz =
-                static_cast<double>(iq_rate_window_samples) / iq_rate_window_seconds;
-            if (std::isfinite(raw_rate_hz) &&
-                raw_rate_hz >= static_cast<double>(kMinSampleRateHz) * 0.5 &&
-                raw_rate_hz <= static_cast<double>(kMaxSampleRateHz) * 1.25) {
-              if (!iq_rate_estimate_valid_) {
-                // Fast-lock startup: avoid long audible speed ramp from configured SR.
-                audio_stats_estimated_iq_sample_rate_hz = raw_rate_hz;
-                iq_rate_estimate_valid_ = true;
-              } else {
-                const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
-                const double alpha = 0.02;
-                const double target_rate_hz = prev_rate_hz + alpha * (raw_rate_hz - prev_rate_hz);
-                const double max_step_hz = prev_rate_hz * 0.005;
-                audio_stats_estimated_iq_sample_rate_hz = std::clamp(
-                    target_rate_hz, prev_rate_hz - max_step_hz, prev_rate_hz + max_step_hz);
-              }
-            }
-            iq_rate_window_samples = 0;
-            iq_rate_window_seconds = 0.0;
-          }
-        }
-      }
-      last_iq_read_completed_at = iq_read_completed_at;
+      // Use the device-provided IQ sample rate directly for demod/resampling.
+      // Wall-clock estimation from loop timing is biased by processing latency and
+      // can make audio sound stretched/slowed down.
+      audio_stats_estimated_iq_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
       iq_rate_estimate_hz_ = audio_stats_estimated_iq_sample_rate_hz;
-      const uint32_t effective_iq_sample_rate_hz = static_cast<uint32_t>(std::llround(std::clamp(
-          audio_stats_estimated_iq_sample_rate_hz, static_cast<double>(kMinSampleRateHz),
-          static_cast<double>(kMaxSampleRateHz))));
-      if (effective_iq_sample_rate_hz > 0) {
-        iq.sample_rate_hz = effective_iq_sample_rate_hz;
-      }
+      iq_rate_estimate_valid_ = false;
       audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
       audio_stats_last_iq_complex_samples = iq_complex_samples;
       if (effective_lo_offset_hz != 0) {
