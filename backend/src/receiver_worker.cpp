@@ -475,29 +475,17 @@ double EstimateSignalDbfs(const IQSampleBlock& iq) {
   if (sample_count == 0) {
     return -120.0;
   }
-  size_t stride = 1;
-  if (sample_count > 8192) {
-    stride = 4;
-  } else if (sample_count > 4096) {
-    stride = 2;
-  }
-  const size_t step = 2 * stride;
-  double sum_power = 0.0;
-  size_t used_samples = 0;
-  for (size_t idx = 0; idx + 1 < iq.interleaved_iq.size(); idx += step) {
-    const double i = static_cast<double>(iq.interleaved_iq[idx]);
-    const double q = static_cast<double>(iq.interleaved_iq[idx + 1]);
+  long double sum_power = 0.0;
+  for (size_t idx = 0; idx + 1 < iq.interleaved_iq.size(); idx += 2) {
+    const long double i = static_cast<long double>(iq.interleaved_iq[idx]);
+    const long double q = static_cast<long double>(iq.interleaved_iq[idx + 1]);
     sum_power += i * i + q * q;
-    ++used_samples;
   }
-  if (used_samples == 0) {
-    return -120.0;
-  }
-  const double mean_power = sum_power / static_cast<double>(used_samples);
-  constexpr double kFullScalePower = 32768.0 * 32768.0;
-  const double normalized = mean_power / kFullScalePower;
-  const double bounded = std::max(normalized, 1.0e-12);
-  return 10.0 * std::log10(bounded);
+  const long double mean_power = sum_power / static_cast<long double>(sample_count);
+  const long double full_scale_power = 32768.0L * 32768.0L;
+  const long double normalized = mean_power / full_scale_power;
+  const long double bounded = std::max<long double>(normalized, 1.0e-12L);
+  return 10.0 * std::log10(static_cast<double>(bounded));
 }
 
 std::vector<double> BuildAmEnvelope(const IQSampleBlock& iq) {
@@ -1287,15 +1275,7 @@ void ReceiverWorker::RunLoop() {
                                        &receiver_start_hz, &receiver_end_hz);
       }
 
-      const bool lightweight_scan_wfm =
-          has_scan_squelch && scan_modulation == Modulation::kWfm;
-      if (!lightweight_scan_wfm) {
-        ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
-      } else {
-        // In scan WFM, prioritize real-time continuity over sharp RF selectivity.
-        // The audio demod chain still applies low-pass/de-emphasis shaping.
-        lowpass_state.initialized = false;
-      }
+      ApplyIqChannelBandwidth(&iq, channel_bandwidth_hz, &lowpass_state);
       const double signal_db = EstimateSignalDbfs(iq);
       last_signal_db = signal_db;
 
@@ -1509,9 +1489,17 @@ void ReceiverWorker::RunLoop() {
             }
 
             if (frame.pcm_s16le.size() < audio_frame_samples) {
-              const size_t need = audio_frame_samples - frame.pcm_s16le.size();
-              frame.pcm_s16le.insert(frame.pcm_s16le.end(), need, static_cast<int16_t>(0));
-              audio_stats_conceal_samples += static_cast<uint64_t>(need);
+              // Do not synthesize silence to hit nominal output pace; publishing
+              // only real demodulated samples avoids long "silent" stretches when
+              // generation falls behind.
+              if (take > 0) {
+                audio_pcm_buffer.insert(
+                    audio_pcm_buffer.begin(),
+                    frame.pcm_s16le.begin(),
+                    frame.pcm_s16le.end());
+                frame.pcm_s16le.clear();
+              }
+              break;
             }
 
             if (!frame.pcm_s16le.empty()) {
