@@ -21,6 +21,7 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kWaveformPoints = 120;
 constexpr int kSpectrumBins = 128;
 constexpr uint32_t kVisualizationFrameIntervalMs = 100;
+constexpr bool kBackendVisualizationEnabled = false;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kMinSampleRateHz = 225000;
 constexpr uint32_t kMaxSampleRateHz = 3200000;
@@ -520,17 +521,39 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   if (state == nullptr) {
     state = &local_state;
   }
+  IQSampleBlock demod_iq = iq;
+  // Reduce demod CPU load by decimating already channel-filtered IQ before audio
+  // demodulation. This keeps audio timing math correct (ratio uses demod sample
+  // rate) but helps the worker keep real-time pace.
+  if (iq.sample_rate_hz >= 768000U && iq.interleaved_iq.size() >= 2U * 128U) {
+    constexpr uint32_t kDemodTargetSampleRateHz = 384000U;
+    uint32_t decim = iq.sample_rate_hz / kDemodTargetSampleRateHz;
+    decim = std::clamp<uint32_t>(decim, 1U, 16U);
+    if (decim > 1U) {
+      const size_t in_complex = iq.interleaved_iq.size() / 2U;
+      const size_t out_complex = in_complex / static_cast<size_t>(decim);
+      if (out_complex >= 128U) {
+        demod_iq.interleaved_iq.resize(out_complex * 2U);
+        for (size_t out_idx = 0; out_idx < out_complex; ++out_idx) {
+          const size_t in_idx = out_idx * static_cast<size_t>(decim);
+          demod_iq.interleaved_iq[out_idx * 2U] = iq.interleaved_iq[in_idx * 2U];
+          demod_iq.interleaved_iq[out_idx * 2U + 1U] = iq.interleaved_iq[in_idx * 2U + 1U];
+        }
+        demod_iq.sample_rate_hz = iq.sample_rate_hz / decim;
+      }
+    }
+  }
   std::vector<double> source;
   if (modulation == Modulation::kAm) {
-    source = BuildAmEnvelope(iq);
+    source = BuildAmEnvelope(demod_iq);
   } else {
-    source = BuildFmDiscriminator(iq, 0, &state->fm_discriminator);
+    source = BuildFmDiscriminator(demod_iq, 0, &state->fm_discriminator);
   }
   if (source.size() < 32) {
     return false;
   }
 
-  const double source_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
+  const double source_sample_rate_hz = static_cast<double>(demod_iq.sample_rate_hz);
   switch (modulation) {
     case Modulation::kWfm:
       // Voice-focused WFM chain with less aggressive high-cut/de-emphasis to
@@ -553,7 +576,7 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   if (audio_sample_rate_hz == 0) {
     return false;
   }
-  const double ratio = static_cast<double>(iq.sample_rate_hz) / static_cast<double>(audio_sample_rate_hz);
+  const double ratio = source_sample_rate_hz / static_cast<double>(audio_sample_rate_hz);
   if (ratio <= 0.0 || !std::isfinite(ratio)) {
     return false;
   }
@@ -1236,7 +1259,8 @@ void ReceiverWorker::RunLoop() {
       }
       iq.center_frequency_hz = static_cast<uint32_t>(std::llround(logical_tuned_frequency_hz));
 
-      const bool emit_viz_this_tick = now >= next_viz_emit;
+      const bool emit_viz_this_tick =
+          kBackendVisualizationEnabled && (now >= next_viz_emit);
       double receiver_peak_hz = 0.0;
       double receiver_peak_strength = 0.0;
       double receiver_start_hz = 0.0;
