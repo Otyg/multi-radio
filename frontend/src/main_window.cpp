@@ -2257,7 +2257,55 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
   }
   // Recover from transient init failures; only env flag should hard-disable audio.
   audio_output_disabled_ = false;
-  if (audio_sink_ != nullptr && audio_output_sample_rate_hz_ != sample_rate_hz) {
+  const QAudioDevice default_output = QMediaDevices::defaultAudioOutput();
+  if (default_output.isNull()) {
+    AppendLog("Audio output unavailable: no default output device (will retry)");
+    return;
+  }
+
+  QAudioFormat audio_format;
+  audio_format.setChannelCount(1);
+  audio_format.setSampleFormat(QAudioFormat::Int16);
+
+  int selected_rate_hz = 0;
+  const QAudioFormat preferred = default_output.preferredFormat();
+  if (preferred.sampleRate() > 0) {
+    QAudioFormat preferred_mono_s16 = preferred;
+    preferred_mono_s16.setChannelCount(1);
+    preferred_mono_s16.setSampleFormat(QAudioFormat::Int16);
+    if (default_output.isFormatSupported(preferred_mono_s16)) {
+      selected_rate_hz = preferred_mono_s16.sampleRate();
+    }
+  }
+  if (selected_rate_hz <= 0) {
+    const int candidates[] = {48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, sample_rate_hz};
+    int selected_distance = std::numeric_limits<int>::max();
+    for (const int candidate_rate_hz : candidates) {
+      if (candidate_rate_hz <= 0) {
+        continue;
+      }
+      QAudioFormat candidate;
+      candidate.setChannelCount(1);
+      candidate.setSampleFormat(QAudioFormat::Int16);
+      candidate.setSampleRate(candidate_rate_hz);
+      if (!default_output.isFormatSupported(candidate)) {
+        continue;
+      }
+      const int distance = std::abs(candidate_rate_hz - sample_rate_hz);
+      if (distance < selected_distance || selected_rate_hz <= 0) {
+        selected_distance = distance;
+        selected_rate_hz = candidate_rate_hz;
+      }
+    }
+  }
+  if (selected_rate_hz <= 0) {
+    AppendLog(QString("Audio output unavailable: no supported mono s16le sample rate (requested %1 Hz, preferred %2 Hz)")
+                  .arg(sample_rate_hz)
+                  .arg(preferred.sampleRate()));
+    return;
+  }
+  audio_format.setSampleRate(selected_rate_hz);
+  if (audio_sink_ != nullptr && audio_output_sample_rate_hz_ != selected_rate_hz) {
     audio_sink_->stop();
     audio_sink_->deleteLater();
     audio_sink_ = nullptr;
@@ -2271,50 +2319,13 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
     audio_output_sample_rate_hz_ = 0;
   }
   if (audio_output_device_ != nullptr && audio_sink_ != nullptr &&
-      audio_output_sample_rate_hz_ == sample_rate_hz) {
+      audio_output_sample_rate_hz_ == selected_rate_hz) {
     return;
   }
-  const QAudioDevice default_output = QMediaDevices::defaultAudioOutput();
-  if (default_output.isNull()) {
-    AppendLog("Audio output unavailable: no default output device (will retry)");
-    return;
-  }
-
-  QAudioFormat audio_format;
-  audio_format.setChannelCount(1);
-  audio_format.setSampleFormat(QAudioFormat::Int16);
-  audio_format.setSampleRate(sample_rate_hz);
-
-  if (!default_output.isFormatSupported(audio_format)) {
-    const int candidates[] = {sample_rate_hz, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000};
-    int selected_rate_hz = 0;
-    int selected_distance = std::numeric_limits<int>::max();
-    for (const int candidate_rate_hz : candidates) {
-      if (candidate_rate_hz <= 0) {
-        continue;
-      }
-      QAudioFormat candidate = audio_format;
-      candidate.setSampleRate(candidate_rate_hz);
-      if (!default_output.isFormatSupported(candidate)) {
-        continue;
-      }
-      const int distance = std::abs(candidate_rate_hz - sample_rate_hz);
-      if (distance < selected_distance) {
-        selected_distance = distance;
-        selected_rate_hz = candidate_rate_hz;
-      }
-    }
-    if (selected_rate_hz <= 0) {
-      const QAudioFormat preferred = default_output.preferredFormat();
-      AppendLog(QString("Audio output unavailable: mono s16le rates not supported (requested %1 Hz, preferred %2 Hz)")
-                    .arg(sample_rate_hz)
-                    .arg(preferred.sampleRate()));
-      return;
-    }
-    audio_format.setSampleRate(selected_rate_hz);
-    AppendLog(QString("Audio format fallback: requested %1 Hz, using %2 Hz")
-                  .arg(sample_rate_hz)
-                  .arg(selected_rate_hz));
+  if (selected_rate_hz != sample_rate_hz) {
+    AppendLog(QString("Audio output using %1 Hz (input %2 Hz; client resampling enabled)")
+                  .arg(selected_rate_hz)
+                  .arg(sample_rate_hz));
   }
   audio_sink_ = new QAudioSink(default_output, audio_format, this);
   audio_sink_->setBufferSize(
