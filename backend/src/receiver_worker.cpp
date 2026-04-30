@@ -41,8 +41,8 @@ constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
-constexpr uint32_t kAudioSampleRateHz = 4800;
-constexpr const char* kAudioPipelineRevision = "audio-v7-4800";
+constexpr uint32_t kAudioSampleRateHz = 8000;
+constexpr const char* kAudioPipelineRevision = "audio-v8-8k-throughput";
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
@@ -1180,6 +1180,7 @@ void ReceiverWorker::RunLoop() {
     double audio_stats_last_gen_ratio = 1.0;
     double audio_stats_last_rate_correction = 1.0;
     std::optional<double> locked_audio_iq_rate_hz;
+    std::optional<std::chrono::steady_clock::time_point> audio_iq_last_read_at;
     bool audio_pacer_primed = false;
     auto next_audio_frame_deadline = tune_started_at;
     bool audio_pacer_has_last_sample = false;
@@ -1214,12 +1215,32 @@ void ReceiverWorker::RunLoop() {
         break;
       }
       const size_t iq_complex_samples = iq.interleaved_iq.size() / 2;
-      // Use the device-provided IQ sample rate directly for demod/resampling.
-      // Wall-clock estimation from loop timing is biased by processing latency and
-      // can make audio sound stretched/slowed down.
-      audio_stats_estimated_iq_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
-      iq_rate_estimate_hz_ = audio_stats_estimated_iq_sample_rate_hz;
-      iq_rate_estimate_valid_ = true;
+      const auto iq_read_at = std::chrono::steady_clock::now();
+      if (audio_iq_last_read_at.has_value() && iq_complex_samples > 0) {
+        const double dt_s =
+            std::chrono::duration<double>(iq_read_at - *audio_iq_last_read_at).count();
+        if (dt_s >= 1.0e-4) {
+          const double inst_rate_hz =
+              static_cast<double>(iq_complex_samples) / dt_s;
+          if (std::isfinite(inst_rate_hz) && inst_rate_hz >= static_cast<double>(kMinSampleRateHz) &&
+              inst_rate_hz <= static_cast<double>(kMaxSampleRateHz)) {
+            if (!iq_rate_estimate_valid_ || iq_rate_estimate_hz_ <= 0.0) {
+              iq_rate_estimate_hz_ = inst_rate_hz;
+              iq_rate_estimate_valid_ = true;
+            } else {
+              constexpr double kIqrEmaAlpha = 0.12;
+              iq_rate_estimate_hz_ =
+                  (1.0 - kIqrEmaAlpha) * iq_rate_estimate_hz_ + kIqrEmaAlpha * inst_rate_hz;
+            }
+          }
+        }
+      }
+      audio_iq_last_read_at = iq_read_at;
+      if (!iq_rate_estimate_valid_ || iq_rate_estimate_hz_ <= 0.0) {
+        iq_rate_estimate_hz_ = static_cast<double>(iq.sample_rate_hz);
+        iq_rate_estimate_valid_ = true;
+      }
+      audio_stats_estimated_iq_sample_rate_hz = iq_rate_estimate_hz_;
       audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
       audio_stats_last_iq_complex_samples = iq_complex_samples;
       if (effective_lo_offset_hz != 0) {
