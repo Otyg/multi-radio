@@ -2365,6 +2365,18 @@ void MainWindow::MaybeEmitFrontendAudioStats() {
        now_ms <= audio_backend_stats_last_seen_at_ms_ + (kAudioFrontendStatsIntervalMs * 2))
           ? 1
           : 0;
+  const bool has_audio_activity = audio_frontend_rx_frames_ > 0 || audio_frontend_rx_bytes_ > 0 ||
+                                  audio_frontend_filtered_frames_ > 0 ||
+                                  audio_frontend_prefill_wait_events_ > 0 ||
+                                  audio_frontend_prefill_complete_events_ > 0 ||
+                                  pending_bytes > 0 || audio_frontend_write_calls_ > 0 ||
+                                  audio_frontend_written_bytes_ > 0 ||
+                                  audio_frontend_write_blocked_events_ > 0 ||
+                                  audio_frontend_overrun_dropped_bytes_ > 0;
+  if (backend_seen_recent == 0 && !has_audio_activity) {
+    audio_frontend_stats_window_started_at_ms_ = now_ms;
+    return;
+  }
 
   AppendLog(QString("AUDIO_FE_STATS rx_f=%1 rx_b=%2 filt_f=%3 rx_sr=%4 out_sr=%5 "
                     "prefill=%6 wait=%7 ready=%8 pend_b=%9 write_c=%10 write_b=%11 "

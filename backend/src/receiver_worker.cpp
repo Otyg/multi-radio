@@ -1171,6 +1171,8 @@ void ReceiverWorker::RunLoop() {
     uint32_t audio_stats_configured_sample_rate_hz = desired_sample_rate_hz;
     double audio_stats_estimated_iq_sample_rate_hz = static_cast<double>(desired_sample_rate_hz);
     std::optional<std::chrono::steady_clock::time_point> last_iq_read_completed_at;
+    uint64_t iq_rate_window_samples = 0;
+    double iq_rate_window_seconds = 0.0;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
@@ -1206,13 +1208,20 @@ void ReceiverWorker::RunLoop() {
         const double dt_s =
             std::chrono::duration<double>(iq_read_completed_at - *last_iq_read_completed_at).count();
         if (dt_s > 1.0e-4) {
-          const double raw_rate_hz = static_cast<double>(iq_complex_samples) / dt_s;
-          if (std::isfinite(raw_rate_hz) && raw_rate_hz >= static_cast<double>(kMinSampleRateHz) * 0.5 &&
-              raw_rate_hz <= static_cast<double>(kMaxSampleRateHz) * 1.25) {
-            const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
-            const double relative_error = std::abs(raw_rate_hz - prev_rate_hz) / prev_rate_hz;
-            const double alpha = (relative_error > 0.15) ? 0.35 : 0.12;
-            audio_stats_estimated_iq_sample_rate_hz += alpha * (raw_rate_hz - prev_rate_hz);
+          iq_rate_window_samples += static_cast<uint64_t>(iq_complex_samples);
+          iq_rate_window_seconds += dt_s;
+          if (iq_rate_window_seconds >= 0.75 && iq_rate_window_samples > 0) {
+            const double raw_rate_hz =
+                static_cast<double>(iq_rate_window_samples) / iq_rate_window_seconds;
+            if (std::isfinite(raw_rate_hz) &&
+                raw_rate_hz >= static_cast<double>(kMinSampleRateHz) * 0.5 &&
+                raw_rate_hz <= static_cast<double>(kMaxSampleRateHz) * 1.25) {
+              const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
+              const double alpha = 0.08;
+              audio_stats_estimated_iq_sample_rate_hz += alpha * (raw_rate_hz - prev_rate_hz);
+            }
+            iq_rate_window_samples = 0;
+            iq_rate_window_seconds = 0.0;
           }
         }
       }
