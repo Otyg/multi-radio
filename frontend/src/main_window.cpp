@@ -1432,6 +1432,18 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     const QString modulation = TokenValue(message, "mod");
     bool sr_ok = false;
     const int sample_rate_hz = TokenValue(message, "sr").toInt(&sr_ok);
+    bool cfg_sr_ok = false;
+    const int configured_sample_rate_hz = TokenValue(message, "cfg_sr").toInt(&cfg_sr_ok);
+    bool iq_sr_ok = false;
+    const int iq_sample_rate_hz = TokenValue(message, "iq_sr").toInt(&iq_sr_ok);
+    bool iq_est_sr_ok = false;
+    const double iq_estimated_sample_rate_hz = TokenValue(message, "iq_est_sr").toDouble(&iq_est_sr_ok);
+    bool win_ms_ok = false;
+    const qint64 window_ms = TokenValue(message, "win_ms").toLongLong(&win_ms_ok);
+    bool gen_hz_ok = false;
+    const double generated_hz = TokenValue(message, "gen_hz").toDouble(&gen_hz_ok);
+    bool pub_hz_ok = false;
+    const double published_hz = TokenValue(message, "pub_hz").toDouble(&pub_hz_ok);
     bool gate_ok = false;
     const int gate = TokenValue(message, "gate").toInt(&gate_ok);
     bool squelch_ok = false;
@@ -1461,15 +1473,22 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     bool flush_samples_ok = false;
     const qint64 flush_samples = TokenValue(message, "flush_samples").toLongLong(&flush_samples_ok);
 
-    AppendLog(QString("[%1] RX%2 AUDIO_STATS ch=%3 idx=%4 mod=%5 sr=%6 gate=%7 sq=%8 sig=%9 dB "
-                      "blk=%10 open_blk=%11 demod_ok=%12 demod_empty=%13 gen=%14 pub_f=%15 pub_s=%16 "
-                      "pend=%17 clr=%18 flush_f=%19 flush_s=%20")
+    AppendLog(QString("[%1] RX%2 AUDIO_STATS ch=%3 idx=%4 mod=%5 sr=%6 cfg_sr=%7 iq_sr=%8 iq_est=%9 "
+                      "win_ms=%10 gen_hz=%11 pub_hz=%12 gate=%13 sq=%14 sig=%15 dB "
+                      "blk=%16 open_blk=%17 demod_ok=%18 demod_empty=%19 gen=%20 pub_f=%21 pub_s=%22 "
+                      "pend=%23 clr=%24 flush_f=%25 flush_s=%26")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
                   .arg(channel_label)
                   .arg(idx_ok ? channel_index : -1)
                   .arg(modulation.isEmpty() ? "?" : modulation)
                   .arg(sr_ok ? sample_rate_hz : -1)
+                  .arg(cfg_sr_ok ? configured_sample_rate_hz : -1)
+                  .arg(iq_sr_ok ? iq_sample_rate_hz : -1)
+                  .arg(iq_est_sr_ok ? QString::number(iq_estimated_sample_rate_hz, 'f', 0) : "?")
+                  .arg(win_ms_ok ? window_ms : -1)
+                  .arg(gen_hz_ok ? QString::number(generated_hz, 'f', 1) : "?")
+                  .arg(pub_hz_ok ? QString::number(published_hz, 'f', 1) : "?")
                   .arg(gate_ok ? gate : -1)
                   .arg(squelch_ok ? squelch : -1)
                   .arg(signal_ok ? QString::number(signal_db, 'f', 1) : "?")

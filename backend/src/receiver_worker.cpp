@@ -1472,6 +1472,7 @@ void ReceiverWorker::RunLoop() {
         const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
         const double stats_window_s = std::max(
             1.0e-3, std::chrono::duration<double>(now - audio_stats_last_emit_at).count());
+        const uint64_t stats_window_ms = static_cast<uint64_t>(std::llround(stats_window_s * 1000.0));
         audio_stats_last_emit_at = now;
         if (audio_gate_open) {
           ++audio_gate_open_stats_windows;
@@ -1494,6 +1495,8 @@ void ReceiverWorker::RunLoop() {
             audio_stats_last_rate_correction = 1.0;
           }
         }
+        const double generated_hz = static_cast<double>(audio_stats_generated_samples) / stats_window_s;
+        const double published_hz = static_cast<double>(audio_stats_published_samples) / stats_window_s;
         std::ostringstream audio_status;
         audio_status << "AUDIO_STATS idx=" << scan_list_channel_index
                      << " label=" << scan_list_channel_label_token
@@ -1504,8 +1507,11 @@ void ReceiverWorker::RunLoop() {
                      << " iq_est_sr=" << FormatDouble(audio_stats_estimated_iq_sample_rate_hz, 0)
                      << " iq_lock=" << (locked_audio_iq_rate_hz.has_value() ? "1" : "0")
                      << " iq_lock_sr=" << FormatDouble(locked_audio_iq_rate_hz.value_or(0.0), 0)
+                     << " win_ms=" << stats_window_ms
                      << " gen_ratio=" << FormatDouble(audio_stats_last_gen_ratio, 3)
                      << " rate_corr=" << FormatDouble(audio_stats_last_rate_correction, 4)
+                     << " gen_hz=" << FormatDouble(generated_hz, 1)
+                     << " pub_hz=" << FormatDouble(published_hz, 1)
                      << " iq_n=" << audio_stats_last_iq_complex_samples
                      << " gate=" << (audio_gate_open ? "1" : "0")
                      << " squelch=" << (squelch_open ? "1" : "0")

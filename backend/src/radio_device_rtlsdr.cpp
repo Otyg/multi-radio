@@ -155,7 +155,13 @@ class RtlSdrDevice final : public IRadioDevice {
     const size_t complex_samples = static_cast<size_t>(n_read) / 2U;
     const double read_seconds =
         std::chrono::duration<double>(read_completed_at - read_started_at).count();
-    if (complex_samples > 0 && read_seconds > 1.0e-4) {
+    const double nominal_sample_rate_hz = std::max(1.0, static_cast<double>(sample_rate_hz_));
+    const double expected_read_seconds = static_cast<double>(complex_samples) / nominal_sample_rate_hz;
+    // If read returns far faster than expected, we are likely draining already
+    // buffered samples (not measuring real acquisition pace). Ignore those
+    // durations for sample-rate estimation.
+    const double min_valid_read_seconds = expected_read_seconds * 0.35;
+    if (complex_samples > 0 && read_seconds > std::max(1.0e-4, min_valid_read_seconds)) {
       const double measured_sample_rate_hz = static_cast<double>(complex_samples) / read_seconds;
       if (std::isfinite(measured_sample_rate_hz) && measured_sample_rate_hz >= 200000.0 &&
           measured_sample_rate_hz <= 4000000.0) {
