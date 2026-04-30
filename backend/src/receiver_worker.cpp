@@ -522,7 +522,8 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   if (state == nullptr) {
     state = &local_state;
   }
-  IQSampleBlock demod_iq = iq;
+  const IQSampleBlock* demod_iq_ptr = &iq;
+  IQSampleBlock demod_iq_decimated;
   // Reduce demod CPU load by decimating already channel-filtered IQ before audio
   // demodulation. This keeps audio timing math correct (ratio uses demod sample
   // rate) but helps the worker keep real-time pace.
@@ -534,27 +535,29 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
       const size_t in_complex = iq.interleaved_iq.size() / 2U;
       const size_t out_complex = in_complex / static_cast<size_t>(decim);
       if (out_complex >= 128U) {
-        demod_iq.interleaved_iq.resize(out_complex * 2U);
+        demod_iq_decimated.interleaved_iq.resize(out_complex * 2U);
         for (size_t out_idx = 0; out_idx < out_complex; ++out_idx) {
           const size_t in_idx = out_idx * static_cast<size_t>(decim);
-          demod_iq.interleaved_iq[out_idx * 2U] = iq.interleaved_iq[in_idx * 2U];
-          demod_iq.interleaved_iq[out_idx * 2U + 1U] = iq.interleaved_iq[in_idx * 2U + 1U];
+          demod_iq_decimated.interleaved_iq[out_idx * 2U] = iq.interleaved_iq[in_idx * 2U];
+          demod_iq_decimated.interleaved_iq[out_idx * 2U + 1U] = iq.interleaved_iq[in_idx * 2U + 1U];
         }
-        demod_iq.sample_rate_hz = iq.sample_rate_hz / decim;
+        demod_iq_decimated.sample_rate_hz = iq.sample_rate_hz / decim;
+        demod_iq_decimated.center_frequency_hz = iq.center_frequency_hz;
+        demod_iq_ptr = &demod_iq_decimated;
       }
     }
   }
   std::vector<double> source;
   if (modulation == Modulation::kAm) {
-    source = BuildAmEnvelope(demod_iq);
+    source = BuildAmEnvelope(*demod_iq_ptr);
   } else {
-    source = BuildFmDiscriminator(demod_iq, 0, &state->fm_discriminator);
+    source = BuildFmDiscriminator(*demod_iq_ptr, 0, &state->fm_discriminator);
   }
   if (source.size() < 32) {
     return false;
   }
 
-  const double source_sample_rate_hz = static_cast<double>(demod_iq.sample_rate_hz);
+  const double source_sample_rate_hz = static_cast<double>(demod_iq_ptr->sample_rate_hz);
   switch (modulation) {
     case Modulation::kWfm:
       // Voice-focused WFM chain with less aggressive high-cut/de-emphasis to
@@ -1376,7 +1379,7 @@ void ReceiverWorker::RunLoop() {
         // Prioritize uninterrupted audio in scan mode while squelch is open.
         // Plugin decoding is relatively expensive and can starve audio generation.
         if (has_scan_squelch && audio_gate_open) {
-          process_plugins_this_block = ((audio_stats_iq_blocks % 3U) == 0U);
+          process_plugins_this_block = false;
         }
         if (process_plugins_this_block) {
           plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
