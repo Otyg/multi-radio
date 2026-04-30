@@ -1177,6 +1177,8 @@ void ReceiverWorker::RunLoop() {
     uint32_t audio_stats_configured_sample_rate_hz = 0;
     double audio_stats_estimated_iq_sample_rate_hz =
         iq_rate_estimate_valid_ ? iq_rate_estimate_hz_ : 0.0;
+    bool audio_stats_iq_rate_lock_applied = false;
+    uint32_t audio_stats_iq_rate_lock_hz = 0;
     double audio_stats_last_gen_ratio = 1.0;
     double audio_stats_last_rate_correction = 1.0;
     std::optional<std::chrono::steady_clock::time_point> audio_iq_last_read_at;
@@ -1442,6 +1444,25 @@ void ReceiverWorker::RunLoop() {
 
       if (audio_gate_open) {
         std::vector<int16_t> block_pcm;
+        IQSampleBlock iq_for_audio = iq;
+        audio_stats_iq_rate_lock_applied = false;
+        audio_stats_iq_rate_lock_hz = 0;
+        if (iq.sample_rate_hz > 0 && iq_rate_estimate_valid_ && iq_rate_estimate_hz_ > 0.0) {
+          const uint32_t estimated_rate_hz =
+              static_cast<uint32_t>(std::llround(std::clamp(
+                  iq_rate_estimate_hz_, static_cast<double>(kMinSampleRateHz),
+                  static_cast<double>(kMaxSampleRateHz))));
+          const double delta_ratio = std::abs(static_cast<double>(estimated_rate_hz) -
+                                              static_cast<double>(iq.sample_rate_hz)) /
+                                     static_cast<double>(iq.sample_rate_hz);
+          if (estimated_rate_hz > 0 && delta_ratio >= 0.08) {
+            // Match demod/resample timing to observed IQ throughput to reduce
+            // concealment artifacts when transport rate diverges from nominal.
+            iq_for_audio.sample_rate_hz = estimated_rate_hz;
+            audio_stats_iq_rate_lock_applied = true;
+            audio_stats_iq_rate_lock_hz = estimated_rate_hz;
+          }
+        }
         const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
         const size_t audio_frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
         if (audio_frame_samples == 0) {
@@ -1449,7 +1470,8 @@ void ReceiverWorker::RunLoop() {
           audio_demod_state = AudioDemodState{};
           continue;
         }
-        if (BuildAudioPcm16(iq, scan_modulation, audio_sample_rate_hz, &audio_demod_state, &block_pcm)) {
+        if (BuildAudioPcm16(iq_for_audio, scan_modulation, audio_sample_rate_hz, &audio_demod_state,
+                            &block_pcm)) {
           ++audio_stats_demod_ok_blocks;
           audio_stats_generated_samples += static_cast<uint64_t>(block_pcm.size());
           audio_pcm_buffer.insert(audio_pcm_buffer.end(), block_pcm.begin(), block_pcm.end());
@@ -1557,8 +1579,8 @@ void ReceiverWorker::RunLoop() {
                      << " cfg_sr=" << audio_stats_configured_sample_rate_hz
                      << " iq_sr=" << audio_stats_last_iq_sample_rate_hz
                      << " iq_est_sr=" << FormatDouble(audio_stats_estimated_iq_sample_rate_hz, 0)
-                     << " iq_lock=0"
-                     << " iq_lock_sr=0"
+                     << " iq_lock=" << (audio_stats_iq_rate_lock_applied ? "1" : "0")
+                     << " iq_lock_sr=" << audio_stats_iq_rate_lock_hz
                      << " win_ms=" << stats_window_ms
                      << " gen_ratio=" << FormatDouble(audio_stats_last_gen_ratio, 3)
                      << " rate_corr=" << FormatDouble(audio_stats_last_rate_correction, 4)
