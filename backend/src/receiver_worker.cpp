@@ -533,9 +533,10 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   const double source_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
   switch (modulation) {
     case Modulation::kWfm:
-      // Favor voice intelligibility for scanner-style WFM monitoring.
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 4200.0, 4, &state->lowpass);
-      ApplyFmDeemphasis(&source, source_sample_rate_hz, 75.0, &state->deemphasis);
+      // Voice-focused WFM chain with less aggressive high-cut/de-emphasis to
+      // avoid overly bass-heavy, smeared audio.
+      ApplyCascadedLowPass(&source, source_sample_rate_hz, 5200.0, 3, &state->lowpass);
+      ApplyFmDeemphasis(&source, source_sample_rate_hz, 50.0, &state->deemphasis);
       break;
     case Modulation::kAm:
       ApplyCascadedLowPass(&source, source_sample_rate_hz, 4500.0, 3, &state->lowpass);
@@ -641,7 +642,7 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
     prev_q = state->prev_q;
   }
   discriminator.reserve(sample_count - start_idx);
-  constexpr double kMaxPhaseStepRad = 1.2;
+  constexpr double kMaxPhaseStepRad = 2.2;
   for (size_t n = start_idx; n < sample_count; ++n) {
     double cur_i = 0.0;
     double cur_q = 0.0;
