@@ -42,7 +42,7 @@ constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 40;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
-constexpr uint32_t kAudioSampleRateHz = 16000;
+constexpr uint32_t kAudioSampleRateHz = 8000;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
