@@ -1,5 +1,8 @@
 #include "multi_radio/radio_device.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
@@ -33,6 +36,8 @@ class RtlSdrDevice final : public IRadioDevice {
       return false;
     }
     rtlsdr_reset_buffer(dev_);
+    observed_sample_rate_valid_ = false;
+    observed_sample_rate_hz_ = static_cast<double>(sample_rate_hz_);
     return true;
   }
 
@@ -77,6 +82,8 @@ class RtlSdrDevice final : public IRadioDevice {
     // matches real throughput.
     const uint32_t applied_sample_rate_hz = rtlsdr_get_sample_rate(dev_);
     sample_rate_hz_ = applied_sample_rate_hz > 0 ? applied_sample_rate_hz : sample_rate_hz;
+    observed_sample_rate_valid_ = false;
+    observed_sample_rate_hz_ = static_cast<double>(sample_rate_hz_);
     rtlsdr_reset_buffer(dev_);
     return true;
   }
@@ -132,18 +139,39 @@ class RtlSdrDevice final : public IRadioDevice {
     constexpr int kBytes = 131072;
     std::vector<uint8_t> raw(kBytes);
     int n_read = 0;
+    const auto read_started_at = std::chrono::steady_clock::now();
     if (rtlsdr_read_sync(dev_, raw.data(), kBytes, &n_read) != 0 || n_read <= 0) {
       if (error != nullptr) {
         *error = "rtlsdr_read_sync failed";
       }
       return false;
     }
+    const auto read_completed_at = std::chrono::steady_clock::now();
 
     out->interleaved_iq.resize(static_cast<size_t>(n_read));
     for (int i = 0; i < n_read; ++i) {
       out->interleaved_iq[static_cast<size_t>(i)] = static_cast<int16_t>((int(raw[i]) - 127) * 256);
     }
-    out->sample_rate_hz = sample_rate_hz_;
+    const size_t complex_samples = static_cast<size_t>(n_read) / 2U;
+    const double read_seconds =
+        std::chrono::duration<double>(read_completed_at - read_started_at).count();
+    if (complex_samples > 0 && read_seconds > 1.0e-4) {
+      const double measured_sample_rate_hz = static_cast<double>(complex_samples) / read_seconds;
+      if (std::isfinite(measured_sample_rate_hz) && measured_sample_rate_hz >= 200000.0 &&
+          measured_sample_rate_hz <= 4000000.0) {
+        if (!observed_sample_rate_valid_) {
+          observed_sample_rate_hz_ = measured_sample_rate_hz;
+          observed_sample_rate_valid_ = true;
+        } else {
+          const double alpha = 0.20;
+          observed_sample_rate_hz_ += alpha * (measured_sample_rate_hz - observed_sample_rate_hz_);
+        }
+      }
+    }
+    const double effective_sample_rate_hz =
+        observed_sample_rate_valid_ ? observed_sample_rate_hz_ : static_cast<double>(sample_rate_hz_);
+    out->sample_rate_hz =
+        static_cast<uint32_t>(std::llround(std::clamp(effective_sample_rate_hz, 200000.0, 4000000.0)));
     out->center_frequency_hz = center_frequency_hz_;
     return true;
   }
@@ -155,6 +183,8 @@ class RtlSdrDevice final : public IRadioDevice {
   uint32_t center_frequency_hz_ = 100000000;
   uint32_t sample_rate_hz_ = 2048000;
   uint32_t hardware_bandwidth_hz_ = 0;
+  bool observed_sample_rate_valid_ = false;
+  double observed_sample_rate_hz_ = 2048000.0;
 };
 
 class RtlSdrDeviceFactory final : public IRadioDeviceFactory {

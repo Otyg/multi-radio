@@ -59,8 +59,8 @@ constexpr int kAudioSinkBufferMs = 1200;
 constexpr int kAudioPendingMaxMs = 1500;
 constexpr int kAudioDrainIntervalMs = 10;
 constexpr int kAudioBytesPerSample = 2;
-constexpr int kAudioGapFillLowWaterMs = 80;
-constexpr double kAudioGapFillMaxMs = 80.0;
+constexpr int kAudioGapFillLowWaterMs = 40;
+constexpr double kAudioGapFillMaxMs = 40.0;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
