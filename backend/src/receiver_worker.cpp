@@ -610,9 +610,9 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
     const double sample_b = source_at(next_idx);
     const double mixed = sample_a + (sample_b - sample_a) * frac;
     const double gain =
-        (modulation == Modulation::kWfm) ? 10000.0 : ((modulation == Modulation::kAm) ? 9000.0 : 8500.0);
+        (modulation == Modulation::kWfm) ? 7000.0 : ((modulation == Modulation::kAm) ? 9000.0 : 8500.0);
     // Soft-limit peaks to avoid harsh clipping artifacts from impulsive discriminator spikes.
-    const double sample = 28000.0 * std::tanh((mixed * gain) / 28000.0);
+    const double sample = 26000.0 * std::tanh((mixed * gain) / 26000.0);
     pcm_out->push_back(static_cast<int16_t>(std::lrint(sample)));
     pos += step;
   }
@@ -1400,7 +1400,14 @@ void ReceiverWorker::RunLoop() {
       }
 
       if (signal_gate_open) {
-        plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
+        bool process_plugins_this_block = true;
+        // Prioritize uninterrupted audio in scan mode while squelch is open.
+        // Plugin decoding is relatively expensive and can starve audio generation.
+        if (has_scan_squelch && audio_gate_open) {
+          process_plugins_this_block = ((audio_stats_iq_blocks % 3U) == 0U);
+        }
+        if (process_plugins_this_block) {
+          plugin_host_->ProcessIq(iq, [&](const PluginMessage& plugin_msg) {
           const auto kind_it = plugin_msg.normalized_fields.find("kind");
           if (kind_it != plugin_msg.normalized_fields.end() && kind_it->second == "candidate") {
             return;
@@ -1418,7 +1425,8 @@ void ReceiverWorker::RunLoop() {
           }
           event_bus_->PublishDecodedMessage(msg);
           logger_->LogDecodedMessage(msg);
-        });
+          });
+        }
       }
 
       if (emit_viz_this_tick) {
