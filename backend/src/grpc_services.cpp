@@ -421,6 +421,8 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
       response.set_receiver_id(frame->receiver_id);
       response.set_sample_rate_hz(frame->sample_rate_hz);
       response.set_tuned_frequency_hz(frame->tuned_frequency_hz);
+      response.set_sequence(frame->sequence);
+      response.set_sample_index(frame->sample_index);
       if (!frame->pcm_s16le.empty()) {
         const char* bytes = reinterpret_cast<const char*>(frame->pcm_s16le.data());
         const size_t byte_count = frame->pcm_s16le.size() * sizeof(int16_t);

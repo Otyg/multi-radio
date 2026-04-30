@@ -242,7 +242,7 @@ void GrpcClient::AudioLoop() {
       const std::string& pcm = frame.pcm_s16le();
       emit AudioFrameReceived(frame.receiver_id(), static_cast<int>(frame.sample_rate_hz()),
                               QByteArray(pcm.data(), static_cast<int>(pcm.size())), frame.unix_ms(),
-                              frame.tuned_frequency_hz());
+                              frame.tuned_frequency_hz(), frame.sequence(), frame.sample_index());
     }
 
     grpc::Status status = reader->Finish();

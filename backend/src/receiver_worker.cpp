@@ -1171,6 +1171,8 @@ void ReceiverWorker::RunLoop() {
     uint64_t audio_stats_flush_frames = 0;
     uint64_t audio_stats_flush_samples = 0;
     uint32_t audio_gate_open_stats_windows = 0;
+    uint64_t audio_stream_sequence = 0;
+    uint64_t audio_stream_sample_index = 0;
     uint32_t audio_stats_last_iq_sample_rate_hz = 0;
     size_t audio_stats_last_iq_complex_samples = 0;
     uint32_t audio_stats_configured_sample_rate_hz = desired_sample_rate_hz;
@@ -1451,6 +1453,9 @@ void ReceiverWorker::RunLoop() {
           frame.tuned_frequency_hz = tuned_frequency_hz;
           frame.pcm_s16le.assign(audio_pcm_buffer.begin(), frame_end);
           if (!frame.pcm_s16le.empty()) {
+            frame.sequence = audio_stream_sequence++;
+            frame.sample_index = audio_stream_sample_index;
+            audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
             ++audio_stats_published_frames;
             audio_stats_published_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
             event_bus_->PublishAudioFrame(frame);
@@ -1552,6 +1557,9 @@ void ReceiverWorker::RunLoop() {
       frame.sample_rate_hz = AudioSampleRateForModulation(scan_modulation);
       frame.tuned_frequency_hz = tuned_frequency_hz;
       frame.pcm_s16le = audio_pcm_buffer;
+      frame.sequence = audio_stream_sequence++;
+      frame.sample_index = audio_stream_sample_index;
+      audio_stream_sample_index += static_cast<uint64_t>(frame.pcm_s16le.size());
       ++audio_stats_flush_frames;
       audio_stats_flush_samples += static_cast<uint64_t>(frame.pcm_s16le.size());
       ++audio_stats_published_frames;

@@ -41,7 +41,7 @@ class GrpcClient : public QObject {
   void DecodedMessageReceived(uint32_t receiver_id, QString signal_type, double frequency_hz,
                               QString payload, QVariantMap fields, quint64 unix_ms);
   void AudioFrameReceived(uint32_t receiver_id, int sample_rate_hz, QByteArray pcm_s16le, quint64 unix_ms,
-                          double tuned_frequency_hz);
+                          double tuned_frequency_hz, quint64 sequence, quint64 sample_index);
   void StreamError(QString error);
 
  private:

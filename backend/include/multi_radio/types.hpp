@@ -104,6 +104,8 @@ struct AudioFrame {
   uint32_t sample_rate_hz = 0;
   std::vector<int16_t> pcm_s16le;
   double tuned_frequency_hz = 0.0;
+  uint64_t sequence = 0;
+  uint64_t sample_index = 0;
 };
 
 struct IQSampleBlock {

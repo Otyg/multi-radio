@@ -56,7 +56,8 @@ class MainWindow : public QMainWindow {
   void OnDecodedMessage(uint32_t receiver_id, const QString& signal_type, double frequency_hz,
                         const QString& payload, const QVariantMap& fields, quint64 unix_ms);
   void OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& pcm_s16le,
-                    quint64 unix_ms, double tuned_frequency_hz);
+                    quint64 unix_ms, double tuned_frequency_hz, quint64 sequence,
+                    quint64 sample_index);
   void OnStreamError(const QString& error);
 
  private:
@@ -191,9 +192,12 @@ class MainWindow : public QMainWindow {
   quint64 audio_frontend_write_blocked_events_ = 0;
   quint64 audio_frontend_overrun_dropped_bytes_ = 0;
   quint64 audio_frontend_gap_fill_bytes_ = 0;
-  qint64 audio_stream_last_frame_unix_ms_ = -1;
-  int audio_stream_last_sample_rate_hz_ = 0;
-  double audio_stream_last_frame_duration_ms_ = 0.0;
+  quint64 audio_frontend_missing_frame_events_ = 0;
+  quint64 audio_frontend_missing_sample_bytes_ = 0;
+  bool audio_stream_seq_valid_ = false;
+  quint64 audio_stream_last_sequence_ = 0;
+  bool audio_stream_sample_index_valid_ = false;
+  quint64 audio_stream_next_sample_index_ = 0;
 };
 
 }  // namespace multi_radio
