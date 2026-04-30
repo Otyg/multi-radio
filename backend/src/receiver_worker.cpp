@@ -1488,25 +1488,10 @@ void ReceiverWorker::RunLoop() {
             const double gen_ratio =
                 std::clamp(generated_samples / target_generated_samples, 0.75, 1.25);
             audio_stats_last_gen_ratio = gen_ratio;
-            // Fast startup convergence: in first open-gate windows, apply direct ratio
-            // correction (bounded) so audio rate reaches target within a few seconds.
-            // After startup, switch to gentler tracking to avoid oscillation.
-            const bool startup_window = audio_gate_open_stats_windows <= 4;
-            const double correction = startup_window
-                                          ? std::clamp(gen_ratio, 0.65, 1.35)
-                                          : std::clamp(1.0 + 0.45 * (gen_ratio - 1.0), 0.97, 1.03);
-            audio_stats_last_rate_correction = correction;
-            const double base_iq_rate_hz = locked_audio_iq_rate_hz.has_value()
-                                               ? *locked_audio_iq_rate_hz
-                                               : audio_stats_estimated_iq_sample_rate_hz;
-            const double corrected_iq_rate_hz =
-                std::clamp(base_iq_rate_hz * correction, static_cast<double>(kMinSampleRateHz),
-                           static_cast<double>(kMaxSampleRateHz));
-            if (locked_audio_iq_rate_hz.has_value()) {
-              *locked_audio_iq_rate_hz = corrected_iq_rate_hz;
-            }
-            audio_stats_estimated_iq_sample_rate_hz = corrected_iq_rate_hz;
-            iq_rate_estimate_hz_ = corrected_iq_rate_hz;
+            // Keep playback tempo stable: do not time-stretch by retuning IQ rate
+            // from generated-sample ratio. Use miss_f/miss_b in frontend to detect
+            // true transport underruns instead.
+            audio_stats_last_rate_correction = 1.0;
           }
         }
         std::ostringstream audio_status;
