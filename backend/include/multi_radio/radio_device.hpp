@@ -32,8 +32,4 @@ class IRadioDeviceFactory {
   virtual std::unique_ptr<IRadioDevice> Create(uint32_t receiver_id) = 0;
 };
 
-std::unique_ptr<IRadioDeviceFactory> TryCreateRtlSdrDeviceFactory();
-std::unique_ptr<IRadioDeviceFactory> CreateDefaultRadioDeviceFactory(bool enable_rtlsdr);
-bool IsRtlSdrBackendCompiled();
-
 }  // namespace multi_radio

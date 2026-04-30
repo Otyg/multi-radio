@@ -8,7 +8,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(MR_BUILD_SERVER "Build gRPC backend server" ON)
 option(MR_BUILD_FRONTEND "Build Qt frontend" ON)
 option(MR_BUILD_TESTS "Build tests" ON)
-option(MR_ENABLE_RTLSDR "Enable librtlsdr device backend" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 

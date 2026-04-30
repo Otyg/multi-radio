@@ -10,14 +10,6 @@ std::string GetEnvOrDefault(const char* key, const std::string& fallback) {
   return value == nullptr ? fallback : value;
 }
 
-bool GetBoolEnvOrDefault(const char* key, bool fallback) {
-  const char* value = std::getenv(key);
-  if (value == nullptr) {
-    return fallback;
-  }
-  return std::string(value) != "0";
-}
-
 }  // namespace
 
 int main() {
@@ -26,7 +18,6 @@ int main() {
   config.auth_token = GetEnvOrDefault("MR_AUTH_TOKEN", config.auth_token);
   config.plugin_dir = GetEnvOrDefault("MR_PLUGIN_DIR", config.plugin_dir.string());
   config.log_dir = GetEnvOrDefault("MR_LOG_DIR", config.log_dir.string());
-  config.enable_rtlsdr = GetBoolEnvOrDefault("MR_ENABLE_RTLSDR", config.enable_rtlsdr);
 
   multi_radio::ServerApp app(config);
 

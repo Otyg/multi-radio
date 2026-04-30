@@ -10,7 +10,6 @@
 #include "multi_radio/jsonl_logger.hpp"
 #include "multi_radio/plugin_host.hpp"
 #include "multi_radio/radio_device.hpp"
-#include "multi_radio/scan_scheduler.hpp"
 #include "multi_radio/types.hpp"
 
 namespace multi_radio {
@@ -48,10 +47,7 @@ class ReceiverWorker {
 
   RadioMode mode_ = RadioMode::kFixed;
   ModeConfig mode_config_;
-  ScanScheduler scheduler_;
   std::string last_error_;
-  double iq_rate_estimate_hz_ = 0.0;
-  bool iq_rate_estimate_valid_ = false;
 };
 
 }  // namespace multi_radio

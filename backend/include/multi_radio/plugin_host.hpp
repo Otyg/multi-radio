@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "multi_radio/plugin_api.h"
 #include "multi_radio/types.hpp"
 
 namespace multi_radio {
@@ -37,8 +36,6 @@ class PluginHost {
  private:
   struct LoadedPlugin {
     PluginInfo info;
-    void* dl_handle = nullptr;
-    const multi_radio_plugin_descriptor* descriptor = nullptr;
   };
 
   static void EmitFromPlugin(const char* signal_type, const char* payload, double frequency_hz,

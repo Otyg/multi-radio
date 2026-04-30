@@ -492,36 +492,16 @@ ServerApp::ServerApp(ServerConfig config)
 ServerApp::~ServerApp() { Shutdown(); }
 
 bool ServerApp::Init(std::string* error) {
+  // API-only server reset: start even without plugins or radio hardware.
   std::string plugin_error;
-  if (!plugin_host_->LoadAll(&plugin_error)) {
-    if (error != nullptr) {
-      *error = plugin_error;
-    }
-    return false;
-  }
+  plugin_host_->LoadAll(&plugin_error);
 
-  if (!config_.enable_rtlsdr) {
-    if (error != nullptr) {
-      *error = "RTL-SDR backend is disabled (MR_ENABLE_RTLSDR=0). Enable it to use real radio hardware.";
-    }
-    return false;
-  }
-  if (!IsRtlSdrBackendCompiled()) {
-    if (error != nullptr) {
-      *error = "RTL-SDR backend is not available in this build. Install librtlsdr and rebuild.";
-    }
-    return false;
-  }
-
-  auto factory = CreateDefaultRadioDeviceFactory(config_.enable_rtlsdr);
-  if (factory == nullptr) {
-    if (error != nullptr) {
-      *error = "No RTL-SDR receiver detected.";
-    }
-    return false;
-  }
+  std::unique_ptr<IRadioDeviceFactory> factory = nullptr;
   receiver_manager_ = std::make_unique<ReceiverManager>(std::move(factory), event_bus_, plugin_host_, logger_);
   impl_ = std::make_unique<Impl>(config_.auth_token);
+  if (error != nullptr) {
+    error->clear();
+  }
   return true;
 }
 

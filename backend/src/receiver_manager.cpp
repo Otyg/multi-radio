@@ -1,8 +1,26 @@
 #include "multi_radio/receiver_manager.hpp"
 
 #include <algorithm>
+#include <utility>
+#include <vector>
 
 namespace multi_radio {
+
+namespace {
+
+std::vector<ReceiverDescriptor> BuildApiOnlyDescriptors(IRadioDeviceFactory* factory) {
+  // API-only backend: preserve receiver list shape, but do not bind real hardware.
+  if (factory != nullptr) {
+    auto descriptors = factory->Enumerate();
+    if (!descriptors.empty()) {
+      return descriptors;
+    }
+  }
+
+  return std::vector<ReceiverDescriptor>{ReceiverDescriptor{.receiver_id = 0, .serial = "virtual-0"}};
+}
+
+}  // namespace
 
 ReceiverManager::ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory,
                                  std::shared_ptr<EventBus> event_bus,
@@ -11,12 +29,12 @@ ReceiverManager::ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory,
     : event_bus_(std::move(event_bus)),
       plugin_host_(std::move(plugin_host)),
       logger_(std::move(logger)) {
-  const auto devices = factory->Enumerate();
-  workers_.reserve(devices.size());
-  for (const auto& descriptor : devices) {
-    auto device = factory->Create(descriptor.receiver_id);
+  auto descriptors = BuildApiOnlyDescriptors(factory.get());
+  workers_.reserve(descriptors.size());
+  for (const auto& descriptor : descriptors) {
     workers_.push_back(std::make_unique<ReceiverWorker>(
-        descriptor.receiver_id, descriptor.serial, std::move(device), event_bus_, plugin_host_, logger_));
+        descriptor.receiver_id, descriptor.serial,
+        /*device=*/nullptr, event_bus_, plugin_host_, logger_));
   }
 }
 

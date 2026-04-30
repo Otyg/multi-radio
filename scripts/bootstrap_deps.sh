@@ -3,18 +3,16 @@ set -euo pipefail
 
 DRY_RUN=0
 HEADLESS=0
-SKIP_RTL=0
 ASSUME_YES=0
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/bootstrap_deps.sh [options]
 
-Install build/runtime dependencies for Multi-Radio MVP on Ubuntu/Debian.
+Install build/runtime dependencies for Multi-Radio on Ubuntu/Debian.
 
 Options:
   --headless      Skip Qt6 packages (server-only environments)
-  --skip-rtl      Skip RTL-SDR packages
   --dry-run       Print commands without executing
   -y, --yes       Non-interactive apt install (-y)
   -h, --help      Show this help
@@ -25,10 +23,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --headless)
       HEADLESS=1
-      shift
-      ;;
-    --skip-rtl)
-      SKIP_RTL=1
       shift
       ;;
     --dry-run)
@@ -109,17 +103,9 @@ qt_pkgs=(
   qt6-tools-dev-tools
 )
 
-rtl_pkgs=(
-  librtlsdr-dev
-  rtl-sdr
-)
-
 all_pkgs=("${common_pkgs[@]}" "${proto_pkgs[@]}")
 if [[ "$HEADLESS" -eq 0 ]]; then
   all_pkgs+=("${qt_pkgs[@]}")
-fi
-if [[ "$SKIP_RTL" -eq 0 ]]; then
-  all_pkgs+=("${rtl_pkgs[@]}")
 fi
 
 APT_FLAGS=()
@@ -129,7 +115,6 @@ fi
 
 echo "Detected distro: ${PRETTY_NAME:-$DISTRO_ID}"
 echo "Headless mode: $HEADLESS"
-echo "Skip RTL-SDR: $SKIP_RTL"
 echo "Dry run: $DRY_RUN"
 
 echo "Installing packages:"
@@ -143,7 +128,7 @@ cat <<'NEXT'
 Bootstrap complete.
 
 Suggested next steps:
-  cmake -S . -B build -DMR_BUILD_SERVER=ON -DMR_BUILD_FRONTEND=ON -DMR_BUILD_TESTS=ON -DMR_ENABLE_RTLSDR=ON
+  cmake -S . -B build -DMR_BUILD_SERVER=ON -DMR_BUILD_FRONTEND=ON -DMR_BUILD_TESTS=ON
   cmake --build build -j
   ctest --test-dir build --output-on-failure
 NEXT

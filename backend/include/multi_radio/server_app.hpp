@@ -17,7 +17,6 @@ struct ServerConfig {
   std::string auth_token = "multi-radio-dev-token";
   std::filesystem::path plugin_dir = "./backend/plugins";
   std::filesystem::path log_dir = "./logs";
-  bool enable_rtlsdr = true;
   size_t log_max_bytes = 5 * 1024 * 1024;
   size_t log_max_files = 5;
 };
