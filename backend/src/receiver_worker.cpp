@@ -1507,25 +1507,32 @@ void ReceiverWorker::RunLoop() {
         audio_stats_last_emit_at = now;
         audio_stats_last_gen_ratio = 1.0;
         audio_stats_last_rate_correction = 1.0;
-        if (!locked_audio_iq_rate_hz.has_value() && audio_gate_open && iq_rate_estimate_valid_ &&
-            audio_sample_rate_hz > 0 &&
+        if (audio_gate_open && iq_rate_estimate_valid_ && audio_sample_rate_hz > 0 &&
             audio_stats_generated_samples > 0) {
           const double target_generated_samples =
               static_cast<double>(audio_sample_rate_hz) * stats_window_s;
           if (target_generated_samples >= 1000.0) {
             const double generated_samples = static_cast<double>(audio_stats_generated_samples);
             const double gen_ratio =
-                std::clamp(generated_samples / target_generated_samples, 0.90, 1.10);
+                std::clamp(generated_samples / target_generated_samples, 0.75, 1.25);
             audio_stats_last_gen_ratio = gen_ratio;
-            // Closed-loop correction: if generated < target, lower IQ rate estimate to increase audio output.
-            const double proportional = 0.70;
+            // Closed-loop correction: if generated < target, lower IQ rate estimate to increase
+            // audio output. Keep this active even when audio rate is latched during open squelch.
+            const double proportional = 0.50;
             const double correction =
-                std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.985, 1.015);
+                std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.97, 1.03);
             audio_stats_last_rate_correction = correction;
-            audio_stats_estimated_iq_sample_rate_hz = std::clamp(
-                audio_stats_estimated_iq_sample_rate_hz * correction, static_cast<double>(kMinSampleRateHz),
-                static_cast<double>(kMaxSampleRateHz));
-            iq_rate_estimate_hz_ = audio_stats_estimated_iq_sample_rate_hz;
+            const double base_iq_rate_hz = locked_audio_iq_rate_hz.has_value()
+                                               ? *locked_audio_iq_rate_hz
+                                               : audio_stats_estimated_iq_sample_rate_hz;
+            const double corrected_iq_rate_hz =
+                std::clamp(base_iq_rate_hz * correction, static_cast<double>(kMinSampleRateHz),
+                           static_cast<double>(kMaxSampleRateHz));
+            if (locked_audio_iq_rate_hz.has_value()) {
+              *locked_audio_iq_rate_hz = corrected_iq_rate_hz;
+            }
+            audio_stats_estimated_iq_sample_rate_hz = corrected_iq_rate_hz;
+            iq_rate_estimate_hz_ = corrected_iq_rate_hz;
           }
         }
         std::ostringstream audio_status;
@@ -1536,6 +1543,8 @@ void ReceiverWorker::RunLoop() {
                      << " cfg_sr=" << audio_stats_configured_sample_rate_hz
                      << " iq_sr=" << audio_stats_last_iq_sample_rate_hz
                      << " iq_est_sr=" << FormatDouble(audio_stats_estimated_iq_sample_rate_hz, 0)
+                     << " iq_lock=" << (locked_audio_iq_rate_hz.has_value() ? "1" : "0")
+                     << " iq_lock_sr=" << FormatDouble(locked_audio_iq_rate_hz.value_or(0.0), 0)
                      << " gen_ratio=" << FormatDouble(audio_stats_last_gen_ratio, 3)
                      << " rate_corr=" << FormatDouble(audio_stats_last_rate_correction, 4)
                      << " iq_n=" << audio_stats_last_iq_complex_samples
