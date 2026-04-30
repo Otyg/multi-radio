@@ -43,7 +43,7 @@ constexpr size_t kMaxPacedAudioFramesPerLoop = 8;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
 constexpr uint32_t kAudioSampleRateHz = 8000;
-constexpr const char* kAudioPipelineRevision = "audio-v8-8k-throughput";
+constexpr const char* kAudioPipelineRevision = "audio-v9-no-conceal";
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
