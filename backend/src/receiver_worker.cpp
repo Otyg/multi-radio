@@ -1212,7 +1212,7 @@ void ReceiverWorker::RunLoop() {
       // can make audio sound stretched/slowed down.
       audio_stats_estimated_iq_sample_rate_hz = static_cast<double>(iq.sample_rate_hz);
       iq_rate_estimate_hz_ = audio_stats_estimated_iq_sample_rate_hz;
-      iq_rate_estimate_valid_ = false;
+      iq_rate_estimate_valid_ = true;
       audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
       audio_stats_last_iq_complex_samples = iq_complex_samples;
       if (effective_lo_offset_hz != 0) {
@@ -1330,9 +1330,7 @@ void ReceiverWorker::RunLoop() {
       const bool audio_gate_open = has_scan_squelch && (squelch_open || gate_open_until_channel_hop);
       if (audio_gate_open) {
         if (!locked_audio_iq_rate_hz.has_value()) {
-          const double lock_rate_hz = iq_rate_estimate_valid_
-                                          ? audio_stats_estimated_iq_sample_rate_hz
-                                          : static_cast<double>(iq.sample_rate_hz);
+          const double lock_rate_hz = audio_stats_estimated_iq_sample_rate_hz;
           if (std::isfinite(lock_rate_hz) && lock_rate_hz > 0.0) {
             locked_audio_iq_rate_hz = lock_rate_hz;
           }
@@ -1470,8 +1468,7 @@ void ReceiverWorker::RunLoop() {
         audio_stats_last_emit_at = now;
         audio_stats_last_gen_ratio = 1.0;
         audio_stats_last_rate_correction = 1.0;
-        if (audio_gate_open && iq_rate_estimate_valid_ && audio_sample_rate_hz > 0 &&
-            audio_stats_generated_samples > 0) {
+        if (audio_gate_open && audio_sample_rate_hz > 0 && audio_stats_generated_samples > 0) {
           const double target_generated_samples =
               static_cast<double>(audio_sample_rate_hz) * stats_window_s;
           if (target_generated_samples >= 1000.0) {
@@ -1481,9 +1478,11 @@ void ReceiverWorker::RunLoop() {
             audio_stats_last_gen_ratio = gen_ratio;
             // Closed-loop correction: if generated < target, lower IQ rate estimate to increase
             // audio output. Keep this active even when audio rate is latched during open squelch.
-            const double proportional = 0.50;
-            const double correction =
-                std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.97, 1.03);
+            const bool large_error = (gen_ratio < 0.85 || gen_ratio > 1.15);
+            const double proportional = large_error ? 0.90 : 0.50;
+            const double correction = large_error
+                                          ? std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.90, 1.10)
+                                          : std::clamp(1.0 + proportional * (gen_ratio - 1.0), 0.97, 1.03);
             audio_stats_last_rate_correction = correction;
             const double base_iq_rate_hz = locked_audio_iq_rate_hz.has_value()
                                                ? *locked_audio_iq_rate_hz
