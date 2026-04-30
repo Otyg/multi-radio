@@ -41,7 +41,8 @@ constexpr uint32_t kDefaultAmBandwidthHz = 10000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 // Favor stable, continuous scan audio over fidelity to reduce underruns/choppy
 // stitched fragments when scan processing load spikes.
-constexpr uint32_t kAudioSampleRateHz = 4000;
+constexpr uint32_t kAudioSampleRateHz = 4800;
+constexpr const char* kAudioPipelineRevision = "audio-v7-4800";
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kScanStatusIntervalMs = 250;
 constexpr double kSquelchCloseHysteresisDb = 2.5;
@@ -557,19 +558,24 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
   }
 
   const double source_sample_rate_hz = static_cast<double>(demod_iq_ptr->sample_rate_hz);
+  const double output_nyquist_hz =
+      std::max(800.0, static_cast<double>(audio_sample_rate_hz) * 0.5 * 0.9);
   switch (modulation) {
     case Modulation::kWfm:
       // Voice-focused WFM chain with less aggressive high-cut/de-emphasis to
       // avoid overly bass-heavy, smeared audio.
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 5200.0, 3, &state->lowpass);
+      ApplyCascadedLowPass(&source, source_sample_rate_hz,
+                           std::min(5200.0, output_nyquist_hz), 3, &state->lowpass);
       ApplyFmDeemphasis(&source, source_sample_rate_hz, 50.0, &state->deemphasis);
       break;
     case Modulation::kAm:
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 4500.0, 3, &state->lowpass);
+      ApplyCascadedLowPass(&source, source_sample_rate_hz,
+                           std::min(4500.0, output_nyquist_hz), 3, &state->lowpass);
       break;
     case Modulation::kNfm:
     default:
-      ApplyCascadedLowPass(&source, source_sample_rate_hz, 3400.0, 3, &state->lowpass);
+      ApplyCascadedLowPass(&source, source_sample_rate_hz,
+                           std::min(3400.0, output_nyquist_hz), 3, &state->lowpass);
       break;
   }
   const double dc_block_cutoff_hz =
@@ -1539,6 +1545,7 @@ void ReceiverWorker::RunLoop() {
         std::ostringstream audio_status;
         audio_status << "AUDIO_STATS idx=" << scan_list_channel_index
                      << " label=" << scan_list_channel_label_token
+                     << " rev=" << kAudioPipelineRevision
                      << " mod=" << ModulationToken(scan_modulation)
                      << " sr=" << audio_sample_rate_hz
                      << " cfg_sr=" << audio_stats_configured_sample_rate_hz
