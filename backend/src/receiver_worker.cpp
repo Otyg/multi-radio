@@ -10,6 +10,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <optional>
 #include <vector>
 
 namespace multi_radio {
@@ -1167,6 +1168,9 @@ void ReceiverWorker::RunLoop() {
     uint64_t audio_stats_flush_samples = 0;
     uint32_t audio_stats_last_iq_sample_rate_hz = 0;
     size_t audio_stats_last_iq_complex_samples = 0;
+    uint32_t audio_stats_configured_sample_rate_hz = desired_sample_rate_hz;
+    double audio_stats_estimated_iq_sample_rate_hz = static_cast<double>(desired_sample_rate_hz);
+    std::optional<std::chrono::steady_clock::time_point> last_iq_read_completed_at;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
@@ -1196,8 +1200,31 @@ void ReceiverWorker::RunLoop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
       }
+      const auto iq_read_completed_at = std::chrono::steady_clock::now();
+      const size_t iq_complex_samples = iq.interleaved_iq.size() / 2;
+      if (last_iq_read_completed_at.has_value() && iq_complex_samples > 0) {
+        const double dt_s =
+            std::chrono::duration<double>(iq_read_completed_at - *last_iq_read_completed_at).count();
+        if (dt_s > 1.0e-4) {
+          const double raw_rate_hz = static_cast<double>(iq_complex_samples) / dt_s;
+          if (std::isfinite(raw_rate_hz) && raw_rate_hz >= static_cast<double>(kMinSampleRateHz) * 0.5 &&
+              raw_rate_hz <= static_cast<double>(kMaxSampleRateHz) * 1.25) {
+            const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
+            const double relative_error = std::abs(raw_rate_hz - prev_rate_hz) / prev_rate_hz;
+            const double alpha = (relative_error > 0.15) ? 0.35 : 0.12;
+            audio_stats_estimated_iq_sample_rate_hz += alpha * (raw_rate_hz - prev_rate_hz);
+          }
+        }
+      }
+      last_iq_read_completed_at = iq_read_completed_at;
+      const uint32_t effective_iq_sample_rate_hz = static_cast<uint32_t>(std::llround(std::clamp(
+          audio_stats_estimated_iq_sample_rate_hz, static_cast<double>(kMinSampleRateHz),
+          static_cast<double>(kMaxSampleRateHz))));
+      if (effective_iq_sample_rate_hz > 0) {
+        iq.sample_rate_hz = effective_iq_sample_rate_hz;
+      }
       audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
-      audio_stats_last_iq_complex_samples = iq.interleaved_iq.size() / 2;
+      audio_stats_last_iq_complex_samples = iq_complex_samples;
       if (effective_lo_offset_hz != 0) {
         ApplyIqFrequencyShift(&iq, effective_lo_offset_hz, &frequency_shift_state);
       } else {
@@ -1432,7 +1459,9 @@ void ReceiverWorker::RunLoop() {
                      << " label=" << scan_list_channel_label_token
                      << " mod=" << ModulationToken(scan_modulation)
                      << " sr=" << audio_sample_rate_hz
+                     << " cfg_sr=" << audio_stats_configured_sample_rate_hz
                      << " iq_sr=" << audio_stats_last_iq_sample_rate_hz
+                     << " iq_est_sr=" << FormatDouble(audio_stats_estimated_iq_sample_rate_hz, 0)
                      << " iq_n=" << audio_stats_last_iq_complex_samples
                      << " gate=" << (audio_gate_open ? "1" : "0")
                      << " squelch=" << (squelch_open ? "1" : "0")
