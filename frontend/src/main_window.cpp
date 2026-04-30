@@ -55,10 +55,12 @@ constexpr int kAudioPrefillMs = 180;
 constexpr int kAudioPrefillMaxWaitMs = 450;
 constexpr int kAudioMinStartupMs = 40;
 constexpr int kAudioFrontendStatsIntervalMs = 1000;
-constexpr int kAudioSinkBufferMs = 3000;
-constexpr int kAudioPendingMaxMs = 6000;
+constexpr int kAudioSinkBufferMs = 1200;
+constexpr int kAudioPendingMaxMs = 1500;
 constexpr int kAudioDrainIntervalMs = 10;
 constexpr int kAudioBytesPerSample = 2;
+constexpr int kAudioGapFillLowWaterMs = 80;
+constexpr double kAudioGapFillMaxMs = 80.0;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
@@ -1519,14 +1521,18 @@ void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QB
   if (sample_rate_hz > 0 && frame_samples > 0) {
     const double frame_duration_ms =
         (1000.0 * static_cast<double>(frame_samples)) / static_cast<double>(sample_rate_hz);
+    const int low_water_bytes = std::max(
+        1024, (sample_rate_hz * kAudioBytesPerSample * kAudioGapFillLowWaterMs) / 1000);
+    const bool queue_near_underrun = audio_pending_pcm_.size() <= low_water_bytes;
     if (audio_stream_last_frame_unix_ms_ >= 0 && audio_stream_last_sample_rate_hz_ == sample_rate_hz &&
         frame_duration_ms > 0.1) {
       const qint64 expected_next_unix_ms = static_cast<qint64>(std::llround(
           static_cast<double>(audio_stream_last_frame_unix_ms_) + audio_stream_last_frame_duration_ms_));
       const qint64 gap_ms = static_cast<qint64>(unix_ms) - expected_next_unix_ms;
-      const double max_jitter_fill_ms = 250.0;
-      if (gap_ms > static_cast<qint64>(std::llround(frame_duration_ms * 0.75)) &&
-          static_cast<double>(gap_ms) <= max_jitter_fill_ms) {
+      const double gap_fill_limit_ms = std::min(kAudioGapFillMaxMs, frame_duration_ms * 2.0);
+      if (queue_near_underrun &&
+          gap_ms > static_cast<qint64>(std::llround(frame_duration_ms * 0.75)) &&
+          static_cast<double>(gap_ms) <= gap_fill_limit_ms) {
         int silence_samples = static_cast<int>(std::llround(
             (static_cast<double>(gap_ms) * static_cast<double>(sample_rate_hz)) / 1000.0));
         silence_samples = std::max(0, silence_samples);
