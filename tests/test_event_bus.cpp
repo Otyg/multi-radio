@@ -37,5 +37,33 @@ int main() {
   assert(live->pcm_s16le[0] == 9);
   assert(live->pcm_s16le[1] == 10);
 
+  IqFrame iq1;
+  iq1.unix_ms = 10;
+  iq1.receiver_id = 2;
+  iq1.sample_rate_hz = 2048000;
+  iq1.tuned_frequency_hz = 100100000.0;
+  iq1.sequence = 1;
+  iq1.sample_index = 0;
+  iq1.interleaved_iq_s16le = {100, -100, 200, -200};
+  bus.PublishIqFrame(iq1);
+
+  size_t iq_cursor = bus.IqFrameCursorNow();
+  auto iq_historical = bus.WaitForIqFrame(&iq_cursor, 5);
+  assert(!iq_historical.has_value());
+
+  IqFrame iq2 = iq1;
+  iq2.unix_ms = 11;
+  iq2.sequence = 2;
+  iq2.sample_index = 2;
+  iq2.interleaved_iq_s16le = {300, -300};
+  bus.PublishIqFrame(iq2);
+
+  auto iq_live = bus.WaitForIqFrame(&iq_cursor, 20);
+  assert(iq_live.has_value());
+  assert(iq_live->unix_ms == 11);
+  assert(iq_live->interleaved_iq_s16le.size() == 2);
+  assert(iq_live->interleaved_iq_s16le[0] == 300);
+  assert(iq_live->interleaved_iq_s16le[1] == -300);
+
   return 0;
 }

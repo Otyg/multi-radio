@@ -435,6 +435,43 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status StreamIqFrames(grpc::ServerContext* context,
+                              const v1::StreamIqFramesRequest* request,
+                              grpc::ServerWriter<v1::IqFrame>* writer) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_)) {
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    }
+
+    // IQ visualization stream is live-only for new subscribers.
+    size_t cursor = event_bus_->IqFrameCursorNow();
+    while (!context->IsCancelled()) {
+      auto frame = event_bus_->WaitForIqFrame(&cursor, 1000);
+      if (!frame.has_value()) {
+        continue;
+      }
+      if (!request->include_all_receivers() && frame->receiver_id != request->receiver_id()) {
+        continue;
+      }
+
+      v1::IqFrame response;
+      response.set_unix_ms(frame->unix_ms);
+      response.set_receiver_id(frame->receiver_id);
+      response.set_sample_rate_hz(frame->sample_rate_hz);
+      response.set_tuned_frequency_hz(frame->tuned_frequency_hz);
+      response.set_sequence(frame->sequence);
+      response.set_sample_index(frame->sample_index);
+      if (!frame->interleaved_iq_s16le.empty()) {
+        const char* bytes = reinterpret_cast<const char*>(frame->interleaved_iq_s16le.data());
+        const size_t byte_count = frame->interleaved_iq_s16le.size() * sizeof(int16_t);
+        response.set_interleaved_iq_s16le(bytes, static_cast<int>(byte_count));
+      }
+      if (!writer->Write(response)) {
+        break;
+      }
+    }
+    return grpc::Status::OK;
+  }
+
  private:
   EventBus* event_bus_;
   std::string auth_token_;
@@ -492,11 +529,10 @@ ServerApp::ServerApp(ServerConfig config)
 ServerApp::~ServerApp() { Shutdown(); }
 
 bool ServerApp::Init(std::string* error) {
-  // API-only server reset: start even without plugins or radio hardware.
   std::string plugin_error;
   plugin_host_->LoadAll(&plugin_error);
 
-  std::unique_ptr<IRadioDeviceFactory> factory = nullptr;
+  std::unique_ptr<IRadioDeviceFactory> factory = CreateRtlSdrFactory();
   receiver_manager_ = std::make_unique<ReceiverManager>(std::move(factory), event_bus_, plugin_host_, logger_);
   impl_ = std::make_unique<Impl>(config_.auth_token);
   if (error != nullptr) {

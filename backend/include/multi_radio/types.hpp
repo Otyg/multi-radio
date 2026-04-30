@@ -114,6 +114,16 @@ struct IQSampleBlock {
   uint32_t center_frequency_hz = 0;
 };
 
+struct IqFrame {
+  uint64_t unix_ms = 0;
+  uint32_t receiver_id = 0;
+  uint32_t sample_rate_hz = 0;
+  std::vector<int16_t> interleaved_iq_s16le;
+  double tuned_frequency_hz = 0.0;
+  uint64_t sequence = 0;
+  uint64_t sample_index = 0;
+};
+
 struct PluginInfo {
   std::string plugin_name;
   std::string plugin_version;

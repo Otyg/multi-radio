@@ -1,10 +1,25 @@
 find_package(Threads REQUIRED)
+find_package(PkgConfig QUIET)
+
+set(MR_RTLSDR_LINK_TARGET "")
+if(PkgConfig_FOUND)
+  pkg_check_modules(RTLSDR QUIET IMPORTED_TARGET librtlsdr)
+  if(RTLSDR_FOUND)
+    set(MR_RTLSDR_LINK_TARGET PkgConfig::RTLSDR)
+  else()
+    pkg_check_modules(RTLSDR_ALT QUIET IMPORTED_TARGET rtl-sdr)
+    if(RTLSDR_ALT_FOUND)
+      set(MR_RTLSDR_LINK_TARGET PkgConfig::RTLSDR_ALT)
+    endif()
+  endif()
+endif()
 
 add_library(multi_radio_core
   src/types.cpp
   src/event_bus.cpp
   src/jsonl_logger.cpp
   src/plugin_host.cpp
+  src/rtl_sdr_device.cpp
   src/receiver_worker.cpp
   src/receiver_manager.cpp
 )
@@ -18,6 +33,11 @@ target_link_libraries(multi_radio_core
   PUBLIC
     Threads::Threads
 )
+
+if(MR_RTLSDR_LINK_TARGET)
+  target_link_libraries(multi_radio_core PRIVATE ${MR_RTLSDR_LINK_TARGET})
+  target_compile_definitions(multi_radio_core PRIVATE MR_HAS_RTLSDR=1)
+endif()
 
 add_library(multi_radio::core ALIAS multi_radio_core)
 

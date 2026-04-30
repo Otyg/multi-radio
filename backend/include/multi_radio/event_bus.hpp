@@ -18,11 +18,14 @@ class EventBus {
   void PublishReceiverEvent(const ReceiverEvent& event);
   void PublishDecodedMessage(const DecodedMessage& message);
   void PublishAudioFrame(const AudioFrame& frame);
+  void PublishIqFrame(const IqFrame& frame);
 
   std::optional<ReceiverEvent> WaitForReceiverEvent(size_t* cursor, uint32_t timeout_ms);
   std::optional<DecodedMessage> WaitForDecodedMessage(size_t* cursor, uint32_t timeout_ms);
   std::optional<AudioFrame> WaitForAudioFrame(size_t* cursor, uint32_t timeout_ms);
+  std::optional<IqFrame> WaitForIqFrame(size_t* cursor, uint32_t timeout_ms);
   size_t AudioFrameCursorNow();
+  size_t IqFrameCursorNow();
 
  private:
   const size_t max_messages_;
@@ -41,6 +44,11 @@ class EventBus {
   std::condition_variable audio_frames_cv_;
   std::deque<AudioFrame> audio_frames_;
   size_t audio_base_index_ = 0;
+
+  std::mutex iq_frames_mu_;
+  std::condition_variable iq_frames_cv_;
+  std::deque<IqFrame> iq_frames_;
+  size_t iq_base_index_ = 0;
 };
 
 }  // namespace multi_radio

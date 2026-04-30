@@ -142,12 +142,23 @@ message StreamDecodedMessagesRequest {
   repeated SignalType signal_filter = 3;
 }
 message StreamAudioFramesRequest { uint32 receiver_id = 1; bool include_all_receivers = 2; }
+message StreamIqFramesRequest { uint32 receiver_id = 1; bool include_all_receivers = 2; }
 
 message AudioFrame {
   uint64 unix_ms = 1;
   uint32 receiver_id = 2;
   uint32 sample_rate_hz = 3;
   bytes pcm_s16le = 4;
+  double tuned_frequency_hz = 5;
+  uint64 sequence = 6;
+  uint64 sample_index = 7;
+}
+
+message IqFrame {
+  uint64 unix_ms = 1;
+  uint32 receiver_id = 2;
+  uint32 sample_rate_hz = 3;
+  bytes interleaved_iq_s16le = 4;
   double tuned_frequency_hz = 5;
   uint64 sequence = 6;
   uint64 sample_index = 7;
@@ -169,4 +180,5 @@ service TelemetryService {
   rpc StreamReceiverEvents(StreamReceiverEventsRequest) returns (stream ReceiverEvent);
   rpc StreamDecodedMessages(StreamDecodedMessagesRequest) returns (stream DecodedMessage);
   rpc StreamAudioFrames(StreamAudioFramesRequest) returns (stream AudioFrame);
+  rpc StreamIqFrames(StreamIqFramesRequest) returns (stream IqFrame);
 }

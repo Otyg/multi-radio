@@ -9,7 +9,7 @@ namespace multi_radio {
 namespace {
 
 std::vector<ReceiverDescriptor> BuildApiOnlyDescriptors(IRadioDeviceFactory* factory) {
-  // API-only backend: preserve receiver list shape, but do not bind real hardware.
+  // Preserve receiver list shape. If hardware is available, use real descriptors.
   if (factory != nullptr) {
     auto descriptors = factory->Enumerate();
     if (!descriptors.empty()) {
@@ -32,9 +32,12 @@ ReceiverManager::ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory,
   auto descriptors = BuildApiOnlyDescriptors(factory.get());
   workers_.reserve(descriptors.size());
   for (const auto& descriptor : descriptors) {
+    std::unique_ptr<IRadioDevice> device = nullptr;
+    if (factory != nullptr) {
+      device = factory->Create(descriptor.receiver_id);
+    }
     workers_.push_back(std::make_unique<ReceiverWorker>(
-        descriptor.receiver_id, descriptor.serial,
-        /*device=*/nullptr, event_bus_, plugin_host_, logger_));
+        descriptor.receiver_id, descriptor.serial, std::move(device), event_bus_, plugin_host_, logger_));
   }
 }
 
