@@ -1213,7 +1213,8 @@ void ReceiverWorker::RunLoop() {
         if (dt_s > 1.0e-4) {
           iq_rate_window_samples += static_cast<uint64_t>(iq_complex_samples);
           iq_rate_window_seconds += dt_s;
-          if (iq_rate_window_seconds >= 0.75 && iq_rate_window_samples > 0) {
+          const double lock_window_s = iq_rate_estimate_valid_ ? 0.75 : 0.15;
+          if (iq_rate_window_seconds >= lock_window_s && iq_rate_window_samples > 0) {
             const double raw_rate_hz =
                 static_cast<double>(iq_rate_window_samples) / iq_rate_window_seconds;
             if (std::isfinite(raw_rate_hz) &&
@@ -1225,8 +1226,11 @@ void ReceiverWorker::RunLoop() {
                 iq_rate_estimate_valid_ = true;
               } else {
                 const double prev_rate_hz = std::max(1.0, audio_stats_estimated_iq_sample_rate_hz);
-                const double alpha = 0.08;
-                audio_stats_estimated_iq_sample_rate_hz += alpha * (raw_rate_hz - prev_rate_hz);
+                const double alpha = 0.02;
+                const double target_rate_hz = prev_rate_hz + alpha * (raw_rate_hz - prev_rate_hz);
+                const double max_step_hz = prev_rate_hz * 0.005;
+                audio_stats_estimated_iq_sample_rate_hz = std::clamp(
+                    target_rate_hz, prev_rate_hz - max_step_hz, prev_rate_hz + max_step_hz);
               }
             }
             iq_rate_window_samples = 0;
