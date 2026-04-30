@@ -168,6 +168,9 @@ class MainWindow : public QMainWindow {
 #endif
   QIODevice* audio_output_device_ = nullptr;
   int audio_output_sample_rate_hz_ = 0;
+  double audio_resample_next_source_pos_ = 0.0;
+  bool audio_resample_has_prev_sample_ = false;
+  int16_t audio_resample_prev_sample_ = 0;
   QByteArray audio_pending_pcm_;
   QTimer* audio_drain_timer_ = nullptr;
   bool audio_prefill_complete_ = false;

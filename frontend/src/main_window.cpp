@@ -118,11 +118,16 @@ bool TryParseCsvModulation(const QString& text, v1::Modulation* out) {
 }
 
 bool ResampleMonoPcmS16Le(const QByteArray& input_pcm, int input_sample_rate_hz,
-                          int output_sample_rate_hz, QByteArray* output_pcm) {
+                          int output_sample_rate_hz, double* next_source_pos,
+                          bool* has_prev_sample, int16_t* prev_sample,
+                          QByteArray* output_pcm) {
   if (output_pcm == nullptr) {
     return false;
   }
   output_pcm->clear();
+  if (next_source_pos == nullptr || has_prev_sample == nullptr || prev_sample == nullptr) {
+    return false;
+  }
   if (input_pcm.isEmpty() || input_sample_rate_hz <= 0 || output_sample_rate_hz <= 0) {
     return false;
   }
@@ -136,9 +141,8 @@ bool ResampleMonoPcmS16Le(const QByteArray& input_pcm, int input_sample_rate_hz,
   }
 
   const int input_sample_count = input_byte_count / kAudioBytesPerSample;
-  if (input_sample_count < 2) {
-    output_pcm->append(input_pcm.constData(), input_byte_count);
-    return true;
+  if (input_sample_count <= 0) {
+    return false;
   }
 
   std::vector<int16_t> input_samples(static_cast<size_t>(input_sample_count), 0);
@@ -156,25 +160,54 @@ bool ResampleMonoPcmS16Le(const QByteArray& input_pcm, int input_sample_rate_hz,
     return false;
   }
 
-  const double estimated_output_samples =
-      (static_cast<double>(input_sample_count) * static_cast<double>(output_sample_rate_hz)) /
-      static_cast<double>(input_sample_rate_hz);
+  const bool have_prev = *has_prev_sample;
+  const double source_base_offset = have_prev ? 1.0 : 0.0;
+  const double source_virtual_size = static_cast<double>(input_sample_count) + source_base_offset;
+  if (source_virtual_size < 2.0) {
+    output_pcm->append(input_pcm.constData(), input_byte_count);
+    *prev_sample = input_samples.back();
+    *has_prev_sample = true;
+    *next_source_pos = 0.0;
+    return true;
+  }
+
+  auto source_at = [&](size_t virtual_idx) -> int16_t {
+    if (have_prev) {
+      if (virtual_idx == 0) {
+        return *prev_sample;
+      }
+      const size_t source_idx = std::min(virtual_idx - 1, input_samples.size() - 1);
+      return input_samples[source_idx];
+    }
+    const size_t source_idx = std::min(virtual_idx, input_samples.size() - 1);
+    return input_samples[source_idx];
+  };
+
+  const double estimated_output_samples = (source_virtual_size * static_cast<double>(output_sample_rate_hz)) /
+                                          static_cast<double>(input_sample_rate_hz);
   std::vector<int16_t> output_samples;
   output_samples.reserve(std::max<size_t>(
       1, static_cast<size_t>(std::ceil(estimated_output_samples)) + 2U));
 
-  for (double pos = 0.0; pos < static_cast<double>(input_sample_count); pos += ratio) {
+  const double step = std::max(1.0e-12, ratio);
+  double pos = std::clamp(*next_source_pos, 0.0, step) + source_base_offset;
+  for (; pos < source_virtual_size; pos += step) {
     const size_t index = static_cast<size_t>(pos);
-    const size_t next_index = std::min(index + 1, input_samples.size() - 1);
+    const size_t next_index = std::min(index + 1, static_cast<size_t>(source_virtual_size - 1.0));
     const double frac = pos - static_cast<double>(index);
     const double mixed =
-        static_cast<double>(input_samples[index]) +
-        (static_cast<double>(input_samples[next_index]) -
-         static_cast<double>(input_samples[index])) *
+        static_cast<double>(source_at(index)) +
+        (static_cast<double>(source_at(next_index)) - static_cast<double>(source_at(index))) *
             frac;
     output_samples.push_back(static_cast<int16_t>(
         std::lrint(std::clamp(mixed, -32768.0, 32767.0))));
   }
+  *next_source_pos = pos - source_virtual_size;
+  if (!std::isfinite(*next_source_pos) || *next_source_pos < 0.0 || *next_source_pos >= step) {
+    *next_source_pos = 0.0;
+  }
+  *prev_sample = input_samples.back();
+  *has_prev_sample = true;
   if (output_samples.empty()) {
     output_samples.push_back(input_samples.back());
   }
@@ -2094,11 +2127,16 @@ void MainWindow::HandleAudioPcmFrame(int sample_rate_hz, const QByteArray& pcm) 
   QByteArray playback_pcm;
   int playback_sample_rate_hz = sample_rate_hz;
   if (audio_output_sample_rate_hz_ > 0 && audio_output_sample_rate_hz_ != sample_rate_hz) {
-    if (!ResampleMonoPcmS16Le(pcm, sample_rate_hz, audio_output_sample_rate_hz_, &playback_pcm)) {
+    if (!ResampleMonoPcmS16Le(pcm, sample_rate_hz, audio_output_sample_rate_hz_,
+                              &audio_resample_next_source_pos_, &audio_resample_has_prev_sample_,
+                              &audio_resample_prev_sample_, &playback_pcm)) {
       return;
     }
     playback_sample_rate_hz = audio_output_sample_rate_hz_;
   } else {
+    audio_resample_next_source_pos_ = 0.0;
+    audio_resample_has_prev_sample_ = false;
+    audio_resample_prev_sample_ = 0;
     playback_pcm = pcm;
   }
   if (playback_pcm.isEmpty()) {
@@ -2183,6 +2221,9 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
     audio_sink_ = nullptr;
     audio_output_device_ = nullptr;
     audio_pending_pcm_.clear();
+    audio_resample_next_source_pos_ = 0.0;
+    audio_resample_has_prev_sample_ = false;
+    audio_resample_prev_sample_ = 0;
     audio_prefill_complete_ = false;
     audio_prefill_started_at_ms_ = 0;
     audio_output_sample_rate_hz_ = 0;
@@ -2241,6 +2282,9 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
     audio_sink_->deleteLater();
     audio_sink_ = nullptr;
     audio_pending_pcm_.clear();
+    audio_resample_next_source_pos_ = 0.0;
+    audio_resample_has_prev_sample_ = false;
+    audio_resample_prev_sample_ = 0;
     audio_prefill_complete_ = false;
     audio_prefill_started_at_ms_ = 0;
     audio_output_sample_rate_hz_ = 0;
@@ -2250,6 +2294,9 @@ void MainWindow::EnsureAudioOutputInitialized(int sample_rate_hz) {
   }
   audio_prefill_complete_ = false;
   audio_prefill_started_at_ms_ = 0;
+  audio_resample_next_source_pos_ = 0.0;
+  audio_resample_has_prev_sample_ = false;
+  audio_resample_prev_sample_ = 0;
   audio_output_sample_rate_hz_ = audio_format.sampleRate();
 #endif
 }
