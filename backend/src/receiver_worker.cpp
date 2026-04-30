@@ -1179,6 +1179,7 @@ void ReceiverWorker::RunLoop() {
     std::optional<std::chrono::steady_clock::time_point> last_iq_read_completed_at;
     uint64_t iq_rate_window_samples = 0;
     double iq_rate_window_seconds = 0.0;
+    std::optional<double> locked_audio_iq_rate_hz;
     const bool single_scan_channel =
         (active_mode == RadioMode::kScanList && scan_list_channel_count <= 1);
 
@@ -1364,6 +1365,27 @@ void ReceiverWorker::RunLoop() {
       }
       const bool signal_gate_open = !has_scan_squelch || squelch_open || gate_open_until_channel_hop;
       const bool audio_gate_open = has_scan_squelch && (squelch_open || gate_open_until_channel_hop);
+      if (audio_gate_open) {
+        if (!locked_audio_iq_rate_hz.has_value()) {
+          const double lock_rate_hz = iq_rate_estimate_valid_
+                                          ? audio_stats_estimated_iq_sample_rate_hz
+                                          : static_cast<double>(iq.sample_rate_hz);
+          if (std::isfinite(lock_rate_hz) && lock_rate_hz > 0.0) {
+            locked_audio_iq_rate_hz = lock_rate_hz;
+          }
+        }
+      } else {
+        locked_audio_iq_rate_hz.reset();
+      }
+      if (locked_audio_iq_rate_hz.has_value()) {
+        const uint32_t locked_iq_sr = static_cast<uint32_t>(std::llround(std::clamp(
+            *locked_audio_iq_rate_hz, static_cast<double>(kMinSampleRateHz),
+            static_cast<double>(kMaxSampleRateHz))));
+        if (locked_iq_sr > 0) {
+          iq.sample_rate_hz = locked_iq_sr;
+          audio_stats_last_iq_sample_rate_hz = iq.sample_rate_hz;
+        }
+      }
       if (has_scan_squelch) {
         ++audio_stats_iq_blocks;
         if (audio_gate_open) {
@@ -1485,7 +1507,8 @@ void ReceiverWorker::RunLoop() {
         audio_stats_last_emit_at = now;
         audio_stats_last_gen_ratio = 1.0;
         audio_stats_last_rate_correction = 1.0;
-        if (audio_gate_open && iq_rate_estimate_valid_ && audio_sample_rate_hz > 0 &&
+        if (!locked_audio_iq_rate_hz.has_value() && audio_gate_open && iq_rate_estimate_valid_ &&
+            audio_sample_rate_hz > 0 &&
             audio_stats_generated_samples > 0) {
           const double target_generated_samples =
               static_cast<double>(audio_sample_rate_hz) * stats_window_s;
