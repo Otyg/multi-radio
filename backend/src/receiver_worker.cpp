@@ -544,7 +544,8 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
       ApplyCascadedLowPass(&source, source_sample_rate_hz, 3400.0, 3, &state->lowpass);
       break;
   }
-  const double dc_block_cutoff_hz = (modulation == Modulation::kWfm) ? 120.0 : 30.0;
+  const double dc_block_cutoff_hz =
+      (modulation == Modulation::kWfm) ? 180.0 : ((modulation == Modulation::kNfm) ? 120.0 : 60.0);
   ApplyAudioDcBlock(&source, source_sample_rate_hz, dc_block_cutoff_hz, &state->dc_block);
 
   if (audio_sample_rate_hz == 0) {
@@ -584,8 +585,9 @@ bool BuildAudioPcm16(const IQSampleBlock& iq, Modulation modulation, uint32_t au
     const double sample_b = source_at(next_idx);
     const double mixed = sample_a + (sample_b - sample_a) * frac;
     const double gain =
-        (modulation == Modulation::kWfm) ? 13000.0 : ((modulation == Modulation::kAm) ? 11000.0 : 10000.0);
-    const double sample = std::clamp(mixed * gain, -30000.0, 30000.0);
+        (modulation == Modulation::kWfm) ? 10000.0 : ((modulation == Modulation::kAm) ? 9000.0 : 8500.0);
+    // Soft-limit peaks to avoid harsh clipping artifacts from impulsive discriminator spikes.
+    const double sample = 28000.0 * std::tanh((mixed * gain) / 28000.0);
     pcm_out->push_back(static_cast<int16_t>(std::lrint(sample)));
     pos += step;
   }
@@ -613,28 +615,47 @@ std::vector<double> BuildFmDiscriminator(const IQSampleBlock& iq, size_t max_sam
     return discriminator;
   }
 
+  auto normalize_iq = [](double i, double q, double* out_i, double* out_q) {
+    if (out_i == nullptr || out_q == nullptr) {
+      return;
+    }
+    const double mag = std::hypot(i, q);
+    if (!std::isfinite(mag) || mag <= 1.0e-6) {
+      *out_i = 0.0;
+      *out_q = 0.0;
+      return;
+    }
+    *out_i = i / mag;
+    *out_q = q / mag;
+  };
+
   size_t start_idx = 1;
-  double prev_i = static_cast<double>(iq.interleaved_iq[0]);
-  double prev_q = static_cast<double>(iq.interleaved_iq[1]);
+  double prev_i = 0.0;
+  double prev_q = 0.0;
+  normalize_iq(static_cast<double>(iq.interleaved_iq[0]),
+               static_cast<double>(iq.interleaved_iq[1]), &prev_i, &prev_q);
   if (state != nullptr && state->initialized && std::isfinite(state->prev_i) && std::isfinite(state->prev_q)) {
     start_idx = 0;
     prev_i = state->prev_i;
     prev_q = state->prev_q;
   }
   discriminator.reserve(sample_count - start_idx);
+  constexpr double kMaxPhaseStepRad = 1.2;
   for (size_t n = start_idx; n < sample_count; ++n) {
-    const double cur_i = static_cast<double>(iq.interleaved_iq[n * 2]);
-    const double cur_q = static_cast<double>(iq.interleaved_iq[n * 2 + 1]);
+    double cur_i = 0.0;
+    double cur_q = 0.0;
+    normalize_iq(static_cast<double>(iq.interleaved_iq[n * 2]),
+                 static_cast<double>(iq.interleaved_iq[n * 2 + 1]), &cur_i, &cur_q);
     const double cross = prev_i * cur_q - prev_q * cur_i;
     const double dot = prev_i * cur_i + prev_q * cur_q;
-    discriminator.push_back(std::atan2(cross, dot));
+    const double phase_step = std::clamp(std::atan2(cross, dot), -kMaxPhaseStepRad, kMaxPhaseStepRad);
+    discriminator.push_back(phase_step);
     prev_i = cur_i;
     prev_q = cur_q;
   }
   if (state != nullptr) {
-    const size_t last_idx = (sample_count - 1) * 2;
-    state->prev_i = static_cast<double>(iq.interleaved_iq[last_idx]);
-    state->prev_q = static_cast<double>(iq.interleaved_iq[last_idx + 1]);
+    state->prev_i = prev_i;
+    state->prev_q = prev_q;
     state->initialized = true;
   }
 
