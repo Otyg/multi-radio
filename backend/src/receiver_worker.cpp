@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <limits>
 #include <sstream>
@@ -25,6 +26,7 @@ constexpr double kToneFrequencyHz = 1000.0;
 constexpr double kToneAmplitude = 9000.0;
 constexpr size_t kIqVisualizationMaxInterleavedSamples = 4096;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
+constexpr int16_t kIqClipThresholdS16 = 32256;
 
 ModeConfig NormalizeModeConfig(const ModeConfig& input) {
   ModeConfig out = input;
@@ -106,6 +108,81 @@ std::string FormatRuntimeError(const char* operation, const std::string& error) 
     out << ": " << error;
   }
   return out.str();
+}
+
+struct PsdSummary {
+  bool valid = false;
+  double peak_db = -120.0;
+  double floor_db = -120.0;
+  double snr_db = 0.0;
+  double peak_offset_hz = 0.0;
+};
+
+PsdSummary EstimatePsdSummary(const std::vector<int16_t>& interleaved_iq, uint32_t sample_rate_hz) {
+  PsdSummary out;
+  if (interleaved_iq.size() < 128) {
+    return out;
+  }
+  const size_t iq_pairs = interleaved_iq.size() / 2U;
+  const size_t n = std::min<size_t>(256, iq_pairs);
+  if (n < 32) {
+    return out;
+  }
+
+  const size_t start_pair = iq_pairs - n;
+  std::vector<double> power_db;
+  power_db.reserve(n);
+  double window_energy = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    const double phase = (2.0 * kPi * static_cast<double>(i)) / static_cast<double>(n - 1);
+    const double w = 0.5 * (1.0 - std::cos(phase));
+    window_energy += w * w;
+  }
+  const double norm = std::max(1.0e-12, window_energy);
+
+  for (size_t k = 0; k < n; ++k) {
+    std::complex<double> acc(0.0, 0.0);
+    for (size_t t = 0; t < n; ++t) {
+      const size_t pair_idx = start_pair + t;
+      const size_t sample_idx = pair_idx * 2U;
+      const double i_norm = static_cast<double>(interleaved_iq[sample_idx]) / 32768.0;
+      const double q_norm = static_cast<double>(interleaved_iq[sample_idx + 1U]) / 32768.0;
+      const std::complex<double> x(i_norm, q_norm);
+      const double window_phase =
+          (2.0 * kPi * static_cast<double>(t)) / static_cast<double>(n - 1);
+      const double w = 0.5 * (1.0 - std::cos(window_phase));
+      const double dft_phase =
+          (-2.0 * kPi * static_cast<double>(k) * static_cast<double>(t)) / static_cast<double>(n);
+      acc += x * w * std::complex<double>(std::cos(dft_phase), std::sin(dft_phase));
+    }
+    const double p = std::norm(acc) / norm;
+    power_db.push_back(10.0 * std::log10(std::max(1.0e-12, p)));
+  }
+
+  auto peak_it = std::max_element(power_db.begin(), power_db.end());
+  if (peak_it == power_db.end()) {
+    return out;
+  }
+  const size_t peak_bin = static_cast<size_t>(std::distance(power_db.begin(), peak_it));
+  const double peak_db = *peak_it;
+
+  std::vector<double> sorted = power_db;
+  const size_t floor_idx = sorted.size() / 5U;
+  std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(floor_idx), sorted.end());
+  const double floor_db = sorted[floor_idx];
+  const double snr_db = std::max(0.0, peak_db - floor_db);
+
+  const int signed_bin = (peak_bin <= (n / 2U)) ? static_cast<int>(peak_bin)
+                                                 : static_cast<int>(peak_bin) - static_cast<int>(n);
+  const double peak_offset_hz =
+      static_cast<double>(signed_bin) * static_cast<double>(sample_rate_hz) / static_cast<double>(n);
+
+  out.valid = true;
+  out.peak_db = peak_db;
+  out.floor_db = floor_db;
+  out.snr_db = snr_db;
+  out.peak_offset_hz = peak_offset_hz;
+  return out;
 }
 
 IQSampleBlock BuildSyntheticIqBlock(uint32_t sample_rate_hz, uint32_t tuned_frequency_hz, uint64_t sample_index) {
@@ -257,6 +334,12 @@ void ReceiverWorker::RunLoop() {
   uint64_t conceal_samples = 0;
   uint64_t iq_interleaved_samples = 0;
   uint32_t iq_sample_rate_hz = 0;
+  uint64_t iq_window_samples = 0;
+  uint64_t iq_window_components = 0;
+  uint64_t iq_window_clipped_components = 0;
+  double iq_window_component_power = 0.0;
+  IQSampleBlock latest_iq_block;
+  bool have_latest_iq_block = false;
 
   double tone_phase = 0.0;
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
@@ -387,6 +470,17 @@ void ReceiverWorker::RunLoop() {
       iq_sample_index += static_cast<uint64_t>(iq_block.interleaved_iq.size() / 2U);
       iq_interleaved_samples = static_cast<uint64_t>(iq_block.interleaved_iq.size());
       iq_sample_rate_hz = iq_block.sample_rate_hz;
+      iq_window_samples += static_cast<uint64_t>(iq_block.interleaved_iq.size() / 2U);
+      iq_window_components += static_cast<uint64_t>(iq_block.interleaved_iq.size());
+      for (const int16_t sample : iq_block.interleaved_iq) {
+        const double normalized = static_cast<double>(sample) / 32768.0;
+        iq_window_component_power += normalized * normalized;
+        if (std::abs(static_cast<int>(sample)) >= static_cast<int>(kIqClipThresholdS16)) {
+          ++iq_window_clipped_components;
+        }
+      }
+      latest_iq_block = iq_block;
+      have_latest_iq_block = true;
       {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_.clear();
@@ -438,6 +532,21 @@ void ReceiverWorker::RunLoop() {
       const uint64_t window_ms = static_cast<uint64_t>(std::llround(window_s * 1000.0));
       const double gen_hz = static_cast<double>(generated_samples) / window_s;
       const double pub_hz = static_cast<double>(published_samples) / window_s;
+      const double iq_measured_sample_rate_hz = static_cast<double>(iq_window_samples) / window_s;
+      const double iq_rms = (iq_window_components == 0)
+                                ? 0.0
+                                : std::sqrt(iq_window_component_power /
+                                            static_cast<double>(iq_window_components));
+      const double iq_level_dbfs =
+          20.0 * std::log10(std::max(1.0e-9, std::min(1.0, iq_rms)));
+      const double iq_clip_pct =
+          (iq_window_components == 0)
+              ? 0.0
+              : (100.0 * static_cast<double>(iq_window_clipped_components) /
+                 static_cast<double>(iq_window_components));
+      const PsdSummary psd = have_latest_iq_block
+                                 ? EstimatePsdSummary(latest_iq_block.interleaved_iq, iq_sample_rate_hz)
+                                 : PsdSummary{};
 
       std::ostringstream audio_status;
       audio_status << "AUDIO_STATS idx=" << ch.index
@@ -473,10 +582,33 @@ void ReceiverWorker::RunLoop() {
                    << " flush_samples=0";
       PublishEvent(EventKind::kInfo, audio_status.str(), ch.frequency_hz, false);
 
+      std::ostringstream iq_status;
+      iq_status << "IQ_STATS idx=" << ch.index
+                << " mod=" << ModulationToken(ch.modulation)
+                << " cfg_sr=" << config.sample_rate_hz
+                << " meas_sr=" << FormatDouble(iq_measured_sample_rate_hz, 0)
+                << " block_sr=" << iq_sample_rate_hz
+                << " tuned_hz=" << tuned_frequency_hz
+                << " center_hz=" << (have_latest_iq_block ? latest_iq_block.center_frequency_hz : 0U)
+                << " level_dbfs=" << FormatDouble(iq_level_dbfs, 1)
+                << " clip_pct=" << FormatDouble(iq_clip_pct, 2)
+                << " clip=" << ((iq_clip_pct >= 1.0) ? 1 : 0)
+                << " psd_peak_db=" << FormatDouble(psd.peak_db, 1)
+                << " psd_floor_db=" << FormatDouble(psd.floor_db, 1)
+                << " snr_db=" << FormatDouble(psd.snr_db, 1)
+                << " psd_peak_offset_hz=" << FormatDouble(psd.peak_offset_hz, 0)
+                << " win_ms=" << window_ms
+                << " iq_n=" << iq_interleaved_samples;
+      PublishEvent(EventKind::kInfo, iq_status.str(), ch.frequency_hz);
+
       generated_samples = 0;
       published_samples = 0;
       published_frames = 0;
       conceal_samples = 0;
+      iq_window_samples = 0;
+      iq_window_components = 0;
+      iq_window_clipped_components = 0;
+      iq_window_component_power = 0.0;
       stats_started_at = now;
       next_stats_at = now + std::chrono::milliseconds(kAudioStatsIntervalMs);
     }

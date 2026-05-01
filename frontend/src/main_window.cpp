@@ -1577,6 +1577,47 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     }
     return;
   }
+  if (message.startsWith("IQ_STATS ")) {
+    if (!IsSelectedReceiver(receiver_id)) {
+      return;
+    }
+    bool cfg_sr_ok = false;
+    const int configured_sample_rate_hz = TokenValue(message, "cfg_sr").toInt(&cfg_sr_ok);
+    bool meas_sr_ok = false;
+    const double measured_sample_rate_hz = TokenValue(message, "meas_sr").toDouble(&meas_sr_ok);
+    bool block_sr_ok = false;
+    const int block_sample_rate_hz = TokenValue(message, "block_sr").toInt(&block_sr_ok);
+    bool tuned_hz_ok = false;
+    const double tuned_hz = TokenValue(message, "tuned_hz").toDouble(&tuned_hz_ok);
+    bool center_hz_ok = false;
+    const double center_hz = TokenValue(message, "center_hz").toDouble(&center_hz_ok);
+    bool level_ok = false;
+    const double level_dbfs = TokenValue(message, "level_dbfs").toDouble(&level_ok);
+    bool clip_pct_ok = false;
+    const double clip_pct = TokenValue(message, "clip_pct").toDouble(&clip_pct_ok);
+    bool clip_ok = false;
+    const int clip_flag = TokenValue(message, "clip").toInt(&clip_ok);
+    bool snr_ok = false;
+    const double snr_db = TokenValue(message, "snr_db").toDouble(&snr_ok);
+    bool psd_peak_hz_ok = false;
+    const double psd_peak_offset_hz = TokenValue(message, "psd_peak_offset_hz").toDouble(&psd_peak_hz_ok);
+
+    AppendLog(QString("[%1] RX%2 IQ_STATS cfg_sr=%3 meas_sr=%4 block_sr=%5 tuned=%6 center=%7 "
+                      "level=%8 dBFS clip=%9%% flag=%10 snr=%11 dB peak_offset=%12 Hz")
+                  .arg(ToLocalTime(unix_ms))
+                  .arg(receiver_id)
+                  .arg(cfg_sr_ok ? configured_sample_rate_hz : -1)
+                  .arg(meas_sr_ok ? QString::number(measured_sample_rate_hz, 'f', 0) : "?")
+                  .arg(block_sr_ok ? block_sample_rate_hz : -1)
+                  .arg(tuned_hz_ok ? QString::number(tuned_hz, 'f', 0) : "?")
+                  .arg(center_hz_ok ? QString::number(center_hz, 'f', 0) : "?")
+                  .arg(level_ok ? QString::number(level_dbfs, 'f', 1) : "?")
+                  .arg(clip_pct_ok ? QString::number(clip_pct, 'f', 2) : "?")
+                  .arg(clip_ok ? clip_flag : -1)
+                  .arg(snr_ok ? QString::number(snr_db, 'f', 1) : "?")
+                  .arg(psd_peak_hz_ok ? QString::number(psd_peak_offset_hz, 'f', 0) : "?"));
+    return;
+  }
   if (message.startsWith("AUDIO_STATS ")) {
     if (!IsSelectedReceiver(receiver_id)) {
       return;
