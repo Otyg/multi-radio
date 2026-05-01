@@ -2705,11 +2705,6 @@ void MainWindow::MaybeEmitFrontendAudioStats() {
   }
 
   const qint64 pending_bytes = static_cast<qint64>(audio_pending_pcm_.size());
-#if MR_HAS_QT_MULTIMEDIA
-  const qint64 sink_bytes_free = (audio_sink_ != nullptr) ? audio_sink_->bytesFree() : -1;
-#else
-  const qint64 sink_bytes_free = -1;
-#endif
   const int backend_seen_recent =
       (audio_backend_stats_last_seen_at_ms_ > 0 &&
        now_ms <= audio_backend_stats_last_seen_at_ms_ + (kAudioFrontendStatsIntervalMs * 2))
@@ -2730,31 +2725,6 @@ void MainWindow::MaybeEmitFrontendAudioStats() {
     audio_frontend_stats_window_started_at_ms_ = now_ms;
     return;
   }
-
-  AppendLog(QString("AUDIO_FE_STATS rx_f=%1 rx_b=%2 filt_f=%3 rx_sr=%4 out_sr=%5 "
-                    "prefill=%6 wait=%7 ready=%8 pend_b=%9 write_c=%10 write_b=%11 "
-                    "blocked=%12 overrun_b=%13 gap_fill_b=%14 miss_f=%15 miss_b=%16 "
-                    "out_dis=%17 out_dev=%18 sink_free=%19 backend_seen=%20")
-                .arg(audio_frontend_rx_frames_)
-                .arg(audio_frontend_rx_bytes_)
-                .arg(audio_frontend_filtered_frames_)
-                .arg(audio_frontend_last_rx_sample_rate_hz_)
-                .arg(audio_output_sample_rate_hz_)
-                .arg(audio_prefill_complete_ ? 1 : 0)
-                .arg(audio_frontend_prefill_wait_events_)
-                .arg(audio_frontend_prefill_complete_events_)
-                .arg(pending_bytes)
-                .arg(audio_frontend_write_calls_)
-                .arg(audio_frontend_written_bytes_)
-                .arg(audio_frontend_write_blocked_events_)
-                .arg(audio_frontend_overrun_dropped_bytes_)
-                .arg(audio_frontend_gap_fill_bytes_)
-                .arg(audio_frontend_missing_frame_events_)
-                .arg(audio_frontend_missing_sample_bytes_)
-                .arg(audio_output_disabled_ ? 1 : 0)
-                .arg(audio_output_device_ != nullptr ? 1 : 0)
-                .arg(sink_bytes_free)
-                .arg(backend_seen_recent));
 
   audio_frontend_rx_frames_ = 0;
   audio_frontend_rx_bytes_ = 0;
