@@ -908,7 +908,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   receiver_combo_ = new QComboBox(control_group);
 
-  fixed_frequency_edit_ = new QLineEdit("162025000", control_group);
+  fixed_frequency_edit_ = new QLineEdit("162.025", control_group);
   range_start_edit_ = new QLineEdit("156000000", control_group);
   range_end_edit_ = new QLineEdit("163000000", control_group);
   range_step_edit_ = new QLineEdit("25000", control_group);
@@ -963,7 +963,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   auto* fixed_tab = new QWidget(mode_tabs_);
   auto* fixed_layout = new QFormLayout(fixed_tab);
-  fixed_layout->addRow("Fixed Hz", fixed_frequency_edit_);
+  fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   auto* range_tab = new QWidget(mode_tabs_);
@@ -1466,7 +1466,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   }
 
   v1::ModeConfig config;
-  config.set_fixed_frequency_hz(fixed_frequency_edit_->text().toDouble());
+  config.set_fixed_frequency_hz(fixed_frequency_edit_->text().toDouble() * 1000000.0);
   config.set_range_start_hz(range_start_edit_->text().toDouble());
   config.set_range_end_hz(range_end_edit_->text().toDouble());
   config.set_range_step_hz(range_step_edit_->text().toDouble());
