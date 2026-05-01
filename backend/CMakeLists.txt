@@ -1,6 +1,18 @@
 find_package(Threads REQUIRED)
 find_package(PkgConfig QUIET)
 
+set(MR_BUILD_GIT_COMMIT "unknown")
+execute_process(
+  COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short=12 HEAD
+  OUTPUT_VARIABLE MR_BUILD_GIT_COMMIT_RAW
+  RESULT_VARIABLE MR_BUILD_GIT_COMMIT_RESULT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(MR_BUILD_GIT_COMMIT_RESULT EQUAL 0 AND NOT MR_BUILD_GIT_COMMIT_RAW STREQUAL "")
+  set(MR_BUILD_GIT_COMMIT "${MR_BUILD_GIT_COMMIT_RAW}")
+endif()
+
 set(MR_RTLSDR_LINK_TARGET "")
 if(PkgConfig_FOUND)
   pkg_check_modules(RTLSDR QUIET IMPORTED_TARGET librtlsdr)
@@ -60,6 +72,7 @@ if(MR_BUILD_SERVER)
     )
 
     add_executable(multi_radio_server src/server_main.cpp)
+    target_compile_definitions(multi_radio_server PRIVATE MR_BUILD_GIT_COMMIT="${MR_BUILD_GIT_COMMIT}")
     target_link_libraries(multi_radio_server PRIVATE multi_radio_server_lib)
   else()
     message(WARNING "Skipping server build: proto/gRPC unavailable.")

@@ -3,6 +3,10 @@
 
 #include "multi_radio/server_app.hpp"
 
+#ifndef MR_BUILD_GIT_COMMIT
+#define MR_BUILD_GIT_COMMIT "unknown"
+#endif
+
 namespace {
 
 std::string GetEnvOrDefault(const char* key, const std::string& fallback) {
@@ -20,6 +24,8 @@ int main() {
   config.log_dir = GetEnvOrDefault("MR_LOG_DIR", config.log_dir.string());
 
   multi_radio::ServerApp app(config);
+
+  std::cout << "Multi-Radio server build commit: " << MR_BUILD_GIT_COMMIT << "\n";
 
   std::string error;
   if (!app.Init(&error)) {

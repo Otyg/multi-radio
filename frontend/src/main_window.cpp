@@ -1109,6 +1109,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   spectrum_source_combo_ = new QComboBox(global_tab);
   spectrum_source_combo_->addItem("Demodulated", QVariant::fromValue(0));
   spectrum_source_combo_->addItem("Receiver spectrum", QVariant::fromValue(1));
+  spectrum_source_combo_->setCurrentIndex(1);
   auto* visualization_settings_button = new QPushButton("Visualization settings...", global_tab);
   global_layout->addRow("Spectrum view", spectrum_source_combo_);
   global_layout->addRow(visualization_settings_button);
@@ -1135,6 +1136,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   top_layout->addWidget(control_group, 1);
 
   signal_visualization_ = new SignalVisualizationWidget(central);
+  signal_visualization_->SetSpectrumSource(SignalVisualizationWidget::SpectrumSource::kReceiverInput);
 
   event_log_ = new QPlainTextEdit(central);
   event_log_->setReadOnly(true);
@@ -1283,6 +1285,8 @@ void MainWindow::RefreshReceivers() {
 
   const uint32_t previous_receiver_id =
       (receiver_combo_->currentIndex() >= 0) ? static_cast<uint32_t>(receiver_combo_->currentData().toUInt()) : 0;
+  const int previous_receiver_filter_id =
+      (receiver_filter_combo_->currentIndex() >= 0) ? receiver_filter_combo_->currentData().toInt() : -1;
   receiver_combo_->clear();
   receiver_filter_combo_->clear();
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
@@ -1307,8 +1311,25 @@ void MainWindow::RefreshReceivers() {
     }
   }
 
+  int receiver_filter_id_to_apply = -1;
+  if (previous_receiver_filter_id >= 0) {
+    const int restore_filter_index =
+        receiver_filter_combo_->findData(QVariant::fromValue<int>(previous_receiver_filter_id));
+    if (restore_filter_index >= 0) {
+      receiver_filter_combo_->setCurrentIndex(restore_filter_index);
+      receiver_filter_id_to_apply = previous_receiver_filter_id;
+    }
+  }
+
   if (receiver_combo_->currentIndex() >= 0) {
     const uint32_t selected_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+    if (receiver_filter_id_to_apply < 0) {
+      const int selected_filter_index = receiver_filter_combo_->findData(QVariant::fromValue<int>(selected_id));
+      if (selected_filter_index >= 0) {
+        receiver_filter_combo_->setCurrentIndex(selected_filter_index);
+        receiver_filter_id_to_apply = static_cast<int>(selected_id);
+      }
+    }
     for (const auto& receiver : receivers) {
       if (receiver.receiver_id() != selected_id) {
         continue;
@@ -1358,7 +1379,7 @@ void MainWindow::RefreshReceivers() {
   RefreshScanListChannelCards();
 
   signal_visualization_->SetKnownReceivers(receiver_ids);
-  signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
+  signal_visualization_->SetReceiverFilter(receiver_filter_id_to_apply);
 
   AppendLog(QString("Refreshed %1 receivers").arg(receivers.size()));
 }
