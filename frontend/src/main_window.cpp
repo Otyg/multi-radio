@@ -1706,6 +1706,13 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
   Q_UNUSED(unix_ms);
   Q_UNUSED(sequence);
   Q_UNUSED(sample_index);
+  if (!iq_frame_seen_) {
+    iq_frame_seen_ = true;
+    AppendLog(QString("IQ stream active: RX%1 sr=%2 Hz tuned=%3 Hz")
+                  .arg(receiver_id)
+                  .arg(sample_rate_hz)
+                  .arg(tuned_frequency_hz, 0, 'f', 0));
+  }
   if (!IsSelectedReceiver(receiver_id)) {
     return;
   }
@@ -2852,6 +2859,22 @@ void MainWindow::SaveScanListConfigToSettings() const {
 
 void MainWindow::OnStreamError(const QString& error) {
   AppendLog(QString("Stream error: %1").arg(error));
+  if (error.contains("IQ stream unavailable", Qt::CaseInsensitive)) {
+    if (spectrum_source_combo_ != nullptr && spectrum_source_combo_->currentData().toInt() == 1) {
+      const QSignalBlocker blocker(spectrum_source_combo_);
+      spectrum_source_combo_->setCurrentIndex(0);
+      signal_visualization_->SetSpectrumSource(SignalVisualizationWidget::SpectrumSource::kDemodulated);
+      AppendLog("Switched visualization source to Demodulated because IQ stream is unavailable.");
+    }
+    if (!iq_stream_unavailable_notified_) {
+      iq_stream_unavailable_notified_ = true;
+      QMessageBox::information(
+          this, "IQ stream unavailable",
+          "Servern exponerar inte IQ-stream.\n"
+          "Visualisering fallbackar till demodulerad signal.\n"
+          "Starta om servern byggd med senaste kod för rå IQ-visualisering.");
+    }
+  }
 }
 
 bool MainWindow::CurrentReceiverId(uint32_t* receiver_id) const {

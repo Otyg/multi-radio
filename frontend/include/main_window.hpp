@@ -183,6 +183,8 @@ class MainWindow : public QMainWindow {
   bool audio_queue_overrun_logged_ = false;
   bool audio_output_disabled_by_env_ = false;
   bool audio_output_disabled_ = false;
+  bool iq_stream_unavailable_notified_ = false;
+  bool iq_frame_seen_ = false;
   qint64 audio_backend_stats_last_seen_at_ms_ = 0;
   qint64 audio_frontend_stats_window_started_at_ms_ = 0;
   int audio_frontend_last_rx_sample_rate_hz_ = 0;
