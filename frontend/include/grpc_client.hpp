@@ -42,6 +42,8 @@ class GrpcClient : public QObject {
                               QString payload, QVariantMap fields, quint64 unix_ms);
   void AudioFrameReceived(uint32_t receiver_id, int sample_rate_hz, QByteArray pcm_s16le, quint64 unix_ms,
                           double tuned_frequency_hz, quint64 sequence, quint64 sample_index);
+  void IqFrameReceived(uint32_t receiver_id, int sample_rate_hz, QByteArray interleaved_iq_s16le,
+                       quint64 unix_ms, double tuned_frequency_hz, quint64 sequence, quint64 sample_index);
   void StreamError(QString error);
 
  private:
@@ -49,6 +51,7 @@ class GrpcClient : public QObject {
   void EventsLoop();
   void MessagesLoop();
   void AudioLoop();
+  void IqLoop();
 
   std::string token_;
   std::unique_ptr<RadioControlClient> control_client_;
@@ -56,9 +59,11 @@ class GrpcClient : public QObject {
 
   std::atomic<bool> streaming_{false};
   bool audio_stream_supported_ = true;
+  bool iq_stream_supported_ = true;
   std::thread events_thread_;
   std::thread messages_thread_;
   std::thread audio_thread_;
+  std::thread iq_thread_;
 };
 
 }  // namespace multi_radio

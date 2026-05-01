@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <limits>
 #include <optional>
@@ -274,6 +275,125 @@ bool ParseSeries(const QString& value, std::vector<double>* out) {
     out->push_back(parsed);
   }
   return !out->empty();
+}
+
+bool DecodeInt16LeBytes(const QByteArray& bytes, std::vector<int16_t>* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  out->clear();
+  if (bytes.isEmpty()) {
+    return false;
+  }
+  const int byte_count = bytes.size() - (bytes.size() % 2);
+  if (byte_count <= 0) {
+    return false;
+  }
+  const int sample_count = byte_count / 2;
+  out->resize(static_cast<size_t>(sample_count));
+  for (int i = 0; i < sample_count; ++i) {
+    const uint16_t lo = static_cast<uint8_t>(bytes.at(i * 2));
+    const uint16_t hi = static_cast<uint8_t>(bytes.at(i * 2 + 1));
+    (*out)[static_cast<size_t>(i)] = static_cast<int16_t>((hi << 8) | lo);
+  }
+  return true;
+}
+
+std::vector<double> BuildNormalizedSpectrumFromComplex(const std::vector<std::complex<double>>& complex_samples,
+                                                       int spectrum_bins) {
+  std::vector<double> spectrum;
+  if (complex_samples.size() < 8 || spectrum_bins <= 0) {
+    return spectrum;
+  }
+  const int fft_size = std::min<int>(1024, std::max<int>(64, spectrum_bins * 2));
+  const int n = std::min<int>(fft_size, static_cast<int>(complex_samples.size()));
+  if (n < 8) {
+    return spectrum;
+  }
+  const int bins = n / 2;
+  spectrum.assign(static_cast<size_t>(bins), 0.0);
+
+  constexpr double kPi = 3.14159265358979323846;
+  for (int k = 0; k < bins; ++k) {
+    std::complex<double> acc(0.0, 0.0);
+    for (int t = 0; t < n; ++t) {
+      const double w = 0.5 * (1.0 - std::cos((2.0 * kPi * static_cast<double>(t)) / static_cast<double>(n - 1)));
+      const double phase = -2.0 * kPi * static_cast<double>(k) * static_cast<double>(t) / static_cast<double>(n);
+      acc += complex_samples[static_cast<size_t>(t)] * w * std::complex<double>(std::cos(phase), std::sin(phase));
+    }
+    const double magnitude = std::abs(acc) / static_cast<double>(n);
+    spectrum[static_cast<size_t>(k)] = 20.0 * std::log10(std::max(1.0e-12, magnitude));
+  }
+
+  const auto [min_it, max_it] = std::minmax_element(spectrum.begin(), spectrum.end());
+  const double min_db = (min_it != spectrum.end()) ? *min_it : -120.0;
+  const double max_db = (max_it != spectrum.end()) ? *max_it : 0.0;
+  const double span = std::max(1.0, max_db - min_db);
+  for (double& value : spectrum) {
+    value = std::clamp((value - min_db) / span, 0.0, 1.0);
+  }
+  return spectrum;
+}
+
+void BuildReceiverVisualizationFrame(const QByteArray& interleaved_iq_s16le, int spectrum_bins,
+                                     std::vector<double>* waveform, std::vector<double>* spectrum,
+                                     double* signal_level_db) {
+  if (waveform == nullptr || spectrum == nullptr || signal_level_db == nullptr) {
+    return;
+  }
+  waveform->clear();
+  spectrum->clear();
+  *signal_level_db = -120.0;
+
+  std::vector<int16_t> iq_s16;
+  if (!DecodeInt16LeBytes(interleaved_iq_s16le, &iq_s16) || iq_s16.size() < 16) {
+    return;
+  }
+  if ((iq_s16.size() % 2U) != 0U) {
+    iq_s16.pop_back();
+  }
+  const size_t iq_pairs = iq_s16.size() / 2U;
+  if (iq_pairs < 8U) {
+    return;
+  }
+
+  std::vector<std::complex<double>> complex_samples;
+  complex_samples.reserve(iq_pairs);
+  double power_sum = 0.0;
+  for (size_t i = 0; i < iq_pairs; ++i) {
+    const double i_norm = static_cast<double>(iq_s16[i * 2U]) / 32768.0;
+    const double q_norm = static_cast<double>(iq_s16[i * 2U + 1U]) / 32768.0;
+    complex_samples.emplace_back(i_norm, q_norm);
+    power_sum += (i_norm * i_norm) + (q_norm * q_norm);
+    waveform->push_back(std::clamp(0.5 + (0.5 * i_norm), 0.0, 1.0));
+  }
+
+  const double rms = std::sqrt(power_sum / static_cast<double>(iq_pairs));
+  *signal_level_db = std::clamp(20.0 * std::log10(std::max(1.0e-9, rms)), -120.0, 0.0);
+  *spectrum = BuildNormalizedSpectrumFromComplex(complex_samples, spectrum_bins);
+}
+
+void BuildDemodVisualizationFrame(const QByteArray& pcm_s16le, int spectrum_bins, std::vector<double>* waveform,
+                                  std::vector<double>* spectrum) {
+  if (waveform == nullptr || spectrum == nullptr) {
+    return;
+  }
+  waveform->clear();
+  spectrum->clear();
+
+  std::vector<int16_t> pcm;
+  if (!DecodeInt16LeBytes(pcm_s16le, &pcm) || pcm.size() < 16) {
+    return;
+  }
+
+  std::vector<std::complex<double>> complex_samples;
+  complex_samples.reserve(pcm.size());
+  for (const int16_t sample : pcm) {
+    const double normalized = static_cast<double>(sample) / 32768.0;
+    waveform->push_back(std::clamp(0.5 + (0.5 * normalized), 0.0, 1.0));
+    complex_samples.emplace_back(normalized, 0.0);
+  }
+  *spectrum = BuildNormalizedSpectrumFromComplex(complex_samples, spectrum_bins);
 }
 
 bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, double* peak_strength,
@@ -1132,6 +1252,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           Qt::QueuedConnection);
   connect(client_.get(), &GrpcClient::AudioFrameReceived, this, &MainWindow::OnAudioFrame,
           Qt::QueuedConnection);
+  connect(client_.get(), &GrpcClient::IqFrameReceived, this, &MainWindow::OnIqFrame,
+          Qt::QueuedConnection);
   connect(client_.get(), &GrpcClient::StreamError, this, &MainWindow::OnStreamError,
           Qt::QueuedConnection);
 
@@ -1247,6 +1369,13 @@ void MainWindow::StartSelectedReceiver() {
     return;
   }
 
+  // Ensure the currently visible frontend settings are sent before hardware starts streaming.
+  QString apply_error;
+  if (!ApplyModeAndConfigForReceiver(receiver_id, &apply_error)) {
+    QMessageBox::warning(this, "Apply mode/config failed", apply_error);
+    return;
+  }
+
   std::string error;
   if (!client_->StartReceiver(receiver_id, &error)) {
     QMessageBox::warning(this, "StartReceiver failed", QString::fromStdString(error));
@@ -1277,6 +1406,30 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
+  QString error_text;
+  if (!ApplyModeAndConfigForReceiver(receiver_id, &error_text)) {
+    QMessageBox::warning(this, "SetModeConfig failed", error_text);
+    return;
+  }
+
+  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, dc=%5@%6 Hz, notch=%7@%8 Hz, lo-offset=%9@%10 Hz)")
+                .arg(receiver_id)
+                .arg(sample_rate_spin_->value())
+                .arg(channel_bandwidth_spin_->value())
+                .arg(hardware_bandwidth_spin_->value())
+                .arg(dc_blocker_checkbox_->isChecked() ? "on" : "off")
+                .arg(dc_blocker_cutoff_spin_->value())
+                .arg(center_notch_checkbox_->isChecked() ? "on" : "off")
+                .arg(center_notch_width_spin_->value())
+                .arg(lo_offset_checkbox_->isChecked() ? "on" : "off")
+                .arg(lo_offset_spin_->value()));
+}
+
+bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* error_text) {
+  if (error_text != nullptr) {
+    error_text->clear();
+  }
+
   int mode_tab_index = mode_tabs_->currentIndex();
   if (mode_tab_index == kGlobalSettingsTabIndex) {
     mode_tab_index = last_mode_tab_index_;
@@ -1285,8 +1438,10 @@ void MainWindow::ApplyModeAndConfig() {
 
   std::string error;
   if (!client_->SetMode(receiver_id, mode, &error)) {
-    QMessageBox::warning(this, "SetMode failed", QString::fromStdString(error));
-    return;
+    if (error_text != nullptr) {
+      *error_text = QString::fromStdString(error);
+    }
+    return false;
   }
 
   v1::ModeConfig config;
@@ -1329,21 +1484,12 @@ void MainWindow::ApplyModeAndConfig() {
   }
 
   if (!client_->SetModeConfig(receiver_id, config, &error)) {
-    QMessageBox::warning(this, "SetModeConfig failed", QString::fromStdString(error));
-    return;
+    if (error_text != nullptr) {
+      *error_text = QString::fromStdString(error);
+    }
+    return false;
   }
-
-  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, dc=%5@%6 Hz, notch=%7@%8 Hz, lo-offset=%9@%10 Hz)")
-                .arg(receiver_id)
-                .arg(sample_rate_spin_->value())
-                .arg(channel_bandwidth_spin_->value())
-                .arg(hardware_bandwidth_spin_->value())
-                .arg(dc_blocker_checkbox_->isChecked() ? "on" : "off")
-                .arg(dc_blocker_cutoff_spin_->value())
-                .arg(center_notch_checkbox_->isChecked() ? "on" : "off")
-                .arg(center_notch_width_spin_->value())
-                .arg(lo_offset_checkbox_->isChecked() ? "on" : "off")
-                .arg(lo_offset_spin_->value()));
+  return true;
 }
 
 void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
@@ -1533,6 +1679,35 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
                 .arg(message));
 }
 
+void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& interleaved_iq_s16le,
+                           quint64 unix_ms, double tuned_frequency_hz, quint64 sequence,
+                           quint64 sample_index) {
+  Q_UNUSED(unix_ms);
+  Q_UNUSED(sequence);
+  Q_UNUSED(sample_index);
+  if (!IsSelectedReceiver(receiver_id)) {
+    return;
+  }
+
+  std::vector<double> waveform;
+  std::vector<double> spectrum;
+  double signal_level_db = -120.0;
+  BuildReceiverVisualizationFrame(interleaved_iq_s16le, signal_visualization_->FftSize() / 2, &waveform,
+                                  &spectrum, &signal_level_db);
+  if (spectrum.empty()) {
+    return;
+  }
+
+  const double half_rate_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
+  const double frame_frequency_start_hz = tuned_frequency_hz - half_rate_hz;
+  const double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
+  signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_level_db);
+  signal_visualization_->PushVisualizationFrame(
+      receiver_id, waveform, spectrum, tuned_frequency_hz, 1.0,
+      SignalVisualizationWidget::SpectrumSource::kReceiverInput, frame_frequency_start_hz,
+      frame_frequency_end_hz);
+}
+
 void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& pcm_s16le,
                               quint64 unix_ms, double tuned_frequency_hz, quint64 sequence,
                               quint64 sample_index) {
@@ -1599,6 +1774,17 @@ void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QB
   ++audio_frontend_rx_frames_;
   audio_frontend_rx_bytes_ += static_cast<quint64>(pcm_s16le.size());
   audio_frontend_last_rx_sample_rate_hz_ = sample_rate_hz;
+
+  std::vector<double> waveform;
+  std::vector<double> spectrum;
+  BuildDemodVisualizationFrame(pcm_s16le, signal_visualization_->FftSize() / 2, &waveform, &spectrum);
+  if (!spectrum.empty()) {
+    const double nyquist_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
+    signal_visualization_->PushVisualizationFrame(
+        receiver_id, waveform, spectrum, 0.0, 1.0, SignalVisualizationWidget::SpectrumSource::kDemodulated,
+        0.0, nyquist_hz);
+  }
+
   HandleAudioPcmFrame(sample_rate_hz, pcm_s16le);
   MaybeEmitFrontendAudioStats();
 }

@@ -58,6 +58,9 @@ class MainWindow : public QMainWindow {
   void OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& pcm_s16le,
                     quint64 unix_ms, double tuned_frequency_hz, quint64 sequence,
                     quint64 sample_index);
+  void OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByteArray& interleaved_iq_s16le,
+                 quint64 unix_ms, double tuned_frequency_hz, quint64 sequence,
+                 quint64 sample_index);
   void OnStreamError(const QString& error);
 
  private:
@@ -96,6 +99,7 @@ class MainWindow : public QMainWindow {
   void EnsureAudioOutputInitialized(int sample_rate_hz);
   void DrainAudioOutputQueue();
   void MaybeEmitFrontendAudioStats();
+  bool ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* error_text);
   void LoadScanListConfigFromSettings();
   void SaveScanListConfigToSettings() const;
 

@@ -153,9 +153,11 @@ void GrpcClient::StartStreaming() {
   }
 
   audio_stream_supported_ = true;
+  iq_stream_supported_ = true;
   events_thread_ = std::thread([this]() { EventsLoop(); });
   messages_thread_ = std::thread([this]() { MessagesLoop(); });
   audio_thread_ = std::thread([this]() { AudioLoop(); });
+  iq_thread_ = std::thread([this]() { IqLoop(); });
 }
 
 void GrpcClient::StopStreaming() {
@@ -172,6 +174,9 @@ void GrpcClient::StopStreaming() {
   }
   if (audio_thread_.joinable()) {
     audio_thread_.join();
+  }
+  if (iq_thread_.joinable()) {
+    iq_thread_.join();
   }
 }
 
@@ -253,6 +258,35 @@ void GrpcClient::AudioLoop() {
         break;
       }
       emit StreamError(QString::fromStdString("Audio stream error: " + status.error_message()));
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+  }
+}
+
+void GrpcClient::IqLoop() {
+  while (streaming_.load() && iq_stream_supported_) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    v1::StreamIqFramesRequest request;
+    request.set_include_all_receivers(true);
+
+    auto reader = telemetry_client_->StreamIqFrames(&context, request);
+    v1::IqFrame frame;
+    while (streaming_.load() && reader->Read(&frame)) {
+      const std::string& iq = frame.interleaved_iq_s16le();
+      emit IqFrameReceived(frame.receiver_id(), static_cast<int>(frame.sample_rate_hz()),
+                           QByteArray(iq.data(), static_cast<int>(iq.size())), frame.unix_ms(),
+                           frame.tuned_frequency_hz(), frame.sequence(), frame.sample_index());
+    }
+
+    grpc::Status status = reader->Finish();
+    if (!status.ok() && streaming_.load()) {
+      if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED) {
+        iq_stream_supported_ = false;
+        emit StreamError("IQ stream unavailable on server.");
+        break;
+      }
+      emit StreamError(QString::fromStdString("IQ stream error: " + status.error_message()));
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
   }

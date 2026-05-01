@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -281,6 +282,13 @@ void ReceiverWorker::RunLoop() {
     const RuntimeChannel ch = SelectRuntimeChannel(mode, config);
     const uint32_t tuned_frequency_hz =
         ch.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(ch.frequency_hz));
+    int64_t hardware_frequency_i64 = static_cast<int64_t>(tuned_frequency_hz);
+    if (config.lo_offset_enabled) {
+      hardware_frequency_i64 += static_cast<int64_t>(config.lo_offset_hz);
+    }
+    hardware_frequency_i64 = std::clamp<int64_t>(hardware_frequency_i64, 0,
+                                                 static_cast<int64_t>(std::numeric_limits<uint32_t>::max()));
+    const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const size_t frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
     if (frame_samples == 0) {
@@ -340,8 +348,8 @@ void ReceiverWorker::RunLoop() {
         configured_hardware_bandwidth_hz = config.hardware_bandwidth_hz;
       }
 
-      if (tuned_frequency_hz != 0 && tuned_frequency_hz != configured_frequency_hz) {
-        if (!device_->SetCenterFrequencyHz(tuned_frequency_hz, &error)) {
+      if (hardware_tuned_frequency_hz != 0 && hardware_tuned_frequency_hz != configured_frequency_hz) {
+        if (!device_->SetCenterFrequencyHz(hardware_tuned_frequency_hz, &error)) {
           PublishEvent(EventKind::kError, FormatRuntimeError("set center frequency", error), ch.frequency_hz);
           {
             std::lock_guard<std::mutex> lock(mu_);
@@ -350,9 +358,12 @@ void ReceiverWorker::RunLoop() {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
           continue;
         }
-        configured_frequency_hz = tuned_frequency_hz;
+        configured_frequency_hz = hardware_tuned_frequency_hz;
         std::ostringstream tuned;
         tuned << "tuned to " << tuned_frequency_hz << " Hz";
+        if (config.lo_offset_enabled) {
+          tuned << " (hw=" << hardware_tuned_frequency_hz << " Hz, lo_offset=" << config.lo_offset_hz << " Hz)";
+        }
         PublishEvent(EventKind::kTuneHop, tuned.str(), ch.frequency_hz);
       }
 
