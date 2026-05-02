@@ -171,6 +171,21 @@ void SignalVisualizationWidget::SetReceiverSignalLevelDb(uint32_t receiver_id, d
   update();
 }
 
+void SignalVisualizationWidget::SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db,
+                                                    double psd_floor_db, double snr_db,
+                                                    double psd_peak_offset_hz, bool has_signal_ok,
+                                                    bool signal_ok) {
+  ReceiverState& state = states_[receiver_id];
+  state.has_iq_health = true;
+  state.psd_peak_db = std::clamp(psd_peak_db, -140.0, 20.0);
+  state.psd_floor_db = std::clamp(psd_floor_db, -140.0, 20.0);
+  state.snr_db = std::clamp(snr_db, 0.0, 120.0);
+  state.psd_peak_offset_hz = psd_peak_offset_hz;
+  state.has_signal_ok = has_signal_ok;
+  state.signal_ok = signal_ok;
+  update();
+}
+
 void SignalVisualizationWidget::SetAutoNoiseReductionEnabled(bool enabled) {
   if (auto_noise_reduction_enabled_ == enabled) {
     return;
@@ -265,7 +280,7 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                                  .arg(FormatFrequencyLabel(display.frequency_end_hz)));
 
   const QRect waveform_content = waveform_rect.adjusted(8, 30, -8, -8);
-  const int meter_height = std::clamp(waveform_content.height() / 7, 18, 28);
+  const int meter_height = std::clamp(waveform_content.height() / 4, 44, 80);
   const int waveform_height = std::max(24, waveform_content.height() - meter_height - 8);
   const QRect waveform_plot_rect(waveform_content.left(), waveform_content.top(), waveform_content.width(),
                                  waveform_height);
@@ -274,7 +289,9 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
 
   DrawWaveform(&painter, waveform_plot_rect, display.waveform);
   DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold,
-                 display.has_signal_level_db, display.signal_level_db);
+                 display.has_signal_level_db, display.signal_level_db, display.has_iq_health,
+                 display.psd_peak_db, display.psd_floor_db, display.snr_db, display.psd_peak_offset_hz,
+                 display.has_signal_ok, display.signal_ok);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
                     display.frequency_start_hz, display.frequency_end_hz, false,
                     display.has_squelch_threshold_db, display.squelch_threshold_db);
@@ -351,6 +368,13 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   state->signal_level_db = -120.0;
   state->has_squelch_threshold_db = false;
   state->squelch_threshold_db = -67.5;
+  state->has_iq_health = false;
+  state->psd_peak_db = -120.0;
+  state->psd_floor_db = -120.0;
+  state->snr_db = 0.0;
+  state->psd_peak_offset_hz = 0.0;
+  state->has_signal_ok = false;
+  state->signal_ok = false;
 }
 
 int SignalVisualizationWidget::NormalizeFftSize(int fft_size) {
@@ -449,7 +473,10 @@ void SignalVisualizationWidget::DrawWaveform(QPainter* painter, const QRect& are
 
 void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& area, double level,
                                                double peak_hold, bool has_signal_level_db,
-                                               double signal_level_db) {
+                                               double signal_level_db, bool has_iq_health,
+                                               double psd_peak_db, double psd_floor_db, double snr_db,
+                                               double psd_peak_offset_hz, bool has_signal_ok,
+                                               bool signal_ok) {
   if (painter == nullptr || !area.isValid()) {
     return;
   }
@@ -488,9 +515,31 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
   painter->drawLine(peak_x, bar_rect.top(), peak_x, bar_rect.bottom());
 
   painter->setPen(QColor(178, 192, 214));
-  painter->drawText(area.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, "Signal Level");
-  painter->drawText(area.adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignRight,
-                    QString("%1 dB").arg(level_db, 0, 'f', 1));
+  const QRect title_row = QRect(area.left() + 10, area.top(), area.width() - 20, area.height() / 2);
+  const QRect detail_row = QRect(area.left() + 10, area.top() + area.height() / 2, area.width() - 20,
+                                 area.height() - (area.height() / 2));
+  painter->drawText(title_row, Qt::AlignLeft | Qt::AlignVCenter, "Signal Level");
+  painter->drawText(title_row, Qt::AlignRight | Qt::AlignVCenter,
+                    QString("%1 dBFS").arg(level_db, 0, 'f', 1));
+
+  QString detail_text = "PSD: n/a";
+  if (has_iq_health) {
+    detail_text = QString("PSD p/f %1/%2 dB  SNR %3 dB  Peak %4 Hz")
+                      .arg(psd_peak_db, 0, 'f', 1)
+                      .arg(psd_floor_db, 0, 'f', 1)
+                      .arg(snr_db, 0, 'f', 1)
+                      .arg(psd_peak_offset_hz, 0, 'f', 0);
+  }
+  painter->setPen(QColor(148, 165, 190));
+  painter->drawText(detail_row, Qt::AlignLeft | Qt::AlignVCenter, detail_text);
+
+  const QString status_text =
+      has_signal_ok ? (signal_ok ? "Signal OK" : "Signal CHECK") : "Signal ?";
+  const QColor status_color = has_signal_ok
+                                  ? (signal_ok ? QColor(92, 220, 168) : QColor(255, 184, 93))
+                                  : QColor(138, 152, 178);
+  painter->setPen(status_color);
+  painter->drawText(detail_row, Qt::AlignRight | Qt::AlignVCenter, status_text);
   painter->restore();
 }
 
@@ -662,6 +711,13 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   display.signal_level_db = -120.0;
   display.has_squelch_threshold_db = false;
   display.squelch_threshold_db = -67.5;
+  display.has_iq_health = false;
+  display.psd_peak_db = -120.0;
+  display.psd_floor_db = -120.0;
+  display.snr_db = 0.0;
+  display.psd_peak_offset_hz = 0.0;
+  display.has_signal_ok = false;
+  display.signal_ok = false;
 
   if (states_.isEmpty()) {
     PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
@@ -694,6 +750,13 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       display.signal_level_db = selected.signal_level_db;
       display.has_squelch_threshold_db = selected.has_squelch_threshold_db;
       display.squelch_threshold_db = selected.squelch_threshold_db;
+      display.has_iq_health = selected.has_iq_health;
+      display.psd_peak_db = selected.psd_peak_db;
+      display.psd_floor_db = selected.psd_floor_db;
+      display.snr_db = selected.snr_db;
+      display.psd_peak_offset_hz = selected.psd_peak_offset_hz;
+      display.has_signal_ok = selected.has_signal_ok;
+      display.signal_ok = selected.signal_ok;
       if (display.spectrogram_rows.isEmpty()) {
         PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
       }
@@ -727,6 +790,13 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     display.signal_level_db = selected.signal_level_db;
     display.has_squelch_threshold_db = selected.has_squelch_threshold_db;
     display.squelch_threshold_db = selected.squelch_threshold_db;
+    display.has_iq_health = selected.has_iq_health;
+    display.psd_peak_db = selected.psd_peak_db;
+    display.psd_floor_db = selected.psd_floor_db;
+    display.snr_db = selected.snr_db;
+    display.psd_peak_offset_hz = selected.psd_peak_offset_hz;
+    display.has_signal_ok = selected.has_signal_ok;
+    display.signal_ok = selected.signal_ok;
     if (display.spectrogram_rows.isEmpty()) {
       PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
     }
@@ -747,6 +817,13 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   int signal_level_db_count = 0;
   double squelch_threshold_sum = 0.0;
   int squelch_threshold_count = 0;
+  double psd_peak_db_sum = 0.0;
+  double psd_floor_db_sum = 0.0;
+  double snr_db_sum = 0.0;
+  double psd_peak_offset_sum = 0.0;
+  int iq_health_count = 0;
+  int signal_ok_true_count = 0;
+  int signal_ok_count = 0;
   for (const ReceiverState& state : state_values) {
     const QVector<double>& selected_spectrum =
         (spectrum_source_ == SpectrumSource::kReceiverInput) ? state.receiver_spectrum : state.spectrum;
@@ -769,6 +846,19 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     if (state.has_squelch_threshold_db) {
       squelch_threshold_sum += state.squelch_threshold_db;
       ++squelch_threshold_count;
+    }
+    if (state.has_iq_health) {
+      psd_peak_db_sum += state.psd_peak_db;
+      psd_floor_db_sum += state.psd_floor_db;
+      snr_db_sum += state.snr_db;
+      psd_peak_offset_sum += state.psd_peak_offset_hz;
+      ++iq_health_count;
+    }
+    if (state.has_signal_ok) {
+      ++signal_ok_count;
+      if (state.signal_ok) {
+        ++signal_ok_true_count;
+      }
     }
     if (spectrum_source_ == SpectrumSource::kReceiverInput && state.receiver_frequency_range_valid) {
       ++ranged_states;
@@ -800,6 +890,18 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   if (squelch_threshold_count > 0) {
     display.has_squelch_threshold_db = true;
     display.squelch_threshold_db = squelch_threshold_sum / static_cast<double>(squelch_threshold_count);
+  }
+  if (iq_health_count > 0) {
+    const double inv = 1.0 / static_cast<double>(iq_health_count);
+    display.has_iq_health = true;
+    display.psd_peak_db = psd_peak_db_sum * inv;
+    display.psd_floor_db = psd_floor_db_sum * inv;
+    display.snr_db = snr_db_sum * inv;
+    display.psd_peak_offset_hz = psd_peak_offset_sum * inv;
+  }
+  if (signal_ok_count > 0) {
+    display.has_signal_ok = true;
+    display.signal_ok = signal_ok_true_count == signal_ok_count;
   }
 
   PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);

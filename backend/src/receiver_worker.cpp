@@ -340,6 +340,10 @@ void ReceiverWorker::RunLoop() {
   double iq_window_component_power = 0.0;
   IQSampleBlock latest_iq_block;
   bool have_latest_iq_block = false;
+  bool have_prev_iq_health = false;
+  double prev_iq_snr_db = 0.0;
+  double prev_iq_level_dbfs = -120.0;
+  int iq_stable_windows = 0;
 
   double tone_phase = 0.0;
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
@@ -583,6 +587,44 @@ void ReceiverWorker::RunLoop() {
       PublishEvent(EventKind::kInfo, audio_status.str(), ch.frequency_hz, false);
 
       std::ostringstream iq_status;
+      const double configured_iq_sample_rate_hz = static_cast<double>(config.sample_rate_hz);
+      const double sr_ratio_error = (configured_iq_sample_rate_hz <= 0.0)
+                                        ? 0.0
+                                        : std::abs(iq_measured_sample_rate_hz - configured_iq_sample_rate_hz) /
+                                              configured_iq_sample_rate_hz;
+      const bool ok_sr = configured_iq_sample_rate_hz <= 0.0 || sr_ratio_error <= 0.05;
+      const bool ok_level = iq_level_dbfs >= -55.0 && iq_level_dbfs <= -8.0;
+      const bool ok_clip = iq_clip_pct <= 1.0;
+      const bool ok_snr = psd.valid && psd.snr_db >= 6.0;
+      bool window_stable = true;
+      if (have_prev_iq_health) {
+        window_stable = std::abs(psd.snr_db - prev_iq_snr_db) <= 8.0 &&
+                        std::abs(iq_level_dbfs - prev_iq_level_dbfs) <= 6.0;
+      }
+      if (window_stable) {
+        ++iq_stable_windows;
+      } else {
+        iq_stable_windows = 0;
+      }
+      const bool ok_stable = iq_stable_windows >= 2;
+      const bool signal_ok = ok_sr && ok_level && ok_clip && ok_snr && ok_stable;
+      const char* signal_status = "OK";
+      if (!ok_sr) {
+        signal_status = "SR_MISMATCH";
+      } else if (!ok_level) {
+        signal_status = "LEVEL_RANGE";
+      } else if (!ok_clip) {
+        signal_status = "CLIPPING";
+      } else if (!ok_snr) {
+        signal_status = "LOW_SNR";
+      } else if (!ok_stable) {
+        signal_status = "UNSTABLE";
+      }
+
+      prev_iq_snr_db = psd.snr_db;
+      prev_iq_level_dbfs = iq_level_dbfs;
+      have_prev_iq_health = true;
+
       iq_status << "IQ_STATS idx=" << ch.index
                 << " mod=" << ModulationToken(ch.modulation)
                 << " cfg_sr=" << config.sample_rate_hz
@@ -597,6 +639,14 @@ void ReceiverWorker::RunLoop() {
                 << " psd_floor_db=" << FormatDouble(psd.floor_db, 1)
                 << " snr_db=" << FormatDouble(psd.snr_db, 1)
                 << " psd_peak_offset_hz=" << FormatDouble(psd.peak_offset_hz, 0)
+                << " ok_sr=" << (ok_sr ? 1 : 0)
+                << " ok_level=" << (ok_level ? 1 : 0)
+                << " ok_clip=" << (ok_clip ? 1 : 0)
+                << " ok_snr=" << (ok_snr ? 1 : 0)
+                << " ok_stable=" << (ok_stable ? 1 : 0)
+                << " stable_windows=" << iq_stable_windows
+                << " signal_ok=" << (signal_ok ? 1 : 0)
+                << " signal_status=" << signal_status
                 << " win_ms=" << window_ms
                 << " iq_n=" << iq_interleaved_samples;
       PublishEvent(EventKind::kInfo, iq_status.str(), ch.frequency_hz);
