@@ -299,84 +299,172 @@ bool DecodeInt16LeBytes(const QByteArray& bytes, std::vector<int16_t>* out) {
   return true;
 }
 
-std::vector<double> BuildNormalizedSpectrumFromComplex(const std::vector<std::complex<double>>& complex_samples,
-                                                       int spectrum_bins) {
-  std::vector<double> spectrum;
-  if (complex_samples.size() < 8 || spectrum_bins <= 0) {
-    return spectrum;
+size_t LargestPowerOfTwoLeq(size_t value) {
+  if (value < 2U) {
+    return 0U;
   }
-  const int fft_size = std::min<int>(1024, std::max<int>(64, spectrum_bins * 2));
-  const int n = std::min<int>(fft_size, static_cast<int>(complex_samples.size()));
-  if (n < 8) {
-    return spectrum;
+  size_t out = 1U;
+  while ((out << 1U) <= value) {
+    out <<= 1U;
   }
-  const int bins = n / 2;
-  spectrum.assign(static_cast<size_t>(bins), 0.0);
+  return out;
+}
 
-  constexpr double kPi = 3.14159265358979323846;
-  for (int k = 0; k < bins; ++k) {
-    std::complex<double> acc(0.0, 0.0);
-    for (int t = 0; t < n; ++t) {
-      const double w = 0.5 * (1.0 - std::cos((2.0 * kPi * static_cast<double>(t)) / static_cast<double>(n - 1)));
-      const double phase = -2.0 * kPi * static_cast<double>(k) * static_cast<double>(t) / static_cast<double>(n);
-      acc += complex_samples[static_cast<size_t>(t)] * w * std::complex<double>(std::cos(phase), std::sin(phase));
+void FftRadix2InPlace(std::vector<std::complex<double>>* data) {
+  if (data == nullptr) {
+    return;
+  }
+  const size_t n = data->size();
+  if (n < 2U) {
+    return;
+  }
+
+  // Bit-reversal permutation
+  for (size_t i = 1U, j = 0U; i < n; ++i) {
+    size_t bit = n >> 1U;
+    while (j & bit) {
+      j ^= bit;
+      bit >>= 1U;
     }
-    const double magnitude = std::abs(acc) / static_cast<double>(n);
-    spectrum[static_cast<size_t>(k)] = 20.0 * std::log10(std::max(1.0e-12, magnitude));
+    j ^= bit;
+    if (i < j) {
+      std::swap((*data)[i], (*data)[j]);
+    }
   }
 
-  const auto [min_it, max_it] = std::minmax_element(spectrum.begin(), spectrum.end());
-  const double min_db = (min_it != spectrum.end()) ? *min_it : -120.0;
-  const double max_db = (max_it != spectrum.end()) ? *max_it : 0.0;
+  // Iterative radix-2 Cooley-Tukey
+  constexpr double kPi = 3.14159265358979323846;
+  for (size_t len = 2U; len <= n; len <<= 1U) {
+    const double angle = -2.0 * kPi / static_cast<double>(len);
+    const std::complex<double> w_len(std::cos(angle), std::sin(angle));
+    for (size_t i = 0U; i < n; i += len) {
+      std::complex<double> w(1.0, 0.0);
+      const size_t half = len >> 1U;
+      for (size_t j = 0U; j < half; ++j) {
+        const std::complex<double> u = (*data)[i + j];
+        const std::complex<double> v = (*data)[i + j + half] * w;
+        (*data)[i + j] = u + v;
+        (*data)[i + j + half] = u - v;
+        w *= w_len;
+      }
+    }
+  }
+}
+
+std::vector<double> NormalizeSpectrumDb(const std::vector<double>& db_values) {
+  std::vector<double> out = db_values;
+  if (out.empty()) {
+    return out;
+  }
+  const auto [min_it, max_it] = std::minmax_element(out.begin(), out.end());
+  const double min_db = (min_it != out.end()) ? *min_it : -120.0;
+  const double max_db = (max_it != out.end()) ? *max_it : 0.0;
   const double span = std::max(1.0, max_db - min_db);
-  for (double& value : spectrum) {
+  for (double& value : out) {
     value = std::clamp((value - min_db) / span, 0.0, 1.0);
   }
-  return spectrum;
+  return out;
+}
+
+std::vector<double> ResampleVectorLinear(const std::vector<double>& source, size_t target_size) {
+  if (target_size == 0U) {
+    return {};
+  }
+  if (source.empty()) {
+    return std::vector<double>(target_size, 0.0);
+  }
+  if (source.size() == target_size) {
+    return source;
+  }
+  if (source.size() == 1U) {
+    return std::vector<double>(target_size, source.front());
+  }
+  std::vector<double> out(target_size, 0.0);
+  for (size_t i = 0; i < target_size; ++i) {
+    const double t = (target_size <= 1U) ? 0.0 : static_cast<double>(i) / static_cast<double>(target_size - 1U);
+    const double source_pos = t * static_cast<double>(source.size() - 1U);
+    const size_t left = static_cast<size_t>(std::floor(source_pos));
+    const size_t right = std::min(left + 1U, source.size() - 1U);
+    const double frac = source_pos - static_cast<double>(left);
+    out[i] = source[left] + (source[right] - source[left]) * frac;
+  }
+  return out;
+}
+
+std::vector<double> BuildNormalizedSpectrumFromComplex(const std::vector<std::complex<double>>& complex_samples,
+                                                       int spectrum_bins) {
+  if (complex_samples.size() < 16 || spectrum_bins <= 0) {
+    return {};
+  }
+
+  const size_t requested_bins = static_cast<size_t>(std::max(32, spectrum_bins));
+  const size_t desired_fft = std::max<size_t>(64U, requested_bins * 2U);
+  const size_t available = complex_samples.size();
+  const size_t fft_size = LargestPowerOfTwoLeq(std::min(available, desired_fft));
+  if (fft_size < 64U) {
+    return {};
+  }
+
+  std::vector<std::complex<double>> fft_in(fft_size, std::complex<double>(0.0, 0.0));
+  const size_t start = available - fft_size;
+  constexpr double kPi = 3.14159265358979323846;
+  for (size_t i = 0; i < fft_size; ++i) {
+    const double phase = (2.0 * kPi * static_cast<double>(i)) / static_cast<double>(fft_size - 1U);
+    const double w = 0.5 * (1.0 - std::cos(phase));
+    fft_in[i] = complex_samples[start + i] * w;
+  }
+  FftRadix2InPlace(&fft_in);
+
+  const size_t half = fft_size / 2U;
+  std::vector<double> db_values(half, -120.0);
+  for (size_t k = 0; k < half; ++k) {
+    const double magnitude = std::abs(fft_in[k]) / static_cast<double>(fft_size);
+    db_values[k] = 20.0 * std::log10(std::max(1.0e-12, magnitude));
+  }
+  std::vector<double> normalized = NormalizeSpectrumDb(db_values);
+  if (normalized.size() != requested_bins) {
+    normalized = ResampleVectorLinear(normalized, requested_bins);
+  }
+  return normalized;
 }
 
 std::vector<double> BuildNormalizedSpectrumFromComplexShifted(
     const std::vector<std::complex<double>>& complex_samples, int spectrum_bins) {
-  std::vector<double> spectrum;
-  if (complex_samples.size() < 8 || spectrum_bins <= 0) {
-    return spectrum;
+  if (complex_samples.size() < 16 || spectrum_bins <= 0) {
+    return {};
   }
-  const int fft_size = std::min<int>(512, std::max<int>(64, spectrum_bins));
-  const int n = std::min<int>(fft_size, static_cast<int>(complex_samples.size()));
-  if (n < 8) {
-    return spectrum;
-  }
-  spectrum.assign(static_cast<size_t>(n), 0.0);
 
+  const size_t requested_bins = static_cast<size_t>(std::max(32, spectrum_bins));
+  const size_t desired_fft = std::max<size_t>(64U, requested_bins * 2U);
+  const size_t available = complex_samples.size();
+  const size_t fft_size = LargestPowerOfTwoLeq(std::min(available, desired_fft));
+  if (fft_size < 64U) {
+    return {};
+  }
+
+  std::vector<std::complex<double>> fft_in(fft_size, std::complex<double>(0.0, 0.0));
+  const size_t start = available - fft_size;
   constexpr double kPi = 3.14159265358979323846;
-  for (int k = 0; k < n; ++k) {
-    std::complex<double> acc(0.0, 0.0);
-    for (int t = 0; t < n; ++t) {
-      const double w = 0.5 * (1.0 - std::cos((2.0 * kPi * static_cast<double>(t)) /
-                                              static_cast<double>(n - 1)));
-      const double phase =
-          -2.0 * kPi * static_cast<double>(k) * static_cast<double>(t) / static_cast<double>(n);
-      acc += complex_samples[static_cast<size_t>(t)] * w *
-             std::complex<double>(std::cos(phase), std::sin(phase));
-    }
-    const double magnitude = std::abs(acc) / static_cast<double>(n);
-    spectrum[static_cast<size_t>(k)] = 20.0 * std::log10(std::max(1.0e-12, magnitude));
+  for (size_t i = 0; i < fft_size; ++i) {
+    const double phase = (2.0 * kPi * static_cast<double>(i)) / static_cast<double>(fft_size - 1U);
+    const double w = 0.5 * (1.0 - std::cos(phase));
+    fft_in[i] = complex_samples[start + i] * w;
+  }
+  FftRadix2InPlace(&fft_in);
+
+  std::vector<double> shifted(fft_size, -120.0);
+  const size_t half = fft_size / 2U;
+  for (size_t i = 0; i < fft_size; ++i) {
+    const size_t idx = (i + half) % fft_size;
+    const double magnitude = std::abs(fft_in[idx]) / static_cast<double>(fft_size);
+    shifted[i] = 20.0 * std::log10(std::max(1.0e-12, magnitude));
   }
 
-  std::vector<double> shifted(static_cast<size_t>(n), 0.0);
-  const int half = n / 2;
-  for (int i = 0; i < n; ++i) {
-    shifted[static_cast<size_t>(i)] = spectrum[static_cast<size_t>((i + half) % n)];
+  std::vector<double> normalized = NormalizeSpectrumDb(shifted);
+  if (normalized.size() != requested_bins) {
+    normalized = ResampleVectorLinear(normalized, requested_bins);
   }
-
-  const auto [min_it, max_it] = std::minmax_element(shifted.begin(), shifted.end());
-  const double min_db = (min_it != shifted.end()) ? *min_it : -120.0;
-  const double max_db = (max_it != shifted.end()) ? *max_it : 0.0;
-  const double span = std::max(1.0, max_db - min_db);
-  for (double& value : shifted) {
-    value = std::clamp((value - min_db) / span, 0.0, 1.0);
-  }
-  return shifted;
+  return normalized;
 }
 
 void BuildReceiverVisualizationFrame(const QByteArray& interleaved_iq_s16le, int spectrum_bins,

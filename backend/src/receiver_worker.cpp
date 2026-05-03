@@ -25,7 +25,7 @@ constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr const char* kAudioPipelineRevision = "audio-v10-clean-slate";
 constexpr double kToneFrequencyHz = 1000.0;
 constexpr double kToneAmplitude = 9000.0;
-constexpr size_t kIqVisualizationMaxInterleavedSamples = 4096;
+constexpr size_t kIqVisualizationMaxInterleavedSamples = 8192;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
 constexpr int16_t kIqClipThresholdS16 = 32256;
 
