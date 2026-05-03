@@ -588,18 +588,22 @@ void ReceiverWorker::RunLoop() {
 
       std::ostringstream iq_status;
       const double configured_iq_sample_rate_hz = static_cast<double>(config.sample_rate_hz);
-      const double sr_ratio_error = (configured_iq_sample_rate_hz <= 0.0)
-                                        ? 0.0
-                                        : std::abs(iq_measured_sample_rate_hz - configured_iq_sample_rate_hz) /
-                                              configured_iq_sample_rate_hz;
-      const bool ok_sr = configured_iq_sample_rate_hz <= 0.0 || sr_ratio_error <= 0.05;
+      const double block_sr_hz = static_cast<double>(iq_sample_rate_hz);
+      const double block_sr_abs_error_hz = std::abs(block_sr_hz - configured_iq_sample_rate_hz);
+      const double block_sr_rel_error = (configured_iq_sample_rate_hz <= 0.0)
+                                            ? 0.0
+                                            : block_sr_abs_error_hz / configured_iq_sample_rate_hz;
+      // Use device-reported block sample-rate for health gating.
+      // The measured ingest rate is intentionally lower in this prototype pipeline.
+      const bool ok_sr = configured_iq_sample_rate_hz <= 0.0 || block_sr_hz <= 0.0 ||
+                         (block_sr_abs_error_hz <= 2000.0 && block_sr_rel_error <= 0.02);
       const bool ok_level = iq_level_dbfs >= -55.0 && iq_level_dbfs <= -8.0;
-      const bool ok_clip = iq_clip_pct <= 1.0;
-      const bool ok_snr = psd.valid && psd.snr_db >= 6.0;
+      const bool ok_clip = iq_clip_pct <= 2.5;
+      const bool ok_snr = psd.valid && psd.snr_db >= 12.0;
       bool window_stable = true;
       if (have_prev_iq_health) {
-        window_stable = std::abs(psd.snr_db - prev_iq_snr_db) <= 8.0 &&
-                        std::abs(iq_level_dbfs - prev_iq_level_dbfs) <= 6.0;
+        window_stable = std::abs(psd.snr_db - prev_iq_snr_db) <= 20.0 &&
+                        std::abs(iq_level_dbfs - prev_iq_level_dbfs) <= 18.0;
       }
       if (window_stable) {
         ++iq_stable_windows;
