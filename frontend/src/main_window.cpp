@@ -335,9 +335,53 @@ std::vector<double> BuildNormalizedSpectrumFromComplex(const std::vector<std::co
   return spectrum;
 }
 
+std::vector<double> BuildNormalizedSpectrumFromComplexShifted(
+    const std::vector<std::complex<double>>& complex_samples, int spectrum_bins) {
+  std::vector<double> spectrum;
+  if (complex_samples.size() < 8 || spectrum_bins <= 0) {
+    return spectrum;
+  }
+  const int fft_size = std::min<int>(512, std::max<int>(64, spectrum_bins));
+  const int n = std::min<int>(fft_size, static_cast<int>(complex_samples.size()));
+  if (n < 8) {
+    return spectrum;
+  }
+  spectrum.assign(static_cast<size_t>(n), 0.0);
+
+  constexpr double kPi = 3.14159265358979323846;
+  for (int k = 0; k < n; ++k) {
+    std::complex<double> acc(0.0, 0.0);
+    for (int t = 0; t < n; ++t) {
+      const double w = 0.5 * (1.0 - std::cos((2.0 * kPi * static_cast<double>(t)) /
+                                              static_cast<double>(n - 1)));
+      const double phase =
+          -2.0 * kPi * static_cast<double>(k) * static_cast<double>(t) / static_cast<double>(n);
+      acc += complex_samples[static_cast<size_t>(t)] * w *
+             std::complex<double>(std::cos(phase), std::sin(phase));
+    }
+    const double magnitude = std::abs(acc) / static_cast<double>(n);
+    spectrum[static_cast<size_t>(k)] = 20.0 * std::log10(std::max(1.0e-12, magnitude));
+  }
+
+  std::vector<double> shifted(static_cast<size_t>(n), 0.0);
+  const int half = n / 2;
+  for (int i = 0; i < n; ++i) {
+    shifted[static_cast<size_t>(i)] = spectrum[static_cast<size_t>((i + half) % n)];
+  }
+
+  const auto [min_it, max_it] = std::minmax_element(shifted.begin(), shifted.end());
+  const double min_db = (min_it != shifted.end()) ? *min_it : -120.0;
+  const double max_db = (max_it != shifted.end()) ? *max_it : 0.0;
+  const double span = std::max(1.0, max_db - min_db);
+  for (double& value : shifted) {
+    value = std::clamp((value - min_db) / span, 0.0, 1.0);
+  }
+  return shifted;
+}
+
 void BuildReceiverVisualizationFrame(const QByteArray& interleaved_iq_s16le, int spectrum_bins,
-                                     std::vector<double>* waveform, std::vector<double>* spectrum,
-                                     double* signal_level_db) {
+                                     bool apply_dc_suppression, std::vector<double>* waveform,
+                                     std::vector<double>* spectrum, double* signal_level_db) {
   if (waveform == nullptr || spectrum == nullptr || signal_level_db == nullptr) {
     return;
   }
@@ -359,18 +403,37 @@ void BuildReceiverVisualizationFrame(const QByteArray& interleaved_iq_s16le, int
 
   std::vector<std::complex<double>> complex_samples;
   complex_samples.reserve(iq_pairs);
+  double i_sum = 0.0;
+  double q_sum = 0.0;
   double power_sum = 0.0;
   for (size_t i = 0; i < iq_pairs; ++i) {
     const double i_norm = static_cast<double>(iq_s16[i * 2U]) / 32768.0;
     const double q_norm = static_cast<double>(iq_s16[i * 2U + 1U]) / 32768.0;
-    complex_samples.emplace_back(i_norm, q_norm);
+    if (apply_dc_suppression) {
+      i_sum += i_norm;
+      q_sum += q_norm;
+      complex_samples.emplace_back(0.0, 0.0);
+    } else {
+      complex_samples.emplace_back(i_norm, q_norm);
+    }
     power_sum += (i_norm * i_norm) + (q_norm * q_norm);
     waveform->push_back(std::clamp(0.5 + (0.5 * i_norm), 0.0, 1.0));
   }
 
+  if (apply_dc_suppression) {
+    const double inv_count = 1.0 / static_cast<double>(iq_pairs);
+    const double i_mean = i_sum * inv_count;
+    const double q_mean = q_sum * inv_count;
+    for (size_t i = 0; i < iq_pairs; ++i) {
+      const double i_norm = static_cast<double>(iq_s16[i * 2U]) / 32768.0 - i_mean;
+      const double q_norm = static_cast<double>(iq_s16[i * 2U + 1U]) / 32768.0 - q_mean;
+      complex_samples[i] = std::complex<double>(i_norm, q_norm);
+    }
+  }
+
   const double rms = std::sqrt(power_sum / static_cast<double>(iq_pairs));
   *signal_level_db = std::clamp(20.0 * std::log10(std::max(1.0e-9, rms)), -120.0, 0.0);
-  *spectrum = BuildNormalizedSpectrumFromComplex(complex_samples, spectrum_bins);
+  *spectrum = BuildNormalizedSpectrumFromComplexShifted(complex_samples, spectrum_bins);
 }
 
 void BuildDemodVisualizationFrame(const QByteArray& pcm_s16le, int spectrum_bins, std::vector<double>* waveform,
@@ -1137,6 +1200,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   signal_visualization_ = new SignalVisualizationWidget(central);
   signal_visualization_->SetSpectrumSource(SignalVisualizationWidget::SpectrumSource::kReceiverInput);
+  {
+    QSettings settings("multi-radio", "multi-radio-client");
+    settings.beginGroup("visualization");
+    iq_visual_dc_suppression_enabled_ = settings.value("iq_dc_suppression", true).toBool();
+    settings.endGroup();
+  }
 
   event_log_ = new QPlainTextEdit(central);
   event_log_->setReadOnly(true);
@@ -1794,8 +1863,9 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
   std::vector<double> waveform;
   std::vector<double> spectrum;
   double signal_level_db = -120.0;
-  BuildReceiverVisualizationFrame(interleaved_iq_s16le, signal_visualization_->FftSize() / 2, &waveform,
-                                  &spectrum, &signal_level_db);
+  BuildReceiverVisualizationFrame(interleaved_iq_s16le, signal_visualization_->FftSize() / 2,
+                                  iq_visual_dc_suppression_enabled_, &waveform, &spectrum,
+                                  &signal_level_db);
   if (spectrum.empty()) {
     return;
   }
@@ -1805,7 +1875,7 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
   const double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
   signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_level_db);
   signal_visualization_->PushVisualizationFrame(
-      receiver_id, waveform, spectrum, tuned_frequency_hz, 1.0,
+      receiver_id, waveform, spectrum, 0.0, 0.0,
       SignalVisualizationWidget::SpectrumSource::kReceiverInput, frame_frequency_start_hz,
       frame_frequency_end_hz);
 }
@@ -2968,11 +3038,14 @@ void MainWindow::OpenVisualizationSettingsDialog() {
 
   auto* auto_noise_checkbox = new QCheckBox("Waterfall: hide bins at/below mean", &dialog);
   auto_noise_checkbox->setChecked(signal_visualization_->AutoNoiseReductionEnabled());
+  auto* iq_dc_suppress_checkbox = new QCheckBox("Receiver IQ: suppress DC in spectrum", &dialog);
+  iq_dc_suppress_checkbox->setChecked(iq_visual_dc_suppression_enabled_);
 
   layout->addRow("FFT size", fft_combo);
   layout->addRow("Frequency start", start_hz_spin);
   layout->addRow("Frequency end", end_hz_spin);
   layout->addRow("Auto noise reduction", auto_noise_checkbox);
+  layout->addRow("IQ DC suppression", iq_dc_suppress_checkbox);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
   layout->addRow(buttons);
@@ -2987,13 +3060,22 @@ void MainWindow::OpenVisualizationSettingsDialog() {
   const double start_hz = start_hz_spin->value();
   const double end_hz = end_hz_spin->value();
   const bool auto_noise_reduction = auto_noise_checkbox->isChecked();
+  const bool iq_dc_suppression = iq_dc_suppress_checkbox->isChecked();
+  iq_visual_dc_suppression_enabled_ = iq_dc_suppression;
+  {
+    QSettings settings("multi-radio", "multi-radio-client");
+    settings.beginGroup("visualization");
+    settings.setValue("iq_dc_suppression", iq_visual_dc_suppression_enabled_);
+    settings.endGroup();
+  }
   signal_visualization_->SetVisualizationSettings(fft_size, start_hz, end_hz);
   signal_visualization_->SetAutoNoiseReductionEnabled(auto_noise_reduction);
-  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz, waterfall-noise-filter=%4")
+  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz, waterfall-noise-filter=%4, iq-dc-suppress=%5")
                 .arg(fft_size)
                 .arg(start_hz, 0, 'f', 0)
                 .arg(end_hz, 0, 'f', 0)
-                .arg(auto_noise_reduction ? "on" : "off"));
+                .arg(auto_noise_reduction ? "on" : "off")
+                .arg(iq_dc_suppression ? "on" : "off"));
 }
 
 void MainWindow::AddMessageRow(const MessageRow& row) {
