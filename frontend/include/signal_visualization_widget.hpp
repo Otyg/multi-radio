@@ -32,7 +32,8 @@ class SignalVisualizationWidget : public QWidget {
   void SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db);
   void SetReceiverSignalLevelDb(uint32_t receiver_id, double signal_level_db);
   void SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db, double psd_floor_db, double snr_db,
-                           double psd_peak_offset_hz, bool has_signal_ok, bool signal_ok);
+                           double psd_peak_offset_hz, bool has_quality_score,
+                           double quality_score_pct, bool has_signal_ok, bool signal_ok);
   void SetAutoNoiseReductionEnabled(bool enabled);
   bool AutoNoiseReductionEnabled() const;
   SpectrumSource CurrentSpectrumSource() const;
@@ -70,6 +71,8 @@ class SignalVisualizationWidget : public QWidget {
     double psd_floor_db = -120.0;
     double snr_db = 0.0;
     double psd_peak_offset_hz = 0.0;
+    bool has_quality_score = false;
+    double quality_score_pct = 0.0;
     bool has_signal_ok = false;
     bool signal_ok = false;
   };
@@ -96,6 +99,8 @@ class SignalVisualizationWidget : public QWidget {
     double psd_floor_db = -120.0;
     double snr_db = 0.0;
     double psd_peak_offset_hz = 0.0;
+    bool has_quality_score = false;
+    double quality_score_pct = 0.0;
     bool has_signal_ok = false;
     bool signal_ok = false;
   };
@@ -112,7 +117,8 @@ class SignalVisualizationWidget : public QWidget {
   static void DrawLevelMeter(QPainter* painter, const QRect& area, double level, double peak_hold,
                              bool has_signal_level_db, double signal_level_db, bool has_iq_health,
                              double psd_peak_db, double psd_floor_db, double snr_db,
-                             double psd_peak_offset_hz, bool has_signal_ok, bool signal_ok);
+                             double psd_peak_offset_hz, bool has_quality_score, double quality_score_pct,
+                             bool has_signal_ok, bool signal_ok);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
                                 double frequency_start_hz, double frequency_end_hz,
                                 bool suppress_below_mean, bool has_squelch_threshold_db,

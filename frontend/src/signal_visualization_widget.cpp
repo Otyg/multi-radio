@@ -173,7 +173,8 @@ void SignalVisualizationWidget::SetReceiverSignalLevelDb(uint32_t receiver_id, d
 
 void SignalVisualizationWidget::SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db,
                                                     double psd_floor_db, double snr_db,
-                                                    double psd_peak_offset_hz, bool has_signal_ok,
+                                                    double psd_peak_offset_hz, bool has_quality_score,
+                                                    double quality_score_pct, bool has_signal_ok,
                                                     bool signal_ok) {
   ReceiverState& state = states_[receiver_id];
   state.has_iq_health = true;
@@ -181,6 +182,8 @@ void SignalVisualizationWidget::SetReceiverIqHealth(uint32_t receiver_id, double
   state.psd_floor_db = std::clamp(psd_floor_db, -140.0, 20.0);
   state.snr_db = std::clamp(snr_db, 0.0, 120.0);
   state.psd_peak_offset_hz = psd_peak_offset_hz;
+  state.has_quality_score = has_quality_score;
+  state.quality_score_pct = std::clamp(quality_score_pct, 0.0, 100.0);
   state.has_signal_ok = has_signal_ok;
   state.signal_ok = signal_ok;
   update();
@@ -291,7 +294,8 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
   DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold,
                  display.has_signal_level_db, display.signal_level_db, display.has_iq_health,
                  display.psd_peak_db, display.psd_floor_db, display.snr_db, display.psd_peak_offset_hz,
-                 display.has_signal_ok, display.signal_ok);
+                 display.has_quality_score, display.quality_score_pct, display.has_signal_ok,
+                 display.signal_ok);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
                     display.frequency_start_hz, display.frequency_end_hz, false,
                     display.has_squelch_threshold_db, display.squelch_threshold_db);
@@ -373,6 +377,8 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   state->psd_floor_db = -120.0;
   state->snr_db = 0.0;
   state->psd_peak_offset_hz = 0.0;
+  state->has_quality_score = false;
+  state->quality_score_pct = 0.0;
   state->has_signal_ok = false;
   state->signal_ok = false;
 }
@@ -475,7 +481,8 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
                                                double peak_hold, bool has_signal_level_db,
                                                double signal_level_db, bool has_iq_health,
                                                double psd_peak_db, double psd_floor_db, double snr_db,
-                                               double psd_peak_offset_hz, bool has_signal_ok,
+                                               double psd_peak_offset_hz, bool has_quality_score,
+                                               double quality_score_pct, bool has_signal_ok,
                                                bool signal_ok) {
   if (painter == nullptr || !area.isValid()) {
     return;
@@ -497,27 +504,48 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
   painter->setPen(QPen(QColor(66, 79, 102), 1));
   painter->drawRect(area.adjusted(0, 0, -1, -1));
 
-  const QRect bar_rect = area.adjusted(8, 6, -8, -6);
-  painter->fillRect(bar_rect, QColor(24, 32, 45));
+  const QRect bars_rect = area.adjusted(8, 6, -8, -6);
+  const int sub_gap = 6;
+  const int sub_height = std::max(12, (bars_rect.height() - sub_gap) / 2);
+  const QRect level_bar_rect(bars_rect.left(), bars_rect.top(), bars_rect.width(), sub_height);
+  const QRect quality_bar_rect(bars_rect.left(), level_bar_rect.bottom() + sub_gap, bars_rect.width(),
+                               std::max(8, bars_rect.bottom() - (level_bar_rect.bottom() + sub_gap) + 1));
+  painter->fillRect(level_bar_rect, QColor(24, 32, 45));
+  painter->fillRect(quality_bar_rect, QColor(24, 32, 45));
 
-  const int fill_width = static_cast<int>(std::round(clamped_level * bar_rect.width()));
+  const int fill_width = static_cast<int>(std::round(clamped_level * level_bar_rect.width()));
   if (fill_width > 0) {
-    QLinearGradient gradient(bar_rect.topLeft(), bar_rect.topRight());
+    QLinearGradient gradient(level_bar_rect.topLeft(), level_bar_rect.topRight());
     gradient.setColorAt(0.0, QColor(72, 168, 110));
     gradient.setColorAt(0.5, QColor(238, 194, 83));
     gradient.setColorAt(1.0, QColor(222, 98, 74));
-    painter->fillRect(QRect(bar_rect.left(), bar_rect.top(), fill_width, bar_rect.height()), gradient);
+    painter->fillRect(QRect(level_bar_rect.left(), level_bar_rect.top(), fill_width, level_bar_rect.height()),
+                      gradient);
+  }
+
+  const double quality_ratio =
+      has_quality_score ? std::clamp(quality_score_pct / 100.0, 0.0, 1.0) : (has_signal_ok ? (signal_ok ? 1.0 : 0.0) : 0.0);
+  const int quality_width = static_cast<int>(std::round(quality_ratio * quality_bar_rect.width()));
+  if (quality_width > 0) {
+    QLinearGradient quality_gradient(quality_bar_rect.topLeft(), quality_bar_rect.topRight());
+    quality_gradient.setColorAt(0.0, QColor(201, 85, 74));
+    quality_gradient.setColorAt(0.5, QColor(244, 190, 95));
+    quality_gradient.setColorAt(1.0, QColor(92, 220, 168));
+    painter->fillRect(QRect(quality_bar_rect.left(), quality_bar_rect.top(), quality_width,
+                            quality_bar_rect.height()),
+                      quality_gradient);
   }
 
   const int peak_x =
-      bar_rect.left() + static_cast<int>(std::round(clamped_peak * static_cast<double>(bar_rect.width() - 1)));
+      level_bar_rect.left() +
+      static_cast<int>(std::round(clamped_peak * static_cast<double>(level_bar_rect.width() - 1)));
   painter->setPen(QPen(QColor(233, 237, 244), 1));
-  painter->drawLine(peak_x, bar_rect.top(), peak_x, bar_rect.bottom());
+  painter->drawLine(peak_x, level_bar_rect.top(), peak_x, level_bar_rect.bottom());
 
   painter->setPen(QColor(178, 192, 214));
-  const QRect title_row = QRect(area.left() + 10, area.top(), area.width() - 20, area.height() / 2);
-  const QRect detail_row = QRect(area.left() + 10, area.top() + area.height() / 2, area.width() - 20,
-                                 area.height() - (area.height() / 2));
+  const QRect title_row = QRect(area.left() + 10, area.top(), area.width() - 20, area.height() / 2 - 2);
+  const QRect detail_row =
+      QRect(area.left() + 10, area.top() + area.height() / 2, area.width() - 20, area.height() - (area.height() / 2));
   painter->drawText(title_row, Qt::AlignLeft | Qt::AlignVCenter, "Signal Level");
   painter->drawText(title_row, Qt::AlignRight | Qt::AlignVCenter,
                     QString("%1 dBFS").arg(level_db, 0, 'f', 1));
@@ -533,13 +561,17 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
   painter->setPen(QColor(148, 165, 190));
   painter->drawText(detail_row, Qt::AlignLeft | Qt::AlignVCenter, detail_text);
 
+  const QString quality_text = has_quality_score
+                                   ? QString("Quality %1%").arg(quality_score_pct, 0, 'f', 0)
+                                   : "Quality ?";
   const QString status_text =
       has_signal_ok ? (signal_ok ? "Signal OK" : "Signal CHECK") : "Signal ?";
+  const QString status_quality_text = QString("%1  %2").arg(quality_text, status_text);
   const QColor status_color = has_signal_ok
                                   ? (signal_ok ? QColor(92, 220, 168) : QColor(255, 184, 93))
                                   : QColor(138, 152, 178);
   painter->setPen(status_color);
-  painter->drawText(detail_row, Qt::AlignRight | Qt::AlignVCenter, status_text);
+  painter->drawText(detail_row, Qt::AlignRight | Qt::AlignVCenter, status_quality_text);
   painter->restore();
 }
 
@@ -716,6 +748,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   display.psd_floor_db = -120.0;
   display.snr_db = 0.0;
   display.psd_peak_offset_hz = 0.0;
+  display.has_quality_score = false;
+  display.quality_score_pct = 0.0;
   display.has_signal_ok = false;
   display.signal_ok = false;
 
@@ -755,6 +789,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       display.psd_floor_db = selected.psd_floor_db;
       display.snr_db = selected.snr_db;
       display.psd_peak_offset_hz = selected.psd_peak_offset_hz;
+      display.has_quality_score = selected.has_quality_score;
+      display.quality_score_pct = selected.quality_score_pct;
       display.has_signal_ok = selected.has_signal_ok;
       display.signal_ok = selected.signal_ok;
       if (display.spectrogram_rows.isEmpty()) {
@@ -795,6 +831,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     display.psd_floor_db = selected.psd_floor_db;
     display.snr_db = selected.snr_db;
     display.psd_peak_offset_hz = selected.psd_peak_offset_hz;
+    display.has_quality_score = selected.has_quality_score;
+    display.quality_score_pct = selected.quality_score_pct;
     display.has_signal_ok = selected.has_signal_ok;
     display.signal_ok = selected.signal_ok;
     if (display.spectrogram_rows.isEmpty()) {
@@ -822,6 +860,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
   double snr_db_sum = 0.0;
   double psd_peak_offset_sum = 0.0;
   int iq_health_count = 0;
+  double quality_score_sum = 0.0;
+  int quality_score_count = 0;
   int signal_ok_true_count = 0;
   int signal_ok_count = 0;
   for (const ReceiverState& state : state_values) {
@@ -853,6 +893,10 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       snr_db_sum += state.snr_db;
       psd_peak_offset_sum += state.psd_peak_offset_hz;
       ++iq_health_count;
+    }
+    if (state.has_quality_score) {
+      quality_score_sum += state.quality_score_pct;
+      ++quality_score_count;
     }
     if (state.has_signal_ok) {
       ++signal_ok_count;
@@ -898,6 +942,10 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     display.psd_floor_db = psd_floor_db_sum * inv;
     display.snr_db = snr_db_sum * inv;
     display.psd_peak_offset_hz = psd_peak_offset_sum * inv;
+  }
+  if (quality_score_count > 0) {
+    display.has_quality_score = true;
+    display.quality_score_pct = quality_score_sum / static_cast<double>(quality_score_count);
   }
   if (signal_ok_count > 0) {
     display.has_signal_ok = true;

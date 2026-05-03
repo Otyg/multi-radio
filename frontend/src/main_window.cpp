@@ -1674,6 +1674,10 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     const double snr_db = TokenValue(message, "snr_db").toDouble(&snr_ok);
     bool psd_peak_hz_ok = false;
     const double psd_peak_offset_hz = TokenValue(message, "psd_peak_offset_hz").toDouble(&psd_peak_hz_ok);
+    bool quality_ok = false;
+    const double quality_score = TokenValue(message, "quality_score").toDouble(&quality_ok);
+    bool raw_signal_ok_ok = false;
+    const int raw_signal_ok_flag = TokenValue(message, "signal_ok_raw").toInt(&raw_signal_ok_ok);
     bool signal_ok_ok = false;
     const int signal_ok_flag = TokenValue(message, "signal_ok").toInt(&signal_ok_ok);
     bool status_sr_ok = false;
@@ -1686,17 +1690,18 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     const int status_snr = TokenValue(message, "ok_snr").toInt(&status_snr_ok);
     bool status_stable_ok = false;
     const int status_stable = TokenValue(message, "ok_stable").toInt(&status_stable_ok);
+    const QString raw_status = TokenValue(message, "raw_status");
     const QString signal_status = TokenValue(message, "signal_status");
 
     signal_visualization_->SetReceiverSignalLevelDb(receiver_id, level_ok ? level_dbfs : -120.0);
     signal_visualization_->SetReceiverIqHealth(
         receiver_id, psd_peak_db_ok ? psd_peak_db : -120.0, psd_floor_db_ok ? psd_floor_db : -120.0,
-        snr_ok ? snr_db : 0.0, psd_peak_hz_ok ? psd_peak_offset_hz : 0.0, signal_ok_ok,
-        signal_ok_ok && signal_ok_flag != 0);
+        snr_ok ? snr_db : 0.0, psd_peak_hz_ok ? psd_peak_offset_hz : 0.0, quality_ok,
+        quality_ok ? quality_score : 0.0, signal_ok_ok, signal_ok_ok && signal_ok_flag != 0);
 
     AppendLog(QString("[%1] RX%2 IQ_STATS cfg_sr=%3 meas_sr=%4 block_sr=%5 tuned=%6 center=%7 "
                       "level=%8 dBFS clip=%9%% flag=%10 psd=%11/%12 dB snr=%13 dB peak_offset=%14 Hz "
-                      "ok=%15 sr=%16 lvl=%17 clip_ok=%18 snr_ok=%19 stable=%20 status=%21")
+                      "q=%15 raw_ok=%16 ok=%17 sr=%18 lvl=%19 clip_ok=%20 snr_ok=%21 stable=%22 raw=%23 status=%24")
                   .arg(ToLocalTime(unix_ms))
                   .arg(receiver_id)
                   .arg(cfg_sr_ok ? configured_sample_rate_hz : -1)
@@ -1711,12 +1716,15 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
                   .arg(psd_floor_db_ok ? QString::number(psd_floor_db, 'f', 1) : "?")
                   .arg(snr_ok ? QString::number(snr_db, 'f', 1) : "?")
                   .arg(psd_peak_hz_ok ? QString::number(psd_peak_offset_hz, 'f', 0) : "?")
+                  .arg(quality_ok ? QString::number(quality_score, 'f', 1) : "?")
+                  .arg(raw_signal_ok_ok ? raw_signal_ok_flag : -1)
                   .arg(signal_ok_ok ? signal_ok_flag : -1)
                   .arg(status_sr_ok ? status_sr : -1)
                   .arg(status_level_ok ? status_level : -1)
                   .arg(status_clip_ok ? status_clip : -1)
                   .arg(status_snr_ok ? status_snr : -1)
                   .arg(status_stable_ok ? status_stable : -1)
+                  .arg(raw_status.isEmpty() ? "?" : raw_status)
                   .arg(signal_status.isEmpty() ? "?" : signal_status));
     return;
   }

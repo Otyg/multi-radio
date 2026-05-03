@@ -5,6 +5,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -27,6 +28,81 @@ constexpr double kToneAmplitude = 9000.0;
 constexpr size_t kIqVisualizationMaxInterleavedSamples = 4096;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
 constexpr int16_t kIqClipThresholdS16 = 32256;
+
+struct SignalHealthThresholds {
+  double sample_rate_abs_error_hz = 2000.0;
+  double sample_rate_rel_error = 0.02;
+  double level_min_dbfs = -55.0;
+  double level_max_dbfs = -8.0;
+  double clip_max_pct = 2.5;
+  double snr_min_db = 12.0;
+  double stable_max_snr_delta_db = 20.0;
+  double stable_max_level_delta_db = 18.0;
+  int stable_windows_required = 2;
+  int hysteresis_on_windows = 2;
+  int hysteresis_off_windows = 3;
+};
+
+double ReadEnvDouble(const char* key, double fallback) {
+  const char* value = std::getenv(key);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  char* end = nullptr;
+  const double parsed = std::strtod(value, &end);
+  if (end == value || !std::isfinite(parsed)) {
+    return fallback;
+  }
+  return parsed;
+}
+
+int ReadEnvInt(const char* key, int fallback) {
+  const char* value = std::getenv(key);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  char* end = nullptr;
+  const long parsed = std::strtol(value, &end, 10);
+  if (end == value) {
+    return fallback;
+  }
+  if (parsed < static_cast<long>(std::numeric_limits<int>::min()) ||
+      parsed > static_cast<long>(std::numeric_limits<int>::max())) {
+    return fallback;
+  }
+  return static_cast<int>(parsed);
+}
+
+SignalHealthThresholds LoadSignalHealthThresholds() {
+  SignalHealthThresholds out;
+  out.sample_rate_abs_error_hz =
+      std::max(0.0, ReadEnvDouble("MR_SIGNAL_SR_ABS_MAX_HZ", out.sample_rate_abs_error_hz));
+  out.sample_rate_rel_error =
+      std::clamp(ReadEnvDouble("MR_SIGNAL_SR_REL_MAX", out.sample_rate_rel_error), 0.0, 1.0);
+  out.level_min_dbfs =
+      std::clamp(ReadEnvDouble("MR_SIGNAL_LEVEL_MIN_DBFS", out.level_min_dbfs), -120.0, 0.0);
+  out.level_max_dbfs =
+      std::clamp(ReadEnvDouble("MR_SIGNAL_LEVEL_MAX_DBFS", out.level_max_dbfs), -120.0, 0.0);
+  if (out.level_max_dbfs < out.level_min_dbfs) {
+    std::swap(out.level_min_dbfs, out.level_max_dbfs);
+  }
+  out.clip_max_pct = std::max(0.0, ReadEnvDouble("MR_SIGNAL_CLIP_MAX_PCT", out.clip_max_pct));
+  out.snr_min_db = std::max(0.0, ReadEnvDouble("MR_SIGNAL_SNR_MIN_DB", out.snr_min_db));
+  out.stable_max_snr_delta_db =
+      std::max(0.0, ReadEnvDouble("MR_SIGNAL_STABLE_MAX_SNR_DELTA_DB", out.stable_max_snr_delta_db));
+  out.stable_max_level_delta_db =
+      std::max(0.0, ReadEnvDouble("MR_SIGNAL_STABLE_MAX_LEVEL_DELTA_DB", out.stable_max_level_delta_db));
+  out.stable_windows_required = std::max(1, ReadEnvInt("MR_SIGNAL_STABLE_WINDOWS", out.stable_windows_required));
+  out.hysteresis_on_windows = std::max(1, ReadEnvInt("MR_SIGNAL_HYST_ON_WINDOWS", out.hysteresis_on_windows));
+  out.hysteresis_off_windows =
+      std::max(1, ReadEnvInt("MR_SIGNAL_HYST_OFF_WINDOWS", out.hysteresis_off_windows));
+  return out;
+}
+
+const SignalHealthThresholds& GlobalSignalHealthThresholds() {
+  static const SignalHealthThresholds thresholds = LoadSignalHealthThresholds();
+  return thresholds;
+}
 
 ModeConfig NormalizeModeConfig(const ModeConfig& input) {
   ModeConfig out = input;
@@ -324,6 +400,7 @@ ReceiverStatus ReceiverWorker::Status() const {
 }
 
 void ReceiverWorker::RunLoop() {
+  const SignalHealthThresholds& thresholds = GlobalSignalHealthThresholds();
   uint64_t audio_sequence = 0;
   uint64_t audio_sample_index = 0;
   uint64_t iq_sequence = 0;
@@ -344,6 +421,9 @@ void ReceiverWorker::RunLoop() {
   double prev_iq_snr_db = 0.0;
   double prev_iq_level_dbfs = -120.0;
   int iq_stable_windows = 0;
+  int iq_good_windows = 0;
+  int iq_bad_windows = 0;
+  bool signal_ok_latched = false;
 
   double tone_phase = 0.0;
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
@@ -356,6 +436,7 @@ void ReceiverWorker::RunLoop() {
   uint32_t configured_sample_rate_hz = 0;
   uint32_t configured_hardware_bandwidth_hz = 0;
   bool squelch_open_emitted = false;
+  bool thresholds_emitted = false;
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -531,6 +612,26 @@ void ReceiverWorker::RunLoop() {
 
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_stats_at) {
+      if (!thresholds_emitted) {
+        std::ostringstream threshold_status;
+        threshold_status << "IQ_THRESHOLDS"
+                         << " sr_abs_max_hz=" << FormatDouble(thresholds.sample_rate_abs_error_hz, 0)
+                         << " sr_rel_max=" << FormatDouble(thresholds.sample_rate_rel_error, 4)
+                         << " level_min_dbfs=" << FormatDouble(thresholds.level_min_dbfs, 1)
+                         << " level_max_dbfs=" << FormatDouble(thresholds.level_max_dbfs, 1)
+                         << " clip_max_pct=" << FormatDouble(thresholds.clip_max_pct, 2)
+                         << " snr_min_db=" << FormatDouble(thresholds.snr_min_db, 1)
+                         << " stable_max_snr_delta_db="
+                         << FormatDouble(thresholds.stable_max_snr_delta_db, 1)
+                         << " stable_max_level_delta_db="
+                         << FormatDouble(thresholds.stable_max_level_delta_db, 1)
+                         << " stable_windows=" << thresholds.stable_windows_required
+                         << " hyst_on_windows=" << thresholds.hysteresis_on_windows
+                         << " hyst_off_windows=" << thresholds.hysteresis_off_windows;
+        PublishEvent(EventKind::kInfo, threshold_status.str(), ch.frequency_hz);
+        thresholds_emitted = true;
+      }
+
       const double window_s =
           std::max(1.0e-3, std::chrono::duration<double>(now - stats_started_at).count());
       const uint64_t window_ms = static_cast<uint64_t>(std::llround(window_s * 1000.0));
@@ -596,34 +697,86 @@ void ReceiverWorker::RunLoop() {
       // Use device-reported block sample-rate for health gating.
       // The measured ingest rate is intentionally lower in this prototype pipeline.
       const bool ok_sr = configured_iq_sample_rate_hz <= 0.0 || block_sr_hz <= 0.0 ||
-                         (block_sr_abs_error_hz <= 2000.0 && block_sr_rel_error <= 0.02);
-      const bool ok_level = iq_level_dbfs >= -55.0 && iq_level_dbfs <= -8.0;
-      const bool ok_clip = iq_clip_pct <= 2.5;
-      const bool ok_snr = psd.valid && psd.snr_db >= 12.0;
+                         (block_sr_abs_error_hz <= thresholds.sample_rate_abs_error_hz &&
+                          block_sr_rel_error <= thresholds.sample_rate_rel_error);
+      const bool ok_level =
+          iq_level_dbfs >= thresholds.level_min_dbfs && iq_level_dbfs <= thresholds.level_max_dbfs;
+      const bool ok_clip = iq_clip_pct <= thresholds.clip_max_pct;
+      const bool ok_snr = psd.valid && psd.snr_db >= thresholds.snr_min_db;
       bool window_stable = true;
       if (have_prev_iq_health) {
-        window_stable = std::abs(psd.snr_db - prev_iq_snr_db) <= 20.0 &&
-                        std::abs(iq_level_dbfs - prev_iq_level_dbfs) <= 18.0;
+        window_stable = std::abs(psd.snr_db - prev_iq_snr_db) <= thresholds.stable_max_snr_delta_db &&
+                        std::abs(iq_level_dbfs - prev_iq_level_dbfs) <=
+                            thresholds.stable_max_level_delta_db;
       }
       if (window_stable) {
         ++iq_stable_windows;
       } else {
         iq_stable_windows = 0;
       }
-      const bool ok_stable = iq_stable_windows >= 2;
-      const bool signal_ok = ok_sr && ok_level && ok_clip && ok_snr && ok_stable;
-      const char* signal_status = "OK";
-      if (!ok_sr) {
-        signal_status = "SR_MISMATCH";
-      } else if (!ok_level) {
-        signal_status = "LEVEL_RANGE";
-      } else if (!ok_clip) {
-        signal_status = "CLIPPING";
-      } else if (!ok_snr) {
-        signal_status = "LOW_SNR";
-      } else if (!ok_stable) {
-        signal_status = "UNSTABLE";
+      const bool ok_stable = iq_stable_windows >= thresholds.stable_windows_required;
+      const bool signal_ok_raw = ok_sr && ok_level && ok_clip && ok_snr && ok_stable;
+      if (signal_ok_raw) {
+        ++iq_good_windows;
+        iq_bad_windows = 0;
+      } else {
+        ++iq_bad_windows;
+        iq_good_windows = 0;
       }
+      if (!signal_ok_latched && iq_good_windows >= thresholds.hysteresis_on_windows) {
+        signal_ok_latched = true;
+      } else if (signal_ok_latched && iq_bad_windows >= thresholds.hysteresis_off_windows) {
+        signal_ok_latched = false;
+      }
+      const bool signal_ok = signal_ok_latched;
+
+      const char* raw_status = "OK";
+      if (!ok_sr) {
+        raw_status = "SR_MISMATCH";
+      } else if (!ok_level) {
+        raw_status = "LEVEL_RANGE";
+      } else if (!ok_clip) {
+        raw_status = "CLIPPING";
+      } else if (!ok_snr) {
+        raw_status = "LOW_SNR";
+      } else if (!ok_stable) {
+        raw_status = "UNSTABLE";
+      }
+      const char* signal_status = signal_ok ? "OK" : (signal_ok_raw ? "WARMUP" : raw_status);
+
+      double sr_score = 1.0;
+      if (!(configured_iq_sample_rate_hz <= 0.0 || block_sr_hz <= 0.0)) {
+        const double abs_ratio = thresholds.sample_rate_abs_error_hz <= 0.0
+                                     ? (block_sr_abs_error_hz == 0.0 ? 0.0 : 1.0)
+                                     : block_sr_abs_error_hz / thresholds.sample_rate_abs_error_hz;
+        const double rel_ratio = thresholds.sample_rate_rel_error <= 0.0
+                                     ? (block_sr_rel_error == 0.0 ? 0.0 : 1.0)
+                                     : block_sr_rel_error / thresholds.sample_rate_rel_error;
+        sr_score = std::clamp(1.0 - std::max(abs_ratio, rel_ratio), 0.0, 1.0);
+      }
+      double level_score = 1.0;
+      if (iq_level_dbfs < thresholds.level_min_dbfs) {
+        const double miss = thresholds.level_min_dbfs - iq_level_dbfs;
+        level_score = std::clamp(1.0 - (miss / 20.0), 0.0, 1.0);
+      } else if (iq_level_dbfs > thresholds.level_max_dbfs) {
+        const double miss = iq_level_dbfs - thresholds.level_max_dbfs;
+        level_score = std::clamp(1.0 - (miss / 10.0), 0.0, 1.0);
+      }
+      double clip_score = 1.0;
+      if (iq_clip_pct > thresholds.clip_max_pct) {
+        const double denom = std::max(0.1, thresholds.clip_max_pct);
+        clip_score = std::clamp(1.0 - ((iq_clip_pct - thresholds.clip_max_pct) / denom), 0.0, 1.0);
+      }
+      const double snr_score =
+          psd.valid ? std::clamp((psd.snr_db - (thresholds.snr_min_db - 6.0)) / 18.0, 0.0, 1.0) : 0.0;
+      const double stable_score = std::clamp(
+          static_cast<double>(iq_stable_windows) /
+              static_cast<double>(std::max(1, thresholds.stable_windows_required)),
+          0.0, 1.0);
+      const double quality_score =
+          (0.25 * sr_score + 0.20 * level_score + 0.20 * clip_score + 0.20 * snr_score +
+           0.15 * stable_score) *
+          100.0;
 
       prev_iq_snr_db = psd.snr_db;
       prev_iq_level_dbfs = iq_level_dbfs;
@@ -649,6 +802,11 @@ void ReceiverWorker::RunLoop() {
                 << " ok_snr=" << (ok_snr ? 1 : 0)
                 << " ok_stable=" << (ok_stable ? 1 : 0)
                 << " stable_windows=" << iq_stable_windows
+                << " quality_score=" << FormatDouble(quality_score, 1)
+                << " signal_ok_raw=" << (signal_ok_raw ? 1 : 0)
+                << " raw_status=" << raw_status
+                << " hys_good_windows=" << iq_good_windows
+                << " hys_bad_windows=" << iq_bad_windows
                 << " signal_ok=" << (signal_ok ? 1 : 0)
                 << " signal_status=" << signal_status
                 << " win_ms=" << window_ms
