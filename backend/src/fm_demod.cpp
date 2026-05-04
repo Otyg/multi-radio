@@ -65,6 +65,13 @@ struct FmDemodulator::Impl {
   float deemphasis_state = 0.0f;
   float pcm_gain = 13000.0f;
 
+  // Pilot notch (WFM only, 19 kHz stereo pilot)
+  bool use_pilot_notch = false;
+  float notch_b0 = 1.0f, notch_b1 = 0.0f, notch_b2 = 1.0f;
+  float notch_a1 = 0.0f, notch_a2 = 0.0f;
+  float notch_x1 = 0.0f, notch_x2 = 0.0f;
+  float notch_y1 = 0.0f, notch_y2 = 0.0f;
+
   std::vector<ComplexSample> iq_complex;
   std::vector<ComplexSample> channelized_complex;
   std::vector<float> demodulated;
@@ -79,6 +86,8 @@ struct FmDemodulator::Impl {
 
   void ResetStateOnly() {
     deemphasis_state = 0.0f;
+    notch_x1 = 0.0f; notch_x2 = 0.0f;
+    notch_y1 = 0.0f; notch_y2 = 0.0f;
     iq_complex.clear();
     channelized_complex.clear();
     demodulated.clear();
@@ -171,7 +180,8 @@ bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
   const float audio_ratio =
       static_cast<float>(audio_sample_rate_hz) / static_cast<float>(channel_sample_rate_hz);
   const float deviation_hz = FmDeviationHz(modulation);
-  const float kf = (kTwoPi * deviation_hz) /
+  // kf = f_deviation / f_sample (normalized deviation per sample, no 2π)
+  const float kf = deviation_hz /
                    static_cast<float>(std::max<uint32_t>(1U, channel_sample_rate_hz));
 
   impl_->iq_channelizer = msresamp_crcf_create(channel_ratio, kResamplerStopbandAttenuationDb);
@@ -205,6 +215,23 @@ bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
   impl_->deemphasis_alpha =
       std::exp(-1.0f / (tau * static_cast<float>(std::max<uint32_t>(1U, channel_sample_rate_hz))));
   impl_->deemphasis_state = 0.0f;
+
+  // 19 kHz stereo pilot notch for WFM (IIR biquad, zeros at e^(±jw0), poles at r*e^(±jw0))
+  if (modulation == Modulation::kWfm) {
+    const float w0 = kTwoPi * 19000.0f / static_cast<float>(std::max<uint32_t>(1U, channel_sample_rate_hz));
+    const float cos_w0 = std::cos(w0);
+    const float r = 0.95f;
+    impl_->notch_b0 = 1.0f;
+    impl_->notch_b1 = -2.0f * cos_w0;
+    impl_->notch_b2 = 1.0f;
+    impl_->notch_a1 = -2.0f * r * cos_w0;
+    impl_->notch_a2 = r * r;
+    impl_->use_pilot_notch = true;
+  } else {
+    impl_->use_pilot_notch = false;
+  }
+  impl_->notch_x1 = 0.0f; impl_->notch_x2 = 0.0f;
+  impl_->notch_y1 = 0.0f; impl_->notch_y2 = 0.0f;
 
   impl_->modulation = modulation;
   impl_->input_sample_rate_hz = input_sample_rate_hz;
@@ -302,6 +329,22 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
       *error = "FM demodulation failed";
     }
     return false;
+  }
+
+  if (impl_->use_pilot_notch) {
+    const float b0 = impl_->notch_b0, b1 = impl_->notch_b1, b2 = impl_->notch_b2;
+    const float a1 = impl_->notch_a1, a2 = impl_->notch_a2;
+    float x1 = impl_->notch_x1, x2 = impl_->notch_x2;
+    float y1 = impl_->notch_y1, y2 = impl_->notch_y2;
+    for (unsigned int i = 0; i < channelized_count; ++i) {
+      const float x = impl_->demodulated[i];
+      const float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x;
+      y2 = y1; y1 = y;
+      impl_->demodulated[i] = y;
+    }
+    impl_->notch_x1 = x1; impl_->notch_x2 = x2;
+    impl_->notch_y1 = y1; impl_->notch_y2 = y2;
   }
 
   impl_->deemphasized.resize(channelized_count);
