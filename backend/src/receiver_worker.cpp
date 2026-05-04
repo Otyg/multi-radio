@@ -24,7 +24,9 @@ constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kWfmMaxRuntimeSampleRateHz = 1024000;
 constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kAudioSampleRateHzNfm = 12000;
-constexpr uint32_t kAudioSampleRateHzWfm = 48000;
+// Keep WFM audio-rate moderate to stay real-time on typical CPUs.
+// Frontend audio output can still resample to the device sample-rate.
+constexpr uint32_t kAudioSampleRateHzWfm = 32000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
 constexpr uint32_t kIqVisualizationIntervalMs = 50;
