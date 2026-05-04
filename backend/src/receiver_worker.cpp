@@ -22,10 +22,11 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
 constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
-constexpr uint32_t kAudioSampleRateHz = 8000;
+constexpr uint32_t kAudioSampleRateHzNfm = 12000;
+constexpr uint32_t kAudioSampleRateHzWfm = 48000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
-constexpr const char* kAudioPipelineRevision = "audio-v11-libliquid-fm";
+constexpr const char* kAudioPipelineRevision = "audio-v12-stream-paced";
 constexpr size_t kIqVisualizationMaxInterleavedSamples = 8192;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
 constexpr int16_t kIqClipThresholdS16 = 32256;
@@ -123,8 +124,7 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
 }
 
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
-  (void)modulation;
-  return kAudioSampleRateHz;
+  return modulation == Modulation::kWfm ? kAudioSampleRateHzWfm : kAudioSampleRateHzNfm;
 }
 
 const char* ModulationToken(Modulation modulation) {
@@ -667,38 +667,44 @@ void ReceiverWorker::RunLoop() {
       audio_pending_pcm.clear();
     }
 
-    AudioFrame frame;
-    frame.unix_ms = UnixMillisNow();
-    frame.receiver_id = receiver_id_;
-    frame.sample_rate_hz = audio_sample_rate_hz;
-    frame.tuned_frequency_hz = ch.frequency_hz;
-    frame.sequence = audio_sequence++;
-    frame.sample_index = audio_sample_index;
-    frame.pcm_s16le.resize(frame_samples);
-    size_t frame_filled = 0;
-    while (frame_filled < frame_samples && !audio_pending_pcm.empty()) {
-      frame.pcm_s16le[frame_filled] = audio_pending_pcm.front();
-      audio_pending_pcm.pop_front();
-      ++frame_filled;
-    }
-    if (frame_filled < frame_samples) {
-      for (size_t i = frame_filled; i < frame_samples; ++i) {
-        frame.pcm_s16le[i] = 0;
-      }
-      conceal_samples += static_cast<uint64_t>(frame_samples - frame_filled);
-    }
-    if (frame_filled == 0) {
-      ++demod_empty_blocks;
-    } else {
-      ++demod_ok_blocks;
-    }
-
-    published_samples += static_cast<uint64_t>(frame_samples);
-    ++published_frames;
-    audio_sample_index += static_cast<uint64_t>(frame_samples);
-    event_bus_->PublishAudioFrame(frame);
-
     const auto now = std::chrono::steady_clock::now();
+    if (now > next_frame_at + std::chrono::milliseconds(200)) {
+      next_frame_at = now;
+    }
+    while (now >= next_frame_at) {
+      AudioFrame frame;
+      frame.unix_ms = UnixMillisNow();
+      frame.receiver_id = receiver_id_;
+      frame.sample_rate_hz = audio_sample_rate_hz;
+      frame.tuned_frequency_hz = ch.frequency_hz;
+      frame.sequence = audio_sequence++;
+      frame.sample_index = audio_sample_index;
+      frame.pcm_s16le.resize(frame_samples);
+      size_t frame_filled = 0;
+      while (frame_filled < frame_samples && !audio_pending_pcm.empty()) {
+        frame.pcm_s16le[frame_filled] = audio_pending_pcm.front();
+        audio_pending_pcm.pop_front();
+        ++frame_filled;
+      }
+      if (frame_filled < frame_samples) {
+        for (size_t i = frame_filled; i < frame_samples; ++i) {
+          frame.pcm_s16le[i] = 0;
+        }
+        conceal_samples += static_cast<uint64_t>(frame_samples - frame_filled);
+      }
+      if (frame_filled == 0) {
+        ++demod_empty_blocks;
+      } else {
+        ++demod_ok_blocks;
+      }
+
+      published_samples += static_cast<uint64_t>(frame_samples);
+      ++published_frames;
+      audio_sample_index += static_cast<uint64_t>(frame_samples);
+      event_bus_->PublishAudioFrame(frame);
+      next_frame_at += frame_interval;
+    }
+
     if (now >= next_stats_at) {
       if (!thresholds_emitted) {
         std::ostringstream threshold_status;
@@ -920,9 +926,9 @@ void ReceiverWorker::RunLoop() {
       stats_started_at = now;
       next_stats_at = now + std::chrono::milliseconds(kAudioStatsIntervalMs);
     }
-
-    next_frame_at += frame_interval;
-    std::this_thread::sleep_until(next_frame_at);
+    if (device_ == nullptr) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
   }
 
   if (device_ != nullptr && device_opened) {
