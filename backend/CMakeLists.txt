@@ -58,6 +58,7 @@ add_library(multi_radio_core
   src/jsonl_logger.cpp
   src/plugin_host.cpp
   src/fm_demod.cpp
+  src/audio_ring_buffer.cpp
   src/rtl_sdr_device.cpp
   src/receiver_worker.cpp
   src/receiver_manager.cpp

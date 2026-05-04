@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 
+#include "multi_radio/audio_ring_buffer.hpp"
 #include "multi_radio/event_bus.hpp"
 #include "multi_radio/jsonl_logger.hpp"
 #include "multi_radio/plugin_host.hpp"
@@ -31,6 +32,7 @@ class ReceiverWorker {
 
  private:
   void RunLoop();
+  void IngestLoop();
   void PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz = 0.0,
                     bool log_event = true);
 
@@ -43,11 +45,15 @@ class ReceiverWorker {
 
   mutable std::mutex mu_;
   std::thread thread_;
+  std::thread ingest_thread_;
   std::atomic<bool> running_{false};
 
   RadioMode mode_ = RadioMode::kFixed;
   ModeConfig mode_config_;
   std::string last_error_;
+
+  // Ring buffer for audio samples (decouples ingest from output timing)
+  std::unique_ptr<AudioRingBuffer> audio_buffer_;
 };
 
 }  // namespace multi_radio
