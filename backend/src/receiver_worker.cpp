@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <future>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -21,7 +22,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
-constexpr uint32_t kWfmMaxRuntimeSampleRateHz = 768000;
+constexpr uint32_t kWfmMaxRuntimeSampleRateHz = 1024000;
 constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kAudioSampleRateHzNfm = 12000;
 // Keep WFM audio-rate moderate to stay real-time on typical CPUs.
@@ -468,44 +469,169 @@ void ReceiverWorker::RunLoop() {
   bool thresholds_emitted = false;
   auto next_iq_visualization_at = std::chrono::steady_clock::now();
 
-  while (running_.load()) {
-    RadioMode mode = RadioMode::kFixed;
+  struct ReadResult {
+    bool have_iq = false;
+    IQSampleBlock iq_block;
+    RuntimeChannel channel;
     ModeConfig config;
+    uint32_t tuned_frequency_hz = 0;
+    uint32_t effective_sample_rate_hz = 0;
+    uint32_t requested_sample_rate_hz = 0;
+  };
+
+  auto read_one_iq = [&]() -> ReadResult {
+    ReadResult out;
+    RadioMode mode = RadioMode::kFixed;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode = mode_;
-      config = mode_config_;
+      out.config = mode_config_;
+    }
+    out.channel = SelectRuntimeChannel(mode, out.config);
+    out.tuned_frequency_hz =
+        out.channel.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(out.channel.frequency_hz));
+    out.requested_sample_rate_hz = out.config.sample_rate_hz;
+    out.effective_sample_rate_hz =
+        (out.channel.modulation == Modulation::kWfm)
+            ? std::min<uint32_t>(out.requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz)
+            : out.requested_sample_rate_hz;
+
+    if (out.effective_sample_rate_hz != out.requested_sample_rate_hz &&
+        (last_requested_sample_rate_hz != out.requested_sample_rate_hz ||
+         last_effective_sample_rate_hz != out.effective_sample_rate_hz)) {
+      std::ostringstream sr_msg;
+      sr_msg << "WFM sample-rate capped from " << out.requested_sample_rate_hz << " to "
+             << out.effective_sample_rate_hz << " Hz for real-time stability";
+      PublishEvent(EventKind::kInfo, sr_msg.str(), out.channel.frequency_hz);
+      last_requested_sample_rate_hz = out.requested_sample_rate_hz;
+      last_effective_sample_rate_hz = out.effective_sample_rate_hz;
+    } else if (out.effective_sample_rate_hz == out.requested_sample_rate_hz) {
+      last_requested_sample_rate_hz = out.requested_sample_rate_hz;
+      last_effective_sample_rate_hz = out.effective_sample_rate_hz;
     }
 
-    const RuntimeChannel ch = SelectRuntimeChannel(mode, config);
-    const uint32_t tuned_frequency_hz =
-        ch.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(ch.frequency_hz));
-    int64_t hardware_frequency_i64 = static_cast<int64_t>(tuned_frequency_hz);
-    if (config.lo_offset_enabled) {
-      hardware_frequency_i64 += static_cast<int64_t>(config.lo_offset_hz);
+    if (device_ != nullptr) {
+      std::string error;
+      if (!device_opened) {
+        if (!device_->Open(&error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("rtl open", error), out.channel.frequency_hz);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = error;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+          return out;
+        }
+        device_opened = true;
+        PublishEvent(EventKind::kInfo, "rtl device opened", out.channel.frequency_hz);
+      }
+
+      if (configured_sample_rate_hz != out.effective_sample_rate_hz) {
+        if (!device_->SetSampleRateHz(out.effective_sample_rate_hz, &error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("set sample rate", error), out.channel.frequency_hz);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = error;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          return out;
+        }
+        configured_sample_rate_hz = out.effective_sample_rate_hz;
+      }
+
+      if (configured_hardware_bandwidth_hz != out.config.hardware_bandwidth_hz) {
+        if (!device_->SetHardwareBandwidthHz(out.config.hardware_bandwidth_hz, &error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("set hardware bandwidth", error),
+                       out.channel.frequency_hz);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = error;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          return out;
+        }
+        configured_hardware_bandwidth_hz = out.config.hardware_bandwidth_hz;
+      }
+
+      const int desired_gain_tenth_db = (out.channel.modulation == Modulation::kWfm) ? 0 : -1;
+      if (configured_gain_tenth_db != desired_gain_tenth_db) {
+        if (!device_->SetGainTenthdB(desired_gain_tenth_db, &error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("set gain", error), out.channel.frequency_hz);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = error;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          return out;
+        }
+        configured_gain_tenth_db = desired_gain_tenth_db;
+        PublishEvent(EventKind::kInfo,
+                     desired_gain_tenth_db < 0 ? "rtl gain auto"
+                                               : ("rtl gain manual " +
+                                                  std::to_string(desired_gain_tenth_db / 10) + " dB"),
+                     out.channel.frequency_hz);
+      }
+
+      int64_t hardware_frequency_i64 = static_cast<int64_t>(out.tuned_frequency_hz);
+      if (out.config.lo_offset_enabled) {
+        hardware_frequency_i64 += static_cast<int64_t>(out.config.lo_offset_hz);
+      }
+      hardware_frequency_i64 = std::clamp<int64_t>(hardware_frequency_i64, 0,
+                                                   static_cast<int64_t>(std::numeric_limits<uint32_t>::max()));
+      const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
+      if (hardware_tuned_frequency_hz != 0 && hardware_tuned_frequency_hz != configured_frequency_hz) {
+        if (!device_->SetCenterFrequencyHz(hardware_tuned_frequency_hz, &error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("set center frequency", error),
+                       out.channel.frequency_hz);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = error;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          return out;
+        }
+        configured_frequency_hz = hardware_tuned_frequency_hz;
+        std::ostringstream tuned;
+        tuned << "tuned to " << out.tuned_frequency_hz << " Hz";
+        if (out.config.lo_offset_enabled) {
+          tuned << " (hw=" << hardware_tuned_frequency_hz << " Hz, lo_offset=" << out.config.lo_offset_hz << " Hz)";
+        }
+        PublishEvent(EventKind::kTuneHop, tuned.str(), out.channel.frequency_hz);
+      }
+
+      if (!device_->ReadIq(&out.iq_block, &error)) {
+        PublishEvent(EventKind::kWarning, FormatRuntimeError("read iq", error), out.channel.frequency_hz);
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          last_error_ = error;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return out;
+      }
+      out.have_iq = true;
+      return out;
     }
-    hardware_frequency_i64 = std::clamp<int64_t>(hardware_frequency_i64, 0,
-                                                 static_cast<int64_t>(std::numeric_limits<uint32_t>::max()));
-    const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
+
+    out.iq_block = BuildSyntheticIqBlock(out.effective_sample_rate_hz, out.tuned_frequency_hz, iq_sample_index);
+    out.have_iq = true;
+    return out;
+  };
+
+  std::future<ReadResult> pending_read = std::async(std::launch::async, read_one_iq);
+
+  while (running_.load()) {
+    ReadResult read_result = pending_read.get();
+    if (!running_.load()) {
+      break;
+    }
+    pending_read = std::async(std::launch::async, read_one_iq);
+
+    const RuntimeChannel ch = read_result.channel;
+    const ModeConfig& config = read_result.config;
+    const uint32_t tuned_frequency_hz = read_result.tuned_frequency_hz;
+    const uint32_t requested_sample_rate_hz = read_result.requested_sample_rate_hz;
+    const uint32_t effective_sample_rate_hz = read_result.effective_sample_rate_hz;
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
-    const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
-    const uint32_t effective_sample_rate_hz =
-        (ch.modulation == Modulation::kWfm)
-            ? std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz)
-            : requested_sample_rate_hz;
-    if (effective_sample_rate_hz != requested_sample_rate_hz &&
-        (last_requested_sample_rate_hz != requested_sample_rate_hz ||
-         last_effective_sample_rate_hz != effective_sample_rate_hz)) {
-      std::ostringstream sr_msg;
-      sr_msg << "WFM sample-rate capped from " << requested_sample_rate_hz
-             << " to " << effective_sample_rate_hz << " Hz for real-time stability";
-      PublishEvent(EventKind::kInfo, sr_msg.str(), ch.frequency_hz);
-      last_requested_sample_rate_hz = requested_sample_rate_hz;
-      last_effective_sample_rate_hz = effective_sample_rate_hz;
-    } else if (effective_sample_rate_hz == requested_sample_rate_hz) {
-      last_requested_sample_rate_hz = requested_sample_rate_hz;
-      last_effective_sample_rate_hz = effective_sample_rate_hz;
-    }
     const size_t frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
     if (frame_samples == 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -521,102 +647,9 @@ void ReceiverWorker::RunLoop() {
     }
 
     IQSampleBlock iq_block;
-    bool have_iq = false;
-    if (device_ != nullptr) {
-      std::string error;
-      if (!device_opened) {
-        if (!device_->Open(&error)) {
-          PublishEvent(EventKind::kError, FormatRuntimeError("rtl open", error), ch.frequency_hz);
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = error;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(250));
-          continue;
-        }
-        device_opened = true;
-        PublishEvent(EventKind::kInfo, "rtl device opened", ch.frequency_hz);
-      }
-
-      if (configured_sample_rate_hz != effective_sample_rate_hz) {
-        if (!device_->SetSampleRateHz(effective_sample_rate_hz, &error)) {
-          PublishEvent(EventKind::kError, FormatRuntimeError("set sample rate", error), ch.frequency_hz);
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = error;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          continue;
-        }
-        configured_sample_rate_hz = effective_sample_rate_hz;
-      }
-
-      if (configured_hardware_bandwidth_hz != config.hardware_bandwidth_hz) {
-        if (!device_->SetHardwareBandwidthHz(config.hardware_bandwidth_hz, &error)) {
-          PublishEvent(EventKind::kError, FormatRuntimeError("set hardware bandwidth", error), ch.frequency_hz);
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = error;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          continue;
-        }
-        configured_hardware_bandwidth_hz = config.hardware_bandwidth_hz;
-      }
-
-      // WFM broadcast is often overdriven with RTL auto-gain; start with low manual gain.
-      // Other modes keep auto gain unless explicitly tuned later.
-      const int desired_gain_tenth_db = (ch.modulation == Modulation::kWfm) ? 0 : -1;
-      if (configured_gain_tenth_db != desired_gain_tenth_db) {
-        if (!device_->SetGainTenthdB(desired_gain_tenth_db, &error)) {
-          PublishEvent(EventKind::kError, FormatRuntimeError("set gain", error), ch.frequency_hz);
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = error;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          continue;
-        }
-        configured_gain_tenth_db = desired_gain_tenth_db;
-        PublishEvent(EventKind::kInfo,
-                     desired_gain_tenth_db < 0 ? "rtl gain auto"
-                                               : ("rtl gain manual " +
-                                                  std::to_string(desired_gain_tenth_db / 10) + " dB"),
-                     ch.frequency_hz);
-      }
-
-      if (hardware_tuned_frequency_hz != 0 && hardware_tuned_frequency_hz != configured_frequency_hz) {
-        if (!device_->SetCenterFrequencyHz(hardware_tuned_frequency_hz, &error)) {
-          PublishEvent(EventKind::kError, FormatRuntimeError("set center frequency", error), ch.frequency_hz);
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = error;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          continue;
-        }
-        configured_frequency_hz = hardware_tuned_frequency_hz;
-        std::ostringstream tuned;
-        tuned << "tuned to " << tuned_frequency_hz << " Hz";
-        if (config.lo_offset_enabled) {
-          tuned << " (hw=" << hardware_tuned_frequency_hz << " Hz, lo_offset=" << config.lo_offset_hz << " Hz)";
-        }
-        PublishEvent(EventKind::kTuneHop, tuned.str(), ch.frequency_hz);
-      }
-
-      if (!device_->ReadIq(&iq_block, &error)) {
-        PublishEvent(EventKind::kWarning, FormatRuntimeError("read iq", error), ch.frequency_hz);
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          last_error_ = error;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        continue;
-      }
-      have_iq = true;
-    } else {
-      iq_block = BuildSyntheticIqBlock(effective_sample_rate_hz, tuned_frequency_hz, iq_sample_index);
-      have_iq = true;
+    bool have_iq = read_result.have_iq;
+    if (have_iq) {
+      iq_block = std::move(read_result.iq_block);
     }
 
     if (have_iq) {
