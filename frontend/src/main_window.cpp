@@ -1567,7 +1567,14 @@ void MainWindow::RefreshReceivers() {
         if (modulation_index >= 0) {
           fixed_modulation_combo_->setCurrentIndex(modulation_index);
         }
-        fixed_bandwidth_last_auto_hz_ = DefaultBandwidthHzForModulation(fixed_modulation);
+        const int fixed_bandwidth_hz = DefaultBandwidthHzForModulation(fixed_modulation);
+        fixed_bandwidth_last_auto_hz_ = fixed_bandwidth_hz;
+        fixed_bandwidth_manual_override_ = false;
+        if (receiver.mode() == v1::RADIO_MODE_FIXED && channel_bandwidth_spin_ != nullptr) {
+          fixed_bandwidth_sync_in_progress_ = true;
+          channel_bandwidth_spin_->setValue(fixed_bandwidth_hz);
+          fixed_bandwidth_sync_in_progress_ = false;
+        }
       }
       const double receiver_default_squelch_db =
           std::clamp(receiver.mode_config().scan_list_default_squelch_db(), -120.0, 0.0);
@@ -1724,7 +1731,18 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_range_step_hz(range_step_edit_->text().toDouble());
   config.set_dwell_ms(static_cast<uint32_t>(dwell_ms_spin_->value()));
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
-  config.set_channel_bandwidth_hz(static_cast<uint32_t>(channel_bandwidth_spin_->value()));
+  int channel_bandwidth_hz = channel_bandwidth_spin_->value();
+  if (mode == v1::RADIO_MODE_FIXED) {
+    channel_bandwidth_hz = DefaultBandwidthHzForModulation(fixed_modulation);
+    if (channel_bandwidth_spin_ != nullptr && channel_bandwidth_spin_->value() != channel_bandwidth_hz) {
+      fixed_bandwidth_sync_in_progress_ = true;
+      channel_bandwidth_spin_->setValue(channel_bandwidth_hz);
+      fixed_bandwidth_sync_in_progress_ = false;
+    }
+    fixed_bandwidth_last_auto_hz_ = channel_bandwidth_hz;
+    fixed_bandwidth_manual_override_ = false;
+  }
+  config.set_channel_bandwidth_hz(static_cast<uint32_t>(channel_bandwidth_hz));
   config.set_hardware_bandwidth_hz(static_cast<uint32_t>(hardware_bandwidth_spin_->value()));
   config.set_dc_blocker_enabled(dc_blocker_checkbox_->isChecked());
   config.set_dc_blocker_cutoff_hz(static_cast<uint32_t>(dc_blocker_cutoff_spin_->value()));

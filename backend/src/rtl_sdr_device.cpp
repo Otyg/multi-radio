@@ -15,7 +15,7 @@ namespace multi_radio {
 #if defined(MR_HAS_RTLSDR)
 namespace {
 
-constexpr uint32_t kDefaultReadBlockBytes = 16U * 1024U;
+constexpr uint32_t kDefaultReadBlockBytes = 64U * 1024U;
 
 std::string DeviceSerialOrFallback(uint32_t index) {
   char manufacturer[256] = {0};

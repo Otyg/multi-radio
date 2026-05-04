@@ -321,12 +321,14 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                  display.psd_peak_db, display.psd_floor_db, display.snr_db, display.psd_peak_offset_hz,
                  display.has_quality_score, display.quality_score_pct, display.has_signal_ok,
                  display.signal_ok);
+  const bool apply_noise_floor_filter =
+      noise_floor_filter_enabled_ && spectrum_source_ == SpectrumSource::kReceiverInput;
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
                     display.frequency_start_hz, display.frequency_end_hz, false,
                     display.has_squelch_threshold_db, display.squelch_threshold_db,
-                    noise_floor_filter_enabled_, noise_floor_db_);
+                    apply_noise_floor_filter, noise_floor_db_);
   DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true,
-              auto_noise_reduction_enabled_, noise_floor_filter_enabled_, noise_floor_db_);
+              auto_noise_reduction_enabled_, apply_noise_floor_filter, noise_floor_db_);
 }
 
 void SignalVisualizationWidget::OnFrameTick() {

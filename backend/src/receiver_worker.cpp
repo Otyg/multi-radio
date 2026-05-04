@@ -26,6 +26,7 @@ constexpr uint32_t kAudioSampleRateHzNfm = 12000;
 constexpr uint32_t kAudioSampleRateHzWfm = 48000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
+constexpr uint32_t kIqVisualizationIntervalMs = 50;
 constexpr const char* kAudioPipelineRevision = "audio-v12-stream-paced";
 constexpr size_t kIqVisualizationMaxInterleavedSamples = 8192;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
@@ -457,8 +458,10 @@ void ReceiverWorker::RunLoop() {
   uint32_t configured_frequency_hz = 0;
   uint32_t configured_sample_rate_hz = 0;
   uint32_t configured_hardware_bandwidth_hz = 0;
+  int configured_gain_tenth_db = std::numeric_limits<int>::min();
   bool squelch_open_emitted = false;
   bool thresholds_emitted = false;
+  auto next_iq_visualization_at = std::chrono::steady_clock::now();
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -538,6 +541,27 @@ void ReceiverWorker::RunLoop() {
         configured_hardware_bandwidth_hz = config.hardware_bandwidth_hz;
       }
 
+      // WFM broadcast is often overdriven with RTL auto-gain; start with low manual gain.
+      // Other modes keep auto gain unless explicitly tuned later.
+      const int desired_gain_tenth_db = (ch.modulation == Modulation::kWfm) ? 0 : -1;
+      if (configured_gain_tenth_db != desired_gain_tenth_db) {
+        if (!device_->SetGainTenthdB(desired_gain_tenth_db, &error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("set gain", error), ch.frequency_hz);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = error;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          continue;
+        }
+        configured_gain_tenth_db = desired_gain_tenth_db;
+        PublishEvent(EventKind::kInfo,
+                     desired_gain_tenth_db < 0 ? "rtl gain auto"
+                                               : ("rtl gain manual " +
+                                                  std::to_string(desired_gain_tenth_db / 10) + " dB"),
+                     ch.frequency_hz);
+      }
+
       if (hardware_tuned_frequency_hz != 0 && hardware_tuned_frequency_hz != configured_frequency_hz) {
         if (!device_->SetCenterFrequencyHz(hardware_tuned_frequency_hz, &error)) {
           PublishEvent(EventKind::kError, FormatRuntimeError("set center frequency", error), ch.frequency_hz);
@@ -573,7 +597,7 @@ void ReceiverWorker::RunLoop() {
     }
 
     if (have_iq) {
-      IqFrame iq_frame = BuildIqFrame(iq_block, receiver_id_, ch.frequency_hz, iq_sequence++, iq_sample_index);
+      const uint64_t iq_sample_index_block_start = iq_sample_index;
       iq_sample_index += static_cast<uint64_t>(iq_block.interleaved_iq.size() / 2U);
       iq_interleaved_samples = static_cast<uint64_t>(iq_block.interleaved_iq.size());
       iq_sample_rate_hz = iq_block.sample_rate_hz;
@@ -592,9 +616,17 @@ void ReceiverWorker::RunLoop() {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_.clear();
       }
-      event_bus_->PublishIqFrame(iq_frame);
+      const auto now_vis = std::chrono::steady_clock::now();
+      if (now_vis >= next_iq_visualization_at) {
+        IqFrame iq_frame =
+            BuildIqFrame(iq_block, receiver_id_, ch.frequency_hz, iq_sequence++, iq_sample_index_block_start);
+        event_bus_->PublishIqFrame(iq_frame);
+        next_iq_visualization_at = now_vis + std::chrono::milliseconds(kIqVisualizationIntervalMs);
+      }
 
-      if (plugin_host_ != nullptr) {
+      // Decoder plugins are not needed for wide-band FM broadcast audio and can
+      // consume enough CPU to cause ingest underruns.
+      if (plugin_host_ != nullptr && ch.modulation != Modulation::kWfm) {
         plugin_host_->ProcessIq(iq_block, [&](const PluginMessage& msg) {
           DecodedMessage decoded;
           decoded.unix_ms = msg.unix_ms;
