@@ -614,6 +614,10 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
 
   constexpr double kMinDb = -120.0;
   constexpr double kMaxDb = 0.0;
+  const double display_min_db = has_noise_floor_threshold_db
+                                    ? std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb - 1.0)
+                                    : kMinDb;
+  const double display_span_db = std::max(1.0, kMaxDb - display_min_db);
 
   painter->save();
   painter->setClipRect(area);
@@ -623,8 +627,8 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   painter->setPen(QPen(QColor(70, 84, 109), 1));
   painter->drawRect(plot);
 
-  auto db_to_y = [&plot](double db) {
-    const double t = Clamp01((db + 120.0) / 120.0);
+  auto db_to_y = [&plot, display_min_db, display_span_db](double db) {
+    const double t = Clamp01((db - display_min_db) / display_span_db);
     return plot.bottom() - static_cast<int>(t * (plot.height() - 1));
   };
   auto amp_to_db = [](double amp) {
@@ -633,13 +637,14 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   const double clamped_noise_floor_db =
       std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb);
 
-  const int db_ticks[] = {-120, -90, -60, -30, 0};
   painter->setPen(QPen(QColor(48, 58, 78), 1));
-  for (const int tick_db : db_ticks) {
-    const int y = db_to_y(static_cast<double>(tick_db));
+  for (int i = 0; i <= 4; ++i) {
+    const double t = static_cast<double>(i) / 4.0;
+    const double tick_db = display_min_db + t * display_span_db;
+    const int y = db_to_y(tick_db);
     painter->drawLine(plot.left(), y, plot.right(), y);
     painter->setPen(QColor(160, 176, 200));
-    painter->drawText(area.left() + 2, y + 4, QString::number(tick_db));
+    painter->drawText(area.left() + 2, y + 4, QString::number(tick_db, 'f', 1));
     painter->setPen(QPen(QColor(48, 58, 78), 1));
   }
 
@@ -659,7 +664,7 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   painter->drawText(plot.right() - 64, area.bottom() - 4, "Freq (Hz)");
 
   if (has_squelch_threshold_db) {
-    const double clamped_db = std::clamp(squelch_threshold_db, kMinDb, kMaxDb);
+    const double clamped_db = std::clamp(squelch_threshold_db, display_min_db, kMaxDb);
     const int y = db_to_y(clamped_db);
     painter->setPen(QPen(QColor(96, 216, 255), 1, Qt::DashLine));
     painter->drawLine(plot.left(), y, plot.right(), y);
@@ -677,7 +682,7 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   }
 
   if (has_noise_floor_threshold_db) {
-    const int y = db_to_y(clamped_noise_floor_db);
+    const int y = db_to_y(std::clamp(clamped_noise_floor_db, display_min_db, kMaxDb));
     painter->setPen(QPen(QColor(120, 136, 160), 1, Qt::DashLine));
     painter->drawLine(plot.left(), y, plot.right(), y);
 
@@ -751,6 +756,10 @@ void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area
   };
   const double clamped_noise_floor_db =
       std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb);
+  const double display_min_db = has_noise_floor_threshold_db
+                                    ? std::clamp(clamped_noise_floor_db, kMinDb, kMaxDb - 1.0)
+                                    : kMinDb;
+  const double display_span_db = std::max(1.0, kMaxDb - display_min_db);
 
   if (!rows.isEmpty() && !rows[0].isEmpty()) {
     const int row_count = rows.size();
@@ -774,10 +783,14 @@ void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area
         if (suppress_below_mean && cell_value <= row_mean) {
           continue;
         }
-        if (has_noise_floor_threshold_db && amp_to_db(cell_value) <= clamped_noise_floor_db) {
+        const double cell_db = amp_to_db(cell_value);
+        if (has_noise_floor_threshold_db && cell_db <= clamped_noise_floor_db) {
           continue;
         }
-        const QColor color = rainbow_colors ? RainbowColor(cell_value) : HeatColor(cell_value);
+        const double color_value =
+            has_noise_floor_threshold_db ? Clamp01((cell_db - display_min_db) / display_span_db)
+                                         : cell_value;
+        const QColor color = rainbow_colors ? RainbowColor(color_value) : HeatColor(color_value);
         const int x = area.left() + static_cast<int>(col * cell_w);
         const int y = area.top() + static_cast<int>(row * cell_h);
         const int w = static_cast<int>(std::ceil(cell_w));
