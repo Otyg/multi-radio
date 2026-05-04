@@ -349,8 +349,9 @@ bool ReceiverWorker::Start(std::string* error) {
   }
 
   // Initialize ring buffer for decoupling ingest from output timing
-  // Size: enough to buffer ~500ms of WFM audio (32kHz * 0.5s = 16k samples)
-  audio_buffer_ = std::make_unique<AudioRingBuffer>(32768);
+  // Size: enough to buffer ~2 seconds of WFM audio (32kHz * 2s = 64k samples)
+  // Larger buffer provides better tolerance for timing variations
+  audio_buffer_ = std::make_unique<AudioRingBuffer>(131072);
 
   thread_ = std::thread(&ReceiverWorker::RunLoop, this);
   ingest_thread_ = std::thread(&ReceiverWorker::IngestLoop, this);
@@ -597,8 +598,32 @@ void ReceiverWorker::IngestLoop() {
                          ch.frequency_hz);
           } else {
             // Write demodulated audio to ring buffer for output thread to consume
+            // Implement backpressure: if buffer is full, sleep briefly instead of dropping samples
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
-              audio_buffer_->Write(demod_pcm.data(), demod_pcm.size());
+              size_t samples_written = 0;
+              size_t to_write = demod_pcm.size();
+              size_t attempts = 0;
+              
+              while (samples_written < to_write && running_.load() && attempts < 10) {
+                size_t written_now = audio_buffer_->Write(
+                    demod_pcm.data() + samples_written, 
+                    to_write - samples_written);
+                samples_written += written_now;
+                
+                if (samples_written < to_write) {
+                  // Buffer full, apply backpressure - sleep briefly and retry
+                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  ++attempts;
+                }
+              }
+              
+              if (samples_written < to_write) {
+                // Still couldn't write all samples - log as warning
+                PublishEvent(EventKind::kWarning, 
+                  FormatRuntimeError("audio buffer overflow (ingest)", 
+                    "dropped " + std::to_string(to_write - samples_written) + " samples"),
+                  ch.frequency_hz);
+              }
             }
           }
         }
@@ -646,6 +671,9 @@ void ReceiverWorker::RunLoop() {
 
   uint64_t demod_ok_blocks = 0;
   uint64_t demod_empty_blocks = 0;
+
+  bool buffer_primed = false;
+  uint32_t last_buffer_primed_sr_hz = 0;
 
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
   auto next_frame_at = std::chrono::steady_clock::now();
@@ -702,6 +730,19 @@ void ReceiverWorker::RunLoop() {
       continue;
     }
 
+    // Pre-buffering: Wait for buffer to have at least 2 frames worth of samples before starting
+    // This avoids early dropouts when IngestLoop is still ramping up
+    static bool buffer_primed = false;
+    if (!buffer_primed && audio_buffer_ != nullptr) {
+      const size_t minimum_prefill = frame_samples * 2;  // 2 frames
+      if (audio_buffer_->AvailableForRead() < minimum_prefill) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;  // Wait more
+      }
+      buffer_primed = true;
+      PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
+    }
+
     if (!squelch_open_emitted && mode == RadioMode::kScanList) {
       std::ostringstream opened;
       opened << "SCAN squelch OPEN ch=" << ch.label << " idx=" << ch.index
@@ -726,8 +767,30 @@ void ReceiverWorker::RunLoop() {
       size_t frame_filled = 0;
 
       // Read from ring buffer (populated by IngestLoop)
-      if (audio_buffer_ != nullptr) {
-        frame_filled = audio_buffer_->Read(frame.pcm_s16le.data(), frame_samples);
+      // Implement adaptive dropout mitigation: if buffer is low, retry after a short sleep
+      // instead of immediately padding with zeros
+      size_t read_attempts = 0;
+      const size_t max_read_attempts = 3;
+      const size_t critical_level = frame_samples / 2;  // If buffer < 0.5 frames, it's critical
+      
+      while (frame_filled < frame_samples && read_attempts < max_read_attempts && audio_buffer_ != nullptr) {
+        size_t available = audio_buffer_->AvailableForRead();
+        size_t to_read = std::min(frame_samples - frame_filled, available);
+        
+        if (to_read > 0) {
+          frame_filled += audio_buffer_->Read(
+              frame.pcm_s16le.data() + frame_filled, 
+              to_read);
+        }
+        
+        if (frame_filled < frame_samples && available < critical_level) {
+          // Buffer is critically low and we need more samples
+          // Give IngestLoop a chance to fill it
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          ++read_attempts;
+        } else {
+          break;  // Either we got enough or buffer is empty
+        }
       }
 
       if (frame_filled < frame_samples) {
