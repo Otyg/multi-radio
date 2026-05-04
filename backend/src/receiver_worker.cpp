@@ -21,6 +21,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
+constexpr uint32_t kWfmMaxRuntimeSampleRateHz = 1024000;
 constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kAudioSampleRateHzNfm = 12000;
 constexpr uint32_t kAudioSampleRateHzWfm = 48000;
@@ -457,6 +458,8 @@ void ReceiverWorker::RunLoop() {
   bool device_opened = false;
   uint32_t configured_frequency_hz = 0;
   uint32_t configured_sample_rate_hz = 0;
+  uint32_t last_requested_sample_rate_hz = 0;
+  uint32_t last_effective_sample_rate_hz = 0;
   uint32_t configured_hardware_bandwidth_hz = 0;
   int configured_gain_tenth_db = std::numeric_limits<int>::min();
   bool squelch_open_emitted = false;
@@ -483,6 +486,24 @@ void ReceiverWorker::RunLoop() {
                                                  static_cast<int64_t>(std::numeric_limits<uint32_t>::max()));
     const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
+    const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
+    const uint32_t effective_sample_rate_hz =
+        (ch.modulation == Modulation::kWfm)
+            ? std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz)
+            : requested_sample_rate_hz;
+    if (effective_sample_rate_hz != requested_sample_rate_hz &&
+        (last_requested_sample_rate_hz != requested_sample_rate_hz ||
+         last_effective_sample_rate_hz != effective_sample_rate_hz)) {
+      std::ostringstream sr_msg;
+      sr_msg << "WFM sample-rate capped from " << requested_sample_rate_hz
+             << " to " << effective_sample_rate_hz << " Hz for real-time stability";
+      PublishEvent(EventKind::kInfo, sr_msg.str(), ch.frequency_hz);
+      last_requested_sample_rate_hz = requested_sample_rate_hz;
+      last_effective_sample_rate_hz = effective_sample_rate_hz;
+    } else if (effective_sample_rate_hz == requested_sample_rate_hz) {
+      last_requested_sample_rate_hz = requested_sample_rate_hz;
+      last_effective_sample_rate_hz = effective_sample_rate_hz;
+    }
     const size_t frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
     if (frame_samples == 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -515,8 +536,8 @@ void ReceiverWorker::RunLoop() {
         PublishEvent(EventKind::kInfo, "rtl device opened", ch.frequency_hz);
       }
 
-      if (configured_sample_rate_hz != config.sample_rate_hz) {
-        if (!device_->SetSampleRateHz(config.sample_rate_hz, &error)) {
+      if (configured_sample_rate_hz != effective_sample_rate_hz) {
+        if (!device_->SetSampleRateHz(effective_sample_rate_hz, &error)) {
           PublishEvent(EventKind::kError, FormatRuntimeError("set sample rate", error), ch.frequency_hz);
           {
             std::lock_guard<std::mutex> lock(mu_);
@@ -525,7 +546,7 @@ void ReceiverWorker::RunLoop() {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
           continue;
         }
-        configured_sample_rate_hz = config.sample_rate_hz;
+        configured_sample_rate_hz = effective_sample_rate_hz;
       }
 
       if (configured_hardware_bandwidth_hz != config.hardware_bandwidth_hz) {
@@ -592,7 +613,7 @@ void ReceiverWorker::RunLoop() {
       }
       have_iq = true;
     } else {
-      iq_block = BuildSyntheticIqBlock(config.sample_rate_hz, tuned_frequency_hz, iq_sample_index);
+      iq_block = BuildSyntheticIqBlock(effective_sample_rate_hz, tuned_frequency_hz, iq_sample_index);
       have_iq = true;
     }
 
@@ -649,7 +670,7 @@ void ReceiverWorker::RunLoop() {
         }
       } else {
         const uint32_t demod_input_sr_hz =
-            iq_block.sample_rate_hz != 0 ? iq_block.sample_rate_hz : config.sample_rate_hz;
+            iq_block.sample_rate_hz != 0 ? iq_block.sample_rate_hz : effective_sample_rate_hz;
         const bool demod_reconfigure = !fm_demod_configured || fm_demod_input_sr_hz != demod_input_sr_hz ||
                                        fm_demod_audio_sr_hz != audio_sample_rate_hz ||
                                        fm_demod_channel_bw_hz != config.channel_bandwidth_hz ||
@@ -785,7 +806,8 @@ void ReceiverWorker::RunLoop() {
                    << " rev=" << kAudioPipelineRevision
                    << " mod=" << ModulationToken(ch.modulation)
                    << " sr=" << audio_sample_rate_hz
-                   << " cfg_sr=" << config.sample_rate_hz
+                   << " cfg_sr=" << requested_sample_rate_hz
+                   << " run_sr=" << effective_sample_rate_hz
                    << " iq_sr=" << iq_sample_rate_hz
                    << " iq_est_sr=" << iq_sample_rate_hz
                    << " iq_lock=0"
@@ -817,7 +839,7 @@ void ReceiverWorker::RunLoop() {
       PublishEvent(EventKind::kInfo, audio_status.str(), ch.frequency_hz, false);
 
       std::ostringstream iq_status;
-      const double configured_iq_sample_rate_hz = static_cast<double>(config.sample_rate_hz);
+      const double configured_iq_sample_rate_hz = static_cast<double>(effective_sample_rate_hz);
       const double block_sr_hz = static_cast<double>(iq_sample_rate_hz);
       const double block_sr_abs_error_hz = std::abs(block_sr_hz - configured_iq_sample_rate_hz);
       const double block_sr_rel_error = (configured_iq_sample_rate_hz <= 0.0)
@@ -914,6 +936,7 @@ void ReceiverWorker::RunLoop() {
       iq_status << "IQ_STATS idx=" << ch.index
                 << " mod=" << ModulationToken(ch.modulation)
                 << " cfg_sr=" << config.sample_rate_hz
+                << " run_sr=" << effective_sample_rate_hz
                 << " meas_sr=" << FormatDouble(iq_measured_sample_rate_hz, 0)
                 << " block_sr=" << iq_sample_rate_hz
                 << " tuned_hz=" << tuned_frequency_hz
