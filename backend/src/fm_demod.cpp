@@ -31,9 +31,16 @@ bool IsFm(Modulation modulation) {
 
 uint32_t TargetChannelSampleRateHz(Modulation modulation, uint32_t channel_bandwidth_hz,
                                    uint32_t input_sample_rate_hz) {
-  const uint32_t modulation_floor_hz = modulation == Modulation::kWfm ? 200000U : 64000U;
-  const uint32_t requested_hz = std::max(channel_bandwidth_hz, modulation_floor_hz);
-  const uint32_t expanded_hz = std::max(requested_hz, channel_bandwidth_hz * 4U);
+  if (modulation == Modulation::kWfm) {
+    // Keep the WFM demod channel rate moderate to avoid CPU starvation that
+    // causes audible pulsing from concealment in real-time playback.
+    const uint32_t requested_hz = std::max<uint32_t>(220000U, channel_bandwidth_hz + 60000U);
+    const uint32_t capped_hz = std::min<uint32_t>(requested_hz, 320000U);
+    return std::clamp(capped_hz, 48000U, std::max(48000U, input_sample_rate_hz));
+  }
+
+  const uint32_t requested_hz = std::max(channel_bandwidth_hz, 64000U);
+  const uint32_t expanded_hz = std::max(requested_hz, channel_bandwidth_hz * 2U);
   return std::clamp(expanded_hz, 48000U, std::max(48000U, input_sample_rate_hz));
 }
 
