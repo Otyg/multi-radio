@@ -673,8 +673,6 @@ void ReceiverWorker::RunLoop() {
   uint64_t demod_empty_blocks = 0;
 
   bool buffer_primed = false;
-  uint32_t last_buffer_primed_frequency_hz = 0;
-  Modulation last_buffer_primed_modulation = Modulation::kNfm;
   uint32_t last_buffer_primed_sr_hz = 0;
 
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
@@ -732,26 +730,9 @@ void ReceiverWorker::RunLoop() {
       continue;
     }
 
-    const bool channel_changed_after_prime =
-        buffer_primed &&
-        (last_buffer_primed_frequency_hz != tuned_frequency_hz ||
-         last_buffer_primed_modulation != ch.modulation ||
-         last_buffer_primed_sr_hz != audio_sample_rate_hz);
-    if (channel_changed_after_prime) {
-      if (audio_buffer_ != nullptr) {
-        audio_buffer_->Clear();
-      }
-      buffer_primed = false;
-      std::ostringstream reset_msg;
-      reset_msg << "Audio buffer reset after retune/mod change"
-                << " freq_hz=" << tuned_frequency_hz
-                << " mod=" << ModulationToken(ch.modulation)
-                << " audio_sr=" << audio_sample_rate_hz;
-      PublishEvent(EventKind::kInfo, reset_msg.str(), ch.frequency_hz);
-    }
-
     // Pre-buffering: Wait for buffer to have at least 2 frames worth of samples before starting
     // This avoids early dropouts when IngestLoop is still ramping up
+    static bool buffer_primed = false;
     if (!buffer_primed && audio_buffer_ != nullptr) {
       const size_t minimum_prefill = frame_samples * 2;  // 2 frames
       if (audio_buffer_->AvailableForRead() < minimum_prefill) {
@@ -759,9 +740,6 @@ void ReceiverWorker::RunLoop() {
         continue;  // Wait more
       }
       buffer_primed = true;
-      last_buffer_primed_frequency_hz = tuned_frequency_hz;
-      last_buffer_primed_modulation = ch.modulation;
-      last_buffer_primed_sr_hz = audio_sample_rate_hz;
       PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
     }
 
