@@ -1291,8 +1291,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   {
     QSettings settings("multi-radio", "multi-radio-client");
     settings.beginGroup("visualization");
+    const bool auto_noise_reduction = settings.value("auto_noise_reduction", false).toBool();
+    const bool noise_floor_filter_enabled =
+        settings.value("noise_floor_filter_enabled", false).toBool();
+    const double noise_floor_db =
+        std::clamp(settings.value("noise_floor_db", -30.0).toDouble(), -120.0, 0.0);
     iq_visual_dc_suppression_enabled_ = settings.value("iq_dc_suppression", true).toBool();
     settings.endGroup();
+    signal_visualization_->SetAutoNoiseReductionEnabled(auto_noise_reduction);
+    signal_visualization_->SetNoiseFloorFilterEnabled(noise_floor_filter_enabled);
+    signal_visualization_->SetNoiseFloorDb(noise_floor_db);
   }
 
   event_log_ = new QPlainTextEdit(central);
@@ -3134,6 +3142,15 @@ void MainWindow::OpenVisualizationSettingsDialog() {
 
   auto* auto_noise_checkbox = new QCheckBox("Waterfall: hide bins at/below mean", &dialog);
   auto_noise_checkbox->setChecked(signal_visualization_->AutoNoiseReductionEnabled());
+  auto* noise_floor_checkbox = new QCheckBox("Filter bins below noise floor", &dialog);
+  noise_floor_checkbox->setChecked(signal_visualization_->NoiseFloorFilterEnabled());
+  auto* noise_floor_spin = new QDoubleSpinBox(&dialog);
+  noise_floor_spin->setDecimals(1);
+  noise_floor_spin->setRange(-120.0, 0.0);
+  noise_floor_spin->setSingleStep(1.0);
+  noise_floor_spin->setSuffix(" dBFS");
+  noise_floor_spin->setValue(signal_visualization_->NoiseFloorDb());
+  noise_floor_spin->setEnabled(noise_floor_checkbox->isChecked());
   auto* iq_dc_suppress_checkbox = new QCheckBox("Receiver IQ: suppress DC in spectrum", &dialog);
   iq_dc_suppress_checkbox->setChecked(iq_visual_dc_suppression_enabled_);
 
@@ -3141,7 +3158,10 @@ void MainWindow::OpenVisualizationSettingsDialog() {
   layout->addRow("Frequency start", start_hz_spin);
   layout->addRow("Frequency end", end_hz_spin);
   layout->addRow("Auto noise reduction", auto_noise_checkbox);
+  layout->addRow("Noise floor filter", noise_floor_checkbox);
+  layout->addRow("Noise floor level", noise_floor_spin);
   layout->addRow("IQ DC suppression", iq_dc_suppress_checkbox);
+  connect(noise_floor_checkbox, &QCheckBox::toggled, noise_floor_spin, &QWidget::setEnabled);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
   layout->addRow(buttons);
@@ -3156,21 +3176,30 @@ void MainWindow::OpenVisualizationSettingsDialog() {
   const double start_hz = start_hz_spin->value();
   const double end_hz = end_hz_spin->value();
   const bool auto_noise_reduction = auto_noise_checkbox->isChecked();
+  const bool noise_floor_filter_enabled = noise_floor_checkbox->isChecked();
+  const double noise_floor_db = noise_floor_spin->value();
   const bool iq_dc_suppression = iq_dc_suppress_checkbox->isChecked();
   iq_visual_dc_suppression_enabled_ = iq_dc_suppression;
   {
     QSettings settings("multi-radio", "multi-radio-client");
     settings.beginGroup("visualization");
+    settings.setValue("auto_noise_reduction", auto_noise_reduction);
+    settings.setValue("noise_floor_filter_enabled", noise_floor_filter_enabled);
+    settings.setValue("noise_floor_db", noise_floor_db);
     settings.setValue("iq_dc_suppression", iq_visual_dc_suppression_enabled_);
     settings.endGroup();
   }
   signal_visualization_->SetVisualizationSettings(fft_size, start_hz, end_hz);
   signal_visualization_->SetAutoNoiseReductionEnabled(auto_noise_reduction);
-  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz, waterfall-noise-filter=%4, iq-dc-suppress=%5")
+  signal_visualization_->SetNoiseFloorFilterEnabled(noise_floor_filter_enabled);
+  signal_visualization_->SetNoiseFloorDb(noise_floor_db);
+  AppendLog(QString("Updated visualization settings: FFT=%1, range=%2-%3 Hz, waterfall-noise-filter=%4, noise-floor=%5 (%6 dBFS), iq-dc-suppress=%7")
                 .arg(fft_size)
                 .arg(start_hz, 0, 'f', 0)
                 .arg(end_hz, 0, 'f', 0)
                 .arg(auto_noise_reduction ? "on" : "off")
+                .arg(noise_floor_filter_enabled ? "on" : "off")
+                .arg(noise_floor_db, 0, 'f', 1)
                 .arg(iq_dc_suppression ? "on" : "off"));
 }
 

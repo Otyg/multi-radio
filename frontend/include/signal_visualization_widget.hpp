@@ -35,7 +35,11 @@ class SignalVisualizationWidget : public QWidget {
                            double psd_peak_offset_hz, bool has_quality_score,
                            double quality_score_pct, bool has_signal_ok, bool signal_ok);
   void SetAutoNoiseReductionEnabled(bool enabled);
+  void SetNoiseFloorFilterEnabled(bool enabled);
+  void SetNoiseFloorDb(double noise_floor_db);
   bool AutoNoiseReductionEnabled() const;
+  bool NoiseFloorFilterEnabled() const;
+  double NoiseFloorDb() const;
   SpectrumSource CurrentSpectrumSource() const;
   int FftSize() const;
   double FrequencyStartHz() const;
@@ -122,9 +126,11 @@ class SignalVisualizationWidget : public QWidget {
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
                                 double frequency_start_hz, double frequency_end_hz,
                                 bool suppress_below_mean, bool has_squelch_threshold_db,
-                                double squelch_threshold_db);
+                                double squelch_threshold_db, bool has_noise_floor_threshold_db,
+                                double noise_floor_threshold_db);
   static void DrawHeatmap(QPainter* painter, const QRect& area, const QVector<QVector<double>>& rows,
-                          bool newest_at_top, bool rainbow_colors, bool suppress_below_mean);
+                          bool newest_at_top, bool rainbow_colors, bool suppress_below_mean,
+                          bool has_noise_floor_threshold_db, double noise_floor_threshold_db);
 
   bool RequireExplicitSelection() const;
   DisplayState BuildDisplayState() const;
@@ -147,6 +153,8 @@ class SignalVisualizationWidget : public QWidget {
   double frequency_end_hz_ = 20000.0;
   SpectrumSource spectrum_source_ = SpectrumSource::kDemodulated;
   bool auto_noise_reduction_enabled_ = false;
+  bool noise_floor_filter_enabled_ = false;
+  double noise_floor_db_ = -30.0;
   QTimer frame_timer_;
 };
 

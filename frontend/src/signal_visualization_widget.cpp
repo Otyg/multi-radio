@@ -197,8 +197,33 @@ void SignalVisualizationWidget::SetAutoNoiseReductionEnabled(bool enabled) {
   update();
 }
 
+void SignalVisualizationWidget::SetNoiseFloorFilterEnabled(bool enabled) {
+  if (noise_floor_filter_enabled_ == enabled) {
+    return;
+  }
+  noise_floor_filter_enabled_ = enabled;
+  update();
+}
+
+void SignalVisualizationWidget::SetNoiseFloorDb(double noise_floor_db) {
+  const double clamped_db = std::clamp(noise_floor_db, -120.0, 0.0);
+  if (std::abs(noise_floor_db_ - clamped_db) < 0.05) {
+    return;
+  }
+  noise_floor_db_ = clamped_db;
+  update();
+}
+
 bool SignalVisualizationWidget::AutoNoiseReductionEnabled() const {
   return auto_noise_reduction_enabled_;
+}
+
+bool SignalVisualizationWidget::NoiseFloorFilterEnabled() const {
+  return noise_floor_filter_enabled_;
+}
+
+double SignalVisualizationWidget::NoiseFloorDb() const {
+  return noise_floor_db_;
 }
 
 SignalVisualizationWidget::SpectrumSource SignalVisualizationWidget::CurrentSpectrumSource() const {
@@ -298,9 +323,10 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                  display.signal_ok);
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
                     display.frequency_start_hz, display.frequency_end_hz, false,
-                    display.has_squelch_threshold_db, display.squelch_threshold_db);
+                    display.has_squelch_threshold_db, display.squelch_threshold_db,
+                    noise_floor_filter_enabled_, noise_floor_db_);
   DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true,
-              auto_noise_reduction_enabled_);
+              auto_noise_reduction_enabled_, noise_floor_filter_enabled_, noise_floor_db_);
 }
 
 void SignalVisualizationWidget::OnFrameTick() {
@@ -579,7 +605,9 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
                                                   const QVector<double>& spectrum, double frequency_start_hz,
                                                   double frequency_end_hz, bool suppress_below_mean,
                                                   bool has_squelch_threshold_db,
-                                                  double squelch_threshold_db) {
+                                                  double squelch_threshold_db,
+                                                  bool has_noise_floor_threshold_db,
+                                                  double noise_floor_threshold_db) {
   if (painter == nullptr || spectrum.isEmpty()) {
     return;
   }
@@ -602,6 +630,8 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   auto amp_to_db = [](double amp) {
     return kMinDb + std::pow(Clamp01(amp), 0.42) * (kMaxDb - kMinDb);
   };
+  const double clamped_noise_floor_db =
+      std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb);
 
   const int db_ticks[] = {-120, -90, -60, -30, 0};
   painter->setPen(QPen(QColor(48, 58, 78), 1));
@@ -646,6 +676,23 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
     painter->drawText(label_rect.adjusted(5, 0, -5, 0), Qt::AlignLeft | Qt::AlignVCenter, label);
   }
 
+  if (has_noise_floor_threshold_db) {
+    const int y = db_to_y(clamped_noise_floor_db);
+    painter->setPen(QPen(QColor(120, 136, 160), 1, Qt::DashLine));
+    painter->drawLine(plot.left(), y, plot.right(), y);
+
+    const QString label = QString("Noise floor %1 dB").arg(clamped_noise_floor_db, 0, 'f', 1);
+    const QFontMetrics metrics(painter->font());
+    const int label_width = metrics.horizontalAdvance(label) + 10;
+    const int label_height = metrics.height() + 2;
+    const int x = plot.left() + 2;
+    const int y_top = std::clamp(y + 2, plot.top() + 2, plot.bottom() - label_height - 2);
+    const QRect label_rect(x, y_top, label_width, label_height);
+    painter->fillRect(label_rect, QColor(17, 22, 31, 220));
+    painter->setPen(QColor(170, 184, 205));
+    painter->drawText(label_rect.adjusted(5, 0, -5, 0), Qt::AlignLeft | Qt::AlignVCenter, label);
+  }
+
   double mean_amplitude = 0.0;
   if (suppress_below_mean && !spectrum.isEmpty()) {
     for (const double value : spectrum) {
@@ -662,9 +709,13 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
       segment_open = false;
       continue;
     }
+    const double db = amp_to_db(amplitude);
+    if (has_noise_floor_threshold_db && db <= clamped_noise_floor_db) {
+      segment_open = false;
+      continue;
+    }
     const double t = (spectrum.size() <= 1) ? 0.0 : static_cast<double>(i) / (spectrum.size() - 1);
     const int x = plot.left() + static_cast<int>(t * (plot.width() - 1));
-    const double db = amp_to_db(amplitude);
     const int y = db_to_y(db);
     if (!segment_open) {
       path.moveTo(x, y);
@@ -683,7 +734,9 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
 
 void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area,
                                             const QVector<QVector<double>>& rows, bool newest_at_top,
-                                            bool rainbow_colors, bool suppress_below_mean) {
+                                            bool rainbow_colors, bool suppress_below_mean,
+                                            bool has_noise_floor_threshold_db,
+                                            double noise_floor_threshold_db) {
   if (painter == nullptr) {
     return;
   }
@@ -691,6 +744,13 @@ void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area
   painter->save();
   painter->setClipRect(area);
   painter->fillRect(area, QColor(11, 16, 24));
+  constexpr double kMinDb = -120.0;
+  constexpr double kMaxDb = 0.0;
+  auto amp_to_db = [](double amp) {
+    return kMinDb + std::pow(Clamp01(amp), 0.42) * (kMaxDb - kMinDb);
+  };
+  const double clamped_noise_floor_db =
+      std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb);
 
   if (!rows.isEmpty() && !rows[0].isEmpty()) {
     const int row_count = rows.size();
@@ -712,6 +772,9 @@ void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area
       for (int col = 0; col < col_count; ++col) {
         const double cell_value = Clamp01(rows[src_row][col]);
         if (suppress_below_mean && cell_value <= row_mean) {
+          continue;
+        }
+        if (has_noise_floor_threshold_db && amp_to_db(cell_value) <= clamped_noise_floor_db) {
           continue;
         }
         const QColor color = rainbow_colors ? RainbowColor(cell_value) : HeatColor(cell_value);
