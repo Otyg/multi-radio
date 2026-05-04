@@ -431,7 +431,6 @@ void ReceiverWorker::IngestLoop() {
   uint32_t fm_demod_audio_sr_hz = 0;
   uint32_t fm_demod_channel_bw_hz = 0;
   Modulation fm_demod_modulation = Modulation::kNfm;
-  uint32_t iq_sample_rate_hz = 0;
   uint32_t configured_frequency_hz = 0;
   uint32_t configured_sample_rate_hz = 0;
   uint32_t last_requested_sample_rate_hz = 0;
@@ -439,6 +438,9 @@ void ReceiverWorker::IngestLoop() {
   uint32_t configured_hardware_bandwidth_hz = 0;
   int configured_gain_tenth_db = std::numeric_limits<int>::min();
   bool device_opened = false;
+  auto next_iq_visualization_at = std::chrono::steady_clock::now();
+  uint64_t iq_sequence = 0;
+  uint64_t iq_sample_index = 0;
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -554,6 +556,45 @@ void ReceiverWorker::IngestLoop() {
       have_iq = true;
     }
 
+    if (have_iq) {
+      uint64_t block_components = 0;
+      uint64_t block_clipped = 0;
+      double block_power = 0.0;
+      for (int16_t s : iq_block.interleaved_iq) {
+        const double norm = static_cast<double>(s) / 32768.0;
+        block_power += norm * norm;
+        ++block_components;
+        if (s >= kIqClipThresholdS16 || s <= -kIqClipThresholdS16) {
+          ++block_clipped;
+        }
+      }
+      const uint64_t block_samples = iq_block.interleaved_iq.size() / 2U;
+      const uint32_t block_sr_hz =
+          iq_block.sample_rate_hz != 0 ? iq_block.sample_rate_hz : effective_sample_rate_hz;
+
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        iq_shared_.sample_rate_hz = block_sr_hz;
+        iq_shared_.latest_block = iq_block;
+        iq_shared_.have_latest_block = true;
+        iq_shared_.window_samples += block_samples;
+        iq_shared_.window_components += block_components;
+        iq_shared_.window_clipped_components += block_clipped;
+        iq_shared_.window_component_power += block_power;
+        iq_shared_.interleaved_samples += static_cast<uint64_t>(iq_block.interleaved_iq.size());
+      }
+
+      const auto iq_now = std::chrono::steady_clock::now();
+      if (iq_now >= next_iq_visualization_at) {
+        IqFrame iq_frame = BuildIqFrame(iq_block, receiver_id_, ch.frequency_hz,
+                                        iq_sequence++, iq_sample_index);
+        event_bus_->PublishIqFrame(iq_frame);
+        next_iq_visualization_at =
+            iq_now + std::chrono::milliseconds(kIqVisualizationIntervalMs);
+      }
+      iq_sample_index += block_samples;
+    }
+
     if (have_iq && IsFmModulation(ch.modulation)) {
       if (!fm_demod_available) {
         if (!fm_demod_warned_unavailable) {
@@ -647,20 +688,10 @@ void ReceiverWorker::RunLoop() {
   const SignalHealthThresholds& thresholds = GlobalSignalHealthThresholds();
   uint64_t audio_sequence = 0;
   uint64_t audio_sample_index = 0;
-  uint64_t iq_sequence = 0;
-  uint64_t iq_sample_index = 0;
   uint64_t generated_samples = 0;
   uint64_t published_samples = 0;
   uint64_t published_frames = 0;
   uint64_t conceal_samples = 0;
-  uint64_t iq_interleaved_samples = 0;
-  uint32_t iq_sample_rate_hz = 0;
-  uint64_t iq_window_samples = 0;
-  uint64_t iq_window_components = 0;
-  uint64_t iq_window_clipped_components = 0;
-  double iq_window_component_power = 0.0;
-  IQSampleBlock latest_iq_block;
-  bool have_latest_iq_block = false;
   bool have_prev_iq_health = false;
   double prev_iq_snr_db = 0.0;
   double prev_iq_level_dbfs = -120.0;
@@ -672,9 +703,6 @@ void ReceiverWorker::RunLoop() {
   uint64_t demod_ok_blocks = 0;
   uint64_t demod_empty_blocks = 0;
 
-  bool buffer_primed = false;
-  uint32_t last_buffer_primed_sr_hz = 0;
-
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
   auto next_frame_at = std::chrono::steady_clock::now();
   auto stats_started_at = next_frame_at;
@@ -684,7 +712,6 @@ void ReceiverWorker::RunLoop() {
   uint32_t last_effective_sample_rate_hz = 0;
   bool squelch_open_emitted = false;
   bool thresholds_emitted = false;
-  auto next_iq_visualization_at = std::chrono::steady_clock::now();
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -834,25 +861,36 @@ void ReceiverWorker::RunLoop() {
         thresholds_emitted = true;
       }
 
+      IqSharedState iq_snap;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        iq_snap = iq_shared_;
+        iq_shared_.window_samples = 0;
+        iq_shared_.window_components = 0;
+        iq_shared_.window_clipped_components = 0;
+        iq_shared_.window_component_power = 0.0;
+        iq_shared_.interleaved_samples = 0;
+      }
+
       const double window_s =
           std::max(1.0e-3, std::chrono::duration<double>(now - stats_started_at).count());
       const uint64_t window_ms = static_cast<uint64_t>(std::llround(window_s * 1000.0));
       const double gen_hz = static_cast<double>(generated_samples) / window_s;
       const double pub_hz = static_cast<double>(published_samples) / window_s;
-      const double iq_measured_sample_rate_hz = static_cast<double>(iq_window_samples) / window_s;
-      const double iq_rms = (iq_window_components == 0)
+      const double iq_measured_sample_rate_hz = static_cast<double>(iq_snap.window_samples) / window_s;
+      const double iq_rms = (iq_snap.window_components == 0)
                                 ? 0.0
-                                : std::sqrt(iq_window_component_power /
-                                            static_cast<double>(iq_window_components));
+                                : std::sqrt(iq_snap.window_component_power /
+                                            static_cast<double>(iq_snap.window_components));
       const double iq_level_dbfs =
           20.0 * std::log10(std::max(1.0e-9, std::min(1.0, iq_rms)));
       const double iq_clip_pct =
-          (iq_window_components == 0)
+          (iq_snap.window_components == 0)
               ? 0.0
-              : (100.0 * static_cast<double>(iq_window_clipped_components) /
-                 static_cast<double>(iq_window_components));
-      const PsdSummary psd = have_latest_iq_block
-                                 ? EstimatePsdSummary(latest_iq_block.interleaved_iq, iq_sample_rate_hz)
+              : (100.0 * static_cast<double>(iq_snap.window_clipped_components) /
+                 static_cast<double>(iq_snap.window_components));
+      const PsdSummary psd = iq_snap.have_latest_block
+                                 ? EstimatePsdSummary(iq_snap.latest_block.interleaved_iq, iq_snap.sample_rate_hz)
                                  : PsdSummary{};
 
       std::ostringstream audio_status;
@@ -863,16 +901,16 @@ void ReceiverWorker::RunLoop() {
                    << " sr=" << audio_sample_rate_hz
                    << " cfg_sr=" << requested_sample_rate_hz
                    << " run_sr=" << effective_sample_rate_hz
-                   << " iq_sr=" << iq_sample_rate_hz
-                   << " iq_est_sr=" << iq_sample_rate_hz
+                   << " iq_sr=" << iq_snap.sample_rate_hz
+                   << " iq_est_sr=" << iq_snap.sample_rate_hz
                    << " iq_lock=0"
-                   << " iq_lock_sr=" << iq_sample_rate_hz
+                   << " iq_lock_sr=" << iq_snap.sample_rate_hz
                    << " win_ms=" << window_ms
                    << " gen_ratio=1.000"
                    << " rate_corr=1.0000"
                    << " gen_hz=" << FormatDouble(gen_hz, 1)
                    << " pub_hz=" << FormatDouble(pub_hz, 1)
-                   << " iq_n=" << iq_interleaved_samples
+                   << " iq_n=" << iq_snap.interleaved_samples
                    << " gate=1"
                    << " squelch=1"
                    << " signal_db=" << FormatDouble(iq_level_dbfs, 1)
@@ -892,7 +930,7 @@ void ReceiverWorker::RunLoop() {
 
       std::ostringstream iq_status;
       const double configured_iq_sample_rate_hz = static_cast<double>(effective_sample_rate_hz);
-      const double block_sr_hz = static_cast<double>(iq_sample_rate_hz);
+      const double block_sr_hz = static_cast<double>(iq_snap.sample_rate_hz);
       const double block_sr_abs_error_hz = std::abs(block_sr_hz - configured_iq_sample_rate_hz);
       const double block_sr_rel_error = (configured_iq_sample_rate_hz <= 0.0)
                                             ? 0.0
@@ -990,9 +1028,9 @@ void ReceiverWorker::RunLoop() {
                 << " cfg_sr=" << config.sample_rate_hz
                 << " run_sr=" << effective_sample_rate_hz
                 << " meas_sr=" << FormatDouble(iq_measured_sample_rate_hz, 0)
-                << " block_sr=" << iq_sample_rate_hz
+                << " block_sr=" << iq_snap.sample_rate_hz
                 << " tuned_hz=" << tuned_frequency_hz
-                << " center_hz=" << (have_latest_iq_block ? latest_iq_block.center_frequency_hz : 0U)
+                << " center_hz=" << (iq_snap.have_latest_block ? iq_snap.latest_block.center_frequency_hz : 0U)
                 << " level_dbfs=" << FormatDouble(iq_level_dbfs, 1)
                 << " clip_pct=" << FormatDouble(iq_clip_pct, 2)
                 << " clip=" << ((iq_clip_pct >= 1.0) ? 1 : 0)
@@ -1014,7 +1052,7 @@ void ReceiverWorker::RunLoop() {
                 << " signal_ok=" << (signal_ok ? 1 : 0)
                 << " signal_status=" << signal_status
                 << " win_ms=" << window_ms
-                << " iq_n=" << iq_interleaved_samples;
+                << " iq_n=" << iq_snap.interleaved_samples;
       PublishEvent(EventKind::kInfo, iq_status.str(), ch.frequency_hz);
 
       generated_samples = 0;
@@ -1023,10 +1061,6 @@ void ReceiverWorker::RunLoop() {
       conceal_samples = 0;
       demod_ok_blocks = 0;
       demod_empty_blocks = 0;
-      iq_window_samples = 0;
-      iq_window_components = 0;
-      iq_window_clipped_components = 0;
-      iq_window_component_power = 0.0;
       stats_started_at = now;
       next_stats_at = now + std::chrono::milliseconds(kAudioStatsIntervalMs);
     }

@@ -54,6 +54,18 @@ class ReceiverWorker {
 
   // Ring buffer for audio samples (decouples ingest from output timing)
   std::unique_ptr<AudioRingBuffer> audio_buffer_;
+
+  struct IqSharedState {
+    uint32_t sample_rate_hz = 0;
+    IQSampleBlock latest_block;
+    bool have_latest_block = false;
+    uint64_t window_samples = 0;
+    uint64_t window_components = 0;
+    uint64_t window_clipped_components = 0;
+    double window_component_power = 0.0;
+    uint64_t interleaved_samples = 0;
+  };
+  IqSharedState iq_shared_;  // guarded by mu_
 };
 
 }  // namespace multi_radio
