@@ -21,7 +21,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kDefaultSampleRateHz = 2048000;
-constexpr uint32_t kWfmMaxRuntimeSampleRateHz = 1024000;
+constexpr uint32_t kWfmMaxRuntimeSampleRateHz = 768000;
 constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kAudioSampleRateHzNfm = 12000;
 // Keep WFM audio-rate moderate to stay real-time on typical CPUs.
