@@ -101,6 +101,9 @@ v1::EventKind ToProto(EventKind kind) {
 ModeConfig FromProto(const v1::ModeConfig& config) {
   ModeConfig out;
   out.fixed_frequency_hz = config.fixed_frequency_hz();
+  out.fixed_modulation = (config.fixed_modulation() == v1::MODULATION_UNSPECIFIED)
+                             ? Modulation::kWfm
+                             : FromProto(config.fixed_modulation());
   out.range_start_hz = config.range_start_hz();
   out.range_end_hz = config.range_end_hz();
   out.range_step_hz = config.range_step_hz();
@@ -135,6 +138,7 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
 
 void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_fixed_frequency_hz(config.fixed_frequency_hz);
+  out->set_fixed_modulation(ToProto(config.fixed_modulation));
   out->set_range_start_hz(config.range_start_hz);
   out->set_range_end_hz(config.range_end_hz);
   out->set_range_step_hz(config.range_step_hz);

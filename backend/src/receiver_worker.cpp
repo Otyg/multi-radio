@@ -6,11 +6,14 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "multi_radio/fm_demod.hpp"
 
 namespace multi_radio {
 
@@ -22,9 +25,7 @@ constexpr uint32_t kDefaultChannelBandwidthHz = 30000;
 constexpr uint32_t kAudioSampleRateHz = 8000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
-constexpr const char* kAudioPipelineRevision = "audio-v10-clean-slate";
-constexpr double kToneFrequencyHz = 1000.0;
-constexpr double kToneAmplitude = 9000.0;
+constexpr const char* kAudioPipelineRevision = "audio-v11-libliquid-fm";
 constexpr size_t kIqVisualizationMaxInterleavedSamples = 8192;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
 constexpr int16_t kIqClipThresholdS16 = 32256;
@@ -115,6 +116,9 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
   if (out.channel_bandwidth_hz == 0) {
     out.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
   }
+  if (out.fixed_modulation != Modulation::kNfm && out.fixed_modulation != Modulation::kWfm) {
+    out.fixed_modulation = Modulation::kWfm;
+  }
   return out;
 }
 
@@ -133,6 +137,10 @@ const char* ModulationToken(Modulation modulation) {
     default:
       return "NFM";
   }
+}
+
+bool IsFmModulation(Modulation modulation) {
+  return modulation == Modulation::kNfm || modulation == Modulation::kWfm;
 }
 
 std::string FormatDouble(double value, int precision) {
@@ -171,6 +179,7 @@ RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config) {
   }
 
   out.frequency_hz = config.fixed_frequency_hz;
+  out.modulation = config.fixed_modulation;
   if (out.frequency_hz <= 0.0 && !config.frequency_list_hz.empty()) {
     out.frequency_hz = config.frequency_list_hz.front();
   }
@@ -424,8 +433,21 @@ void ReceiverWorker::RunLoop() {
   int iq_good_windows = 0;
   int iq_bad_windows = 0;
   bool signal_ok_latched = false;
+  FmDemodulator fm_demod;
+  bool fm_demod_available = FmDemodulator::Available();
+  bool fm_demod_configured = false;
+  bool fm_demod_warned_unavailable = false;
+  uint32_t fm_demod_input_sr_hz = 0;
+  uint32_t fm_demod_audio_sr_hz = 0;
+  uint32_t fm_demod_channel_bw_hz = 0;
+  Modulation fm_demod_modulation = Modulation::kNfm;
+  std::deque<int16_t> audio_pending_pcm;
+  uint64_t demod_ok_blocks = 0;
+  uint64_t demod_empty_blocks = 0;
+  uint64_t demod_input_iq_samples = 0;
+  uint64_t demod_channelized_samples = 0;
+  uint64_t demod_audio_samples = 0;
 
-  double tone_phase = 0.0;
   const auto frame_interval = std::chrono::milliseconds(kAudioFrameIntervalMs);
   auto next_frame_at = std::chrono::steady_clock::now();
   auto stats_started_at = next_frame_at;
@@ -586,6 +608,65 @@ void ReceiverWorker::RunLoop() {
       }
     }
 
+    if (have_iq && IsFmModulation(ch.modulation)) {
+      if (!fm_demod_available) {
+        if (!fm_demod_warned_unavailable) {
+          PublishEvent(EventKind::kWarning, "FM demod unavailable: backend built without libliquid",
+                       ch.frequency_hz);
+          fm_demod_warned_unavailable = true;
+        }
+      } else {
+        const uint32_t demod_input_sr_hz =
+            iq_block.sample_rate_hz != 0 ? iq_block.sample_rate_hz : config.sample_rate_hz;
+        const bool demod_reconfigure = !fm_demod_configured || fm_demod_input_sr_hz != demod_input_sr_hz ||
+                                       fm_demod_audio_sr_hz != audio_sample_rate_hz ||
+                                       fm_demod_channel_bw_hz != config.channel_bandwidth_hz ||
+                                       fm_demod_modulation != ch.modulation;
+        if (demod_reconfigure) {
+          std::string demod_error;
+          if (!fm_demod.Configure(demod_input_sr_hz, audio_sample_rate_hz, ch.modulation,
+                                  config.channel_bandwidth_hz, &demod_error)) {
+            fm_demod_configured = false;
+            PublishEvent(EventKind::kWarning, FormatRuntimeError("configure fm demod", demod_error),
+                         ch.frequency_hz);
+          } else {
+            fm_demod_configured = true;
+            fm_demod_input_sr_hz = demod_input_sr_hz;
+            fm_demod_audio_sr_hz = audio_sample_rate_hz;
+            fm_demod_channel_bw_hz = config.channel_bandwidth_hz;
+            fm_demod_modulation = ch.modulation;
+            audio_pending_pcm.clear();
+            std::ostringstream demod_msg;
+            demod_msg << "FM demod configured mod=" << ModulationToken(ch.modulation)
+                      << " iq_sr=" << fm_demod_input_sr_hz << " audio_sr=" << fm_demod_audio_sr_hz
+                      << " bw=" << fm_demod_channel_bw_hz;
+            PublishEvent(EventKind::kInfo, demod_msg.str(), ch.frequency_hz);
+          }
+        }
+
+        if (fm_demod_configured) {
+          std::vector<int16_t> demod_pcm;
+          FmDemodProcessStats demod_stats;
+          std::string demod_error;
+          if (!fm_demod.ProcessIq(iq_block.interleaved_iq, &demod_pcm, &demod_stats, &demod_error)) {
+            PublishEvent(EventKind::kWarning, FormatRuntimeError("fm demod", demod_error), ch.frequency_hz);
+          } else {
+            demod_input_iq_samples += demod_stats.input_iq_samples;
+            demod_channelized_samples += demod_stats.channelized_samples;
+            demod_audio_samples += demod_stats.audio_samples;
+            generated_samples += static_cast<uint64_t>(demod_pcm.size());
+            for (const int16_t sample : demod_pcm) {
+              audio_pending_pcm.push_back(sample);
+            }
+          }
+        }
+      }
+    } else if (!IsFmModulation(ch.modulation)) {
+      fm_demod.Reset();
+      fm_demod_configured = false;
+      audio_pending_pcm.clear();
+    }
+
     AudioFrame frame;
     frame.unix_ms = UnixMillisNow();
     frame.receiver_id = receiver_id_;
@@ -594,17 +675,24 @@ void ReceiverWorker::RunLoop() {
     frame.sequence = audio_sequence++;
     frame.sample_index = audio_sample_index;
     frame.pcm_s16le.resize(frame_samples);
-
-    const double phase_step = (2.0 * kPi * kToneFrequencyHz) / static_cast<double>(audio_sample_rate_hz);
-    for (size_t i = 0; i < frame_samples; ++i) {
-      frame.pcm_s16le[i] = static_cast<int16_t>(std::lrint(kToneAmplitude * std::sin(tone_phase)));
-      tone_phase += phase_step;
-      if (tone_phase >= 2.0 * kPi) {
-        tone_phase -= 2.0 * kPi;
+    size_t frame_filled = 0;
+    while (frame_filled < frame_samples && !audio_pending_pcm.empty()) {
+      frame.pcm_s16le[frame_filled] = audio_pending_pcm.front();
+      audio_pending_pcm.pop_front();
+      ++frame_filled;
+    }
+    if (frame_filled < frame_samples) {
+      for (size_t i = frame_filled; i < frame_samples; ++i) {
+        frame.pcm_s16le[i] = 0;
       }
+      conceal_samples += static_cast<uint64_t>(frame_samples - frame_filled);
+    }
+    if (frame_filled == 0) {
+      ++demod_empty_blocks;
+    } else {
+      ++demod_ok_blocks;
     }
 
-    generated_samples += static_cast<uint64_t>(frame_samples);
     published_samples += static_cast<uint64_t>(frame_samples);
     ++published_frames;
     audio_sample_index += static_cast<uint64_t>(frame_samples);
@@ -672,19 +760,22 @@ void ReceiverWorker::RunLoop() {
                    << " iq_n=" << iq_interleaved_samples
                    << " gate=1"
                    << " squelch=1"
-                   << " signal_db=-20.0"
+                   << " signal_db=" << FormatDouble(iq_level_dbfs, 1)
                    << " blocks=" << published_frames
-                   << " gate_open_blocks=" << published_frames
-                   << " demod_ok=" << published_frames
-                   << " demod_empty=0"
+                   << " gate_open_blocks=" << demod_ok_blocks
+                   << " demod_ok=" << demod_ok_blocks
+                   << " demod_empty=" << demod_empty_blocks
                    << " gen_samples=" << generated_samples
                    << " pub_frames=" << published_frames
                    << " pub_samples=" << published_samples
-                   << " pending_samples=0"
+                   << " pending_samples=" << audio_pending_pcm.size()
                    << " conceal_samples=" << conceal_samples
                    << " clears=0"
                    << " flush_frames=0"
-                   << " flush_samples=0";
+                   << " flush_samples=0"
+                   << " demod_in_iq=" << demod_input_iq_samples
+                   << " demod_ch=" << demod_channelized_samples
+                   << " demod_audio=" << demod_audio_samples;
       PublishEvent(EventKind::kInfo, audio_status.str(), ch.frequency_hz, false);
 
       std::ostringstream iq_status;
@@ -817,6 +908,11 @@ void ReceiverWorker::RunLoop() {
       published_samples = 0;
       published_frames = 0;
       conceal_samples = 0;
+      demod_ok_blocks = 0;
+      demod_empty_blocks = 0;
+      demod_input_iq_samples = 0;
+      demod_channelized_samples = 0;
+      demod_audio_samples = 0;
       iq_window_samples = 0;
       iq_window_components = 0;
       iq_window_clipped_components = 0;

@@ -120,6 +120,22 @@ bool TryParseCsvModulation(const QString& text, v1::Modulation* out) {
   return false;
 }
 
+v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
+  if (combo == nullptr) {
+    return v1::MODULATION_WFM;
+  }
+  bool value_ok = false;
+  const int modulation_value = combo->currentData().toInt(&value_ok);
+  if (!value_ok) {
+    return v1::MODULATION_WFM;
+  }
+  const auto modulation = static_cast<v1::Modulation>(modulation_value);
+  if (modulation == v1::MODULATION_NFM || modulation == v1::MODULATION_WFM) {
+    return modulation;
+  }
+  return v1::MODULATION_WFM;
+}
+
 bool ResampleMonoPcmS16Le(const QByteArray& input_pcm, int input_sample_rate_hz,
                           int output_sample_rate_hz, double* next_source_pos,
                           bool* has_prev_sample, int16_t* prev_sample,
@@ -1114,7 +1130,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   auto* fixed_tab = new QWidget(mode_tabs_);
   auto* fixed_layout = new QFormLayout(fixed_tab);
+  fixed_modulation_combo_ = new QComboBox(fixed_tab);
+  fixed_modulation_combo_->addItem("NFM", QVariant::fromValue<int>(v1::MODULATION_NFM));
+  fixed_modulation_combo_->addItem("WFM", QVariant::fromValue<int>(v1::MODULATION_WFM));
+  fixed_modulation_combo_->setCurrentIndex(
+      fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
+  fixed_layout->addRow("Demod", fixed_modulation_combo_);
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   auto* range_tab = new QWidget(mode_tabs_);
@@ -1368,6 +1390,35 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(dwell_ms_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
     SaveScanListConfigToSettings();
   });
+  connect(channel_bandwidth_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+    if (fixed_bandwidth_sync_in_progress_) {
+      return;
+    }
+    fixed_bandwidth_manual_override_ = (value != fixed_bandwidth_last_auto_hz_);
+  });
+  connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+    const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
+    const int suggested_bandwidth_hz = DefaultBandwidthHzForModulation(modulation);
+    const int current_bandwidth_hz = channel_bandwidth_spin_->value();
+    const bool can_auto_apply =
+        !fixed_bandwidth_manual_override_ || current_bandwidth_hz == fixed_bandwidth_last_auto_hz_;
+
+    fixed_bandwidth_last_auto_hz_ = suggested_bandwidth_hz;
+    if (!can_auto_apply) {
+      AppendLog(QString("Fixed demod %1 selected; keeping manual bandwidth %2 Hz")
+                    .arg(modulation == v1::MODULATION_NFM ? "NFM" : "WFM")
+                    .arg(current_bandwidth_hz));
+      return;
+    }
+
+    fixed_bandwidth_sync_in_progress_ = true;
+    channel_bandwidth_spin_->setValue(suggested_bandwidth_hz);
+    fixed_bandwidth_sync_in_progress_ = false;
+    fixed_bandwidth_manual_override_ = false;
+    AppendLog(QString("Fixed demod %1 selected; bandwidth auto-set to %2 Hz")
+                  .arg(modulation == v1::MODULATION_NFM ? "NFM" : "WFM")
+                  .arg(suggested_bandwidth_hz));
+  });
   connect(receiver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
     auto_squelch_active_ = false;
     auto_squelch_restore_monitor_mode_ = false;
@@ -1423,6 +1474,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           Qt::QueuedConnection);
   connect(client_.get(), &GrpcClient::StreamError, this, &MainWindow::OnStreamError,
           Qt::QueuedConnection);
+
+  fixed_bandwidth_last_auto_hz_ = DefaultBandwidthHzForModulation(FixedModulationFromCombo(fixed_modulation_combo_));
+  fixed_bandwidth_manual_override_ = false;
 
   QTimer::singleShot(0, this, [this]() {
     RefreshReceivers();
@@ -1498,6 +1552,22 @@ void MainWindow::RefreshReceivers() {
     for (const auto& receiver : receivers) {
       if (receiver.receiver_id() != selected_id) {
         continue;
+      }
+      if (fixed_modulation_combo_ != nullptr) {
+        v1::Modulation fixed_modulation = receiver.mode_config().fixed_modulation();
+        if (fixed_modulation == v1::MODULATION_UNSPECIFIED) {
+          fixed_modulation = v1::MODULATION_WFM;
+        }
+        if (fixed_modulation != v1::MODULATION_NFM && fixed_modulation != v1::MODULATION_WFM) {
+          fixed_modulation = v1::MODULATION_NFM;
+        }
+        const QSignalBlocker blocker(fixed_modulation_combo_);
+        const int modulation_index =
+            fixed_modulation_combo_->findData(QVariant::fromValue<int>(static_cast<int>(fixed_modulation)));
+        if (modulation_index >= 0) {
+          fixed_modulation_combo_->setCurrentIndex(modulation_index);
+        }
+        fixed_bandwidth_last_auto_hz_ = DefaultBandwidthHzForModulation(fixed_modulation);
       }
       const double receiver_default_squelch_db =
           std::clamp(receiver.mode_config().scan_list_default_squelch_db(), -120.0, 0.0);
@@ -1598,8 +1668,13 @@ void MainWindow::ApplyModeAndConfig() {
     return;
   }
 
-  AppendLog(QString("Applied mode/config to receiver %1 (sample-rate=%2 Hz, channel-bw=%3 Hz, hw-bw=%4 Hz, dc=%5@%6 Hz, notch=%7@%8 Hz, lo-offset=%9@%10 Hz)")
+  const QString fixed_demod_label =
+      (fixed_modulation_combo_ != nullptr && fixed_modulation_combo_->currentText().trimmed().toUpper() == "NFM")
+          ? "NFM"
+          : "WFM";
+  AppendLog(QString("Applied mode/config to receiver %1 (fixed-demod=%2, sample-rate=%3 Hz, channel-bw=%4 Hz, hw-bw=%5 Hz, dc=%6@%7 Hz, notch=%8@%9 Hz, lo-offset=%10@%11 Hz)")
                 .arg(receiver_id)
+                .arg(fixed_demod_label)
                 .arg(sample_rate_spin_->value())
                 .arg(channel_bandwidth_spin_->value())
                 .arg(hardware_bandwidth_spin_->value())
@@ -1632,6 +1707,18 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
 
   v1::ModeConfig config;
   config.set_fixed_frequency_hz(fixed_frequency_edit_->text().toDouble() * 1000000.0);
+  v1::Modulation fixed_modulation = v1::MODULATION_WFM;
+  if (fixed_modulation_combo_ != nullptr) {
+    bool value_ok = false;
+    const int modulation_value = fixed_modulation_combo_->currentData().toInt(&value_ok);
+    if (value_ok) {
+      const auto parsed = static_cast<v1::Modulation>(modulation_value);
+      if (parsed == v1::MODULATION_NFM || parsed == v1::MODULATION_WFM) {
+        fixed_modulation = parsed;
+      }
+    }
+  }
+  config.set_fixed_modulation(fixed_modulation);
   config.set_range_start_hz(range_start_edit_->text().toDouble());
   config.set_range_end_hz(range_end_edit_->text().toDouble());
   config.set_range_step_hz(range_step_edit_->text().toDouble());

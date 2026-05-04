@@ -48,6 +48,7 @@ struct ModeConfig {
   };
 
   double fixed_frequency_hz = 0.0;
+  Modulation fixed_modulation = Modulation::kWfm;
   double range_start_hz = 0.0;
   double range_end_hz = 0.0;
   double range_step_hz = 0.0;

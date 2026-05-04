@@ -34,6 +34,7 @@ enum EventKind {
 
 message ModeConfig {
   double fixed_frequency_hz = 1;
+  Modulation fixed_modulation = 21;
   double range_start_hz = 2;
   double range_end_hz = 3;
   double range_step_hz = 4;

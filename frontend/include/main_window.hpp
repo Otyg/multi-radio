@@ -129,12 +129,16 @@ class MainWindow : public QMainWindow {
   QCheckBox* scan_list_monitor_checkbox_ = nullptr;
   QDoubleSpinBox* scan_list_default_squelch_spin_ = nullptr;
   QLineEdit* fixed_frequency_edit_ = nullptr;
+  QComboBox* fixed_modulation_combo_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;
   QLineEdit* range_step_edit_ = nullptr;
   QSpinBox* dwell_ms_spin_ = nullptr;
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;
+  bool fixed_bandwidth_manual_override_ = false;
+  bool fixed_bandwidth_sync_in_progress_ = false;
+  int fixed_bandwidth_last_auto_hz_ = 0;
   QSpinBox* hardware_bandwidth_spin_ = nullptr;
   QCheckBox* dc_blocker_checkbox_ = nullptr;
   QSpinBox* dc_blocker_cutoff_spin_ = nullptr;
