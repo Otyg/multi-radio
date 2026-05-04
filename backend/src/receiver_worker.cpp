@@ -712,6 +712,7 @@ void ReceiverWorker::RunLoop() {
   uint32_t last_effective_sample_rate_hz = 0;
   bool squelch_open_emitted = false;
   bool thresholds_emitted = false;
+  bool buffer_primed = false;
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -757,14 +758,17 @@ void ReceiverWorker::RunLoop() {
       continue;
     }
 
-    // Pre-buffering: Wait for buffer to have at least 2 frames worth of samples before starting
-    // This avoids early dropouts when IngestLoop is still ramping up
-    static bool buffer_primed = false;
+    // Pre-buffering: wait until the ring buffer holds ~300ms of audio before starting output.
+    // RTL-SDR delivers IQ in large blocks (~128ms each at 1024kHz), so the audio fill rate is
+    // bursty. Without sufficient pre-fill the output side outruns the ingest side between
+    // block deliveries, causing concealment (click/dropout). 300ms covers ~2.3 IQ blocks,
+    // giving a comfortable margin against timing jitter.
     if (!buffer_primed && audio_buffer_ != nullptr) {
-      const size_t minimum_prefill = frame_samples * 2;  // 2 frames
+      const size_t minimum_prefill =
+          static_cast<size_t>(static_cast<uint64_t>(audio_sample_rate_hz) * 300U / 1000U);
       if (audio_buffer_->AvailableForRead() < minimum_prefill) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        continue;  // Wait more
+        continue;
       }
       buffer_primed = true;
       PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
@@ -797,7 +801,7 @@ void ReceiverWorker::RunLoop() {
       // Implement adaptive dropout mitigation: if buffer is low, retry after a short sleep
       // instead of immediately padding with zeros
       size_t read_attempts = 0;
-      const size_t max_read_attempts = 3;
+      const size_t max_read_attempts = 10;
       const size_t critical_level = frame_samples / 2;  // If buffer < 0.5 frames, it's critical
       
       while (frame_filled < frame_samples && read_attempts < max_read_attempts && audio_buffer_ != nullptr) {
