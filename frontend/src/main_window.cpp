@@ -1076,9 +1076,15 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   receiver_combo_ = new QComboBox(control_group);
 
   fixed_frequency_edit_ = new QLineEdit("162.025", control_group);
-  range_start_edit_ = new QLineEdit("156000000", control_group);
-  range_end_edit_ = new QLineEdit("163000000", control_group);
-  range_step_edit_ = new QLineEdit("25000", control_group);
+  range_start_edit_ = new QLineEdit("156", control_group);
+  range_end_edit_ = new QLineEdit("163", control_group);
+  range_step_edit_ = new QLineEdit("0.025", control_group);
+  range_fft_size_combo_ = new QComboBox(control_group);
+  for (int s : {64, 128, 256, 512, 1024, 2048, 4096}) {
+    range_fft_size_combo_->addItem(QString::number(s), QVariant(s));
+  }
+  range_fft_size_combo_->setCurrentIndex(
+      range_fft_size_combo_->findData(QVariant(1024)));
 
   dwell_ms_spin_ = new QSpinBox(control_group);
   dwell_ms_spin_->setRange(100, 10000);
@@ -1141,10 +1147,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   auto* range_tab = new QWidget(mode_tabs_);
-  auto* range_layout = new QFormLayout(range_tab);
-  range_layout->addRow("Range Start Hz", range_start_edit_);
-  range_layout->addRow("Range End Hz", range_end_edit_);
-  range_layout->addRow("Range Step Hz", range_step_edit_);
+  auto* range_outer = new QVBoxLayout(range_tab);
+  auto* range_row = new QHBoxLayout();
+  range_row->addWidget(new QLabel("Start MHz", range_tab));
+  range_row->addWidget(range_start_edit_);
+  range_row->addWidget(new QLabel("End MHz", range_tab));
+  range_row->addWidget(range_end_edit_);
+  range_row->addWidget(new QLabel("Step MHz", range_tab));
+  range_row->addWidget(range_step_edit_);
+  range_row->addWidget(new QLabel("FFT", range_tab));
+  range_row->addWidget(range_fft_size_combo_);
+  range_row->addStretch(1);
+  range_outer->addLayout(range_row);
+  range_outer->addStretch(1);
   mode_tabs_->addTab(range_tab, "SCAN_RANGE");
 
   auto* list_tab = new QWidget(mode_tabs_);
@@ -1759,9 +1774,9 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     }
   }
   config.set_fixed_modulation(fixed_modulation);
-  config.set_range_start_hz(range_start_edit_->text().toDouble());
-  config.set_range_end_hz(range_end_edit_->text().toDouble());
-  config.set_range_step_hz(range_step_edit_->text().toDouble());
+  config.set_range_start_hz(range_start_edit_->text().toDouble() * 1e6);
+  config.set_range_end_hz(range_end_edit_->text().toDouble() * 1e6);
+  config.set_range_step_hz(range_step_edit_->text().toDouble() * 1e6);
   config.set_dwell_ms(static_cast<uint32_t>(dwell_ms_spin_->value()));
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
   int channel_bandwidth_hz = channel_bandwidth_spin_->value();
@@ -1813,11 +1828,37 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     }
   }
 
+  if (mode == v1::RADIO_MODE_SCAN_RANGE) {
+    const double start_hz = config.range_start_hz();
+    const double end_hz   = config.range_end_hz();
+    const double step_hz  = config.range_step_hz();
+    if (step_hz > 0.0 && end_hz > start_hz) {
+      for (double f = start_hz; f <= end_hz + step_hz * 0.01; f += step_hz) {
+        config.add_frequency_list_hz(f);
+      }
+    }
+  }
+
   if (!client_->SetModeConfig(receiver_id, config, &error)) {
     if (error_text != nullptr) {
       *error_text = QString::fromStdString(error);
     }
     return false;
+  }
+  if (signal_visualization_ != nullptr) {
+    if (mode == v1::RADIO_MODE_SCAN_RANGE) {
+      const double vis_start = config.range_start_hz();
+      const double vis_end   = config.range_end_hz();
+      const double vis_step  = config.range_step_hz();
+      bool fft_ok = false;
+      const int fft_val = range_fft_size_combo_
+                              ? range_fft_size_combo_->currentData().toInt(&fft_ok)
+                              : 1024;
+      signal_visualization_->SetScanRange(vis_start, vis_end, vis_step,
+                                           fft_ok ? fft_val : 1024);
+    } else {
+      signal_visualization_->SetScanRange(0.0, 0.0, 0.0, 0);
+    }
   }
   return true;
 }

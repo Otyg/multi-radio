@@ -136,6 +136,7 @@ class MainWindow : public QMainWindow {
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;
   QLineEdit* range_step_edit_ = nullptr;
+  QComboBox* range_fft_size_combo_ = nullptr;
   QSpinBox* dwell_ms_spin_ = nullptr;
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;

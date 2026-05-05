@@ -50,6 +50,7 @@ class SignalVisualizationWidget : public QWidget {
                               SpectrumSource source, double frame_frequency_start_hz,
                               double frame_frequency_end_hz);
   void PushSample(uint32_t receiver_id, double frequency_hz, double intensity);
+  void SetScanRange(double start_hz, double end_hz, double step_hz, int total_bins);
 
  protected:
   void paintEvent(QPaintEvent* event) override;
@@ -80,6 +81,7 @@ class SignalVisualizationWidget : public QWidget {
     double quality_score_pct = 0.0;
     bool has_signal_ok = false;
     bool signal_ok = false;
+    bool is_scan_range = false;
   };
   struct ReceiverState {
     QVector<double> waveform;
@@ -108,6 +110,8 @@ class SignalVisualizationWidget : public QWidget {
     double quality_score_pct = 0.0;
     bool has_signal_ok = false;
     bool signal_ok = false;
+    QVector<double> sweep_buffer;
+    double sweep_last_tuned_hz = 0.0;
   };
 
   void EnsureState(ReceiverState* state) const;
@@ -144,6 +148,9 @@ class SignalVisualizationWidget : public QWidget {
   void BlendReceiverSpectrumIntoState(ReceiverState* state, const std::vector<double>& spectrum,
                                       double peak_frequency_hz, double peak_intensity,
                                       double frame_frequency_start_hz, double frame_frequency_end_hz);
+  void AccumulateScanFrame(ReceiverState* state, const std::vector<double>& spectrum,
+                           double frame_frequency_start_hz, double frame_frequency_end_hz,
+                           double tuned_hz);
   void DecayState(ReceiverState* state, double decay_factor);
 
   QHash<uint32_t, ReceiverState> states_;
@@ -158,6 +165,12 @@ class SignalVisualizationWidget : public QWidget {
   bool auto_noise_reduction_enabled_ = false;
   bool noise_floor_filter_enabled_ = false;
   double noise_floor_db_ = -30.0;
+  double scan_range_start_hz_ = 0.0;
+  double scan_range_end_hz_ = 0.0;
+  double scan_range_step_hz_ = 0.0;
+  int scan_range_total_bins_ = 0;
+  QVector<double> scan_sweep_spectrum_;
+  QVector<QVector<double>> scan_sweep_waterfall_rows_;
   QTimer frame_timer_;
 };
 

@@ -250,6 +250,14 @@ void SignalVisualizationWidget::PushVisualizationFrame(uint32_t receiver_id, con
                                                        SpectrumSource source, double frame_frequency_start_hz,
                                                        double frame_frequency_end_hz) {
   ReceiverState& state = states_[receiver_id];
+  if (source == SpectrumSource::kReceiverInput && scan_range_total_bins_ > 0) {
+    BlendReceiverSpectrumIntoState(&state, spectrum, peak_frequency_hz, peak_intensity,
+                                   frame_frequency_start_hz, frame_frequency_end_hz);
+    AccumulateScanFrame(&state, spectrum, frame_frequency_start_hz, frame_frequency_end_hz,
+                        (frame_frequency_start_hz + frame_frequency_end_hz) * 0.5);
+    update();
+    return;
+  }
   if (source == SpectrumSource::kReceiverInput) {
     BlendReceiverSpectrumIntoState(&state, spectrum, peak_frequency_hz, peak_intensity,
                                    frame_frequency_start_hz, frame_frequency_end_hz);
@@ -295,8 +303,9 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
     painter.drawText(title_rect, Qt::AlignLeft | Qt::AlignVCenter, title);
   };
 
-  const QString source_label =
-      (spectrum_source_ == SpectrumSource::kReceiverInput) ? "Receiver" : "Demod";
+  const QString source_label = (scan_range_total_bins_ > 0)
+      ? "Scan Range"
+      : ((spectrum_source_ == SpectrumSource::kReceiverInput) ? "Receiver" : "Demod");
   draw_panel(waveform_rect, QString("Signal Waveform (last %1s)").arg(kWaveformWindowSeconds, 0, 'f', 0));
   draw_panel(spectrogram_rect, QString("Spectrogram [%1] (FFT %2)").arg(source_label).arg(fft_size_));
 
@@ -440,6 +449,23 @@ void SignalVisualizationWidget::ReinitializeState(ReceiverState* state) const {
   state->quality_score_pct = 0.0;
   state->has_signal_ok = false;
   state->signal_ok = false;
+  state->sweep_buffer.clear();
+  state->sweep_last_tuned_hz = 0.0;
+}
+
+void SignalVisualizationWidget::SetScanRange(double start_hz, double end_hz,
+                                              double step_hz, int total_bins) {
+  scan_range_start_hz_   = start_hz;
+  scan_range_end_hz_     = end_hz;
+  scan_range_step_hz_    = step_hz;
+  scan_range_total_bins_ = total_bins;
+  scan_sweep_spectrum_.clear();
+  scan_sweep_waterfall_rows_.clear();
+  for (auto it = states_.begin(); it != states_.end(); ++it) {
+    it.value().sweep_buffer.clear();
+    it.value().sweep_last_tuned_hz = 0.0;
+  }
+  update();
 }
 
 int SignalVisualizationWidget::NormalizeFftSize(int fft_size) {
@@ -966,11 +992,20 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       display.quality_score_pct = selected.quality_score_pct;
       display.has_signal_ok = selected.has_signal_ok;
       display.signal_ok = selected.signal_ok;
-      if (display.spectrogram_rows.isEmpty()) {
-        PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
-      }
-      if (display.waterfall_rows.isEmpty()) {
-        PushRow(&display.waterfall_rows, display.spectrum, kWaterfallRows);
+      if (scan_range_total_bins_ > 0 && !scan_sweep_spectrum_.isEmpty()) {
+        display.is_scan_range = true;
+        display.spectrum = scan_sweep_spectrum_;
+        display.frequency_start_hz = scan_range_start_hz_ - scan_range_step_hz_ * 0.5;
+        display.frequency_end_hz   = scan_range_end_hz_   + scan_range_step_hz_ * 0.5;
+        display.waterfall_rows = scan_sweep_waterfall_rows_;
+        display.spectrogram_rows = scan_sweep_waterfall_rows_;
+      } else {
+        if (display.spectrogram_rows.isEmpty()) {
+          PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
+        }
+        if (display.waterfall_rows.isEmpty()) {
+          PushRow(&display.waterfall_rows, display.spectrum, kWaterfallRows);
+        }
       }
       return display;
     }
@@ -1008,11 +1043,20 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
     display.quality_score_pct = selected.quality_score_pct;
     display.has_signal_ok = selected.has_signal_ok;
     display.signal_ok = selected.signal_ok;
-    if (display.spectrogram_rows.isEmpty()) {
-      PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
-    }
-    if (display.waterfall_rows.isEmpty()) {
-      PushRow(&display.waterfall_rows, display.spectrum, kWaterfallRows);
+    if (scan_range_total_bins_ > 0 && !scan_sweep_spectrum_.isEmpty()) {
+      display.is_scan_range = true;
+      display.spectrum = scan_sweep_spectrum_;
+      display.frequency_start_hz = scan_range_start_hz_ - scan_range_step_hz_ * 0.5;
+      display.frequency_end_hz   = scan_range_end_hz_   + scan_range_step_hz_ * 0.5;
+      display.waterfall_rows = scan_sweep_waterfall_rows_;
+      display.spectrogram_rows = scan_sweep_waterfall_rows_;
+    } else {
+      if (display.spectrogram_rows.isEmpty()) {
+        PushRow(&display.spectrogram_rows, display.spectrum, kSpectrogramRows);
+      }
+      if (display.waterfall_rows.isEmpty()) {
+        PushRow(&display.waterfall_rows, display.spectrum, kWaterfallRows);
+      }
     }
     return display;
   }
@@ -1241,6 +1285,49 @@ void SignalVisualizationWidget::BlendReceiverSpectrumIntoState(
 
   PushRow(&state->receiver_spectrogram_rows, state->receiver_spectrum, kSpectrogramRows);
   PushRow(&state->receiver_waterfall_rows, state->receiver_spectrum, kWaterfallRows);
+}
+
+void SignalVisualizationWidget::AccumulateScanFrame(
+    ReceiverState* state, const std::vector<double>& spectrum,
+    double frame_frequency_start_hz, double frame_frequency_end_hz,
+    double tuned_hz) {
+  if (state == nullptr || scan_range_total_bins_ <= 0 || scan_range_step_hz_ <= 0.0) {
+    return;
+  }
+  const double full_start = scan_range_start_hz_ - scan_range_step_hz_ * 0.5;
+  const double full_end   = scan_range_end_hz_   + scan_range_step_hz_ * 0.5;
+  const double full_span  = full_end - full_start;
+  if (full_span <= 0.0) return;
+
+  const bool is_wrap = (state->sweep_last_tuned_hz > 0.0) &&
+                       (tuned_hz < state->sweep_last_tuned_hz - scan_range_step_hz_ * 0.5);
+  if (is_wrap && !state->sweep_buffer.isEmpty()) {
+    scan_sweep_spectrum_ = state->sweep_buffer;
+    PushRow(&scan_sweep_waterfall_rows_, state->sweep_buffer, kWaterfallRows);
+    state->sweep_buffer.fill(0.0, scan_range_total_bins_);
+  }
+  if (state->sweep_buffer.size() != scan_range_total_bins_) {
+    state->sweep_buffer.fill(0.0, scan_range_total_bins_);
+  }
+
+  const int n_src = static_cast<int>(spectrum.size());
+  const double frame_span = frame_frequency_end_hz - frame_frequency_start_hz;
+  if (n_src == 0 || frame_span <= 0.0) {
+    state->sweep_last_tuned_hz = tuned_hz;
+    return;
+  }
+  for (int i = 0; i < n_src; ++i) {
+    const double src_t = (n_src <= 1)
+        ? 0.5
+        : (static_cast<double>(i) + 0.5) / static_cast<double>(n_src);
+    const double bin_hz = frame_frequency_start_hz + src_t * frame_span;
+    const double sweep_t = (bin_hz - full_start) / full_span;
+    if (sweep_t < 0.0 || sweep_t >= 1.0) continue;
+    const int dst = std::clamp(static_cast<int>(sweep_t * scan_range_total_bins_),
+                               0, scan_range_total_bins_ - 1);
+    state->sweep_buffer[dst] = std::max(state->sweep_buffer[dst], Clamp01(spectrum[i]));
+  }
+  state->sweep_last_tuned_hz = tuned_hz;
 }
 
 void SignalVisualizationWidget::DecayState(ReceiverState* state, double decay_factor) {

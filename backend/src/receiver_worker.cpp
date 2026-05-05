@@ -196,6 +196,18 @@ RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config, in
     return out;
   }
 
+  if (mode == RadioMode::kScanRange && !config.frequency_list_hz.empty()) {
+    const int n = static_cast<int>(config.frequency_list_hz.size());
+    const int idx = std::clamp(channel_idx, 0, n - 1);
+    out.index = idx;
+    out.frequency_hz = config.frequency_list_hz[static_cast<size_t>(idx)];
+    out.label = "range-" + std::to_string(idx);
+    out.modulation = config.fixed_modulation;
+    out.channel_bandwidth_hz = config.channel_bandwidth_hz;
+    out.dwell_ms = config.dwell_ms;
+    return out;
+  }
+
   out.frequency_hz = config.fixed_frequency_hz;
   out.modulation = config.fixed_modulation;
   out.channel_bandwidth_hz = config.channel_bandwidth_hz;
@@ -1101,7 +1113,7 @@ void ReceiverWorker::RunLoop() {
     // Scanner mode bypasses this — it sends muted (zero) frames while squelch is closed,
     // so there is no underrun risk and no need to accumulate a prefill.
     if (!buffer_primed && audio_buffer_ != nullptr) {
-      if (mode == RadioMode::kScanList) {
+      if (mode == RadioMode::kScanList || mode == RadioMode::kScanRange) {
         buffer_primed = true;  // scanner: muted frames prevent underruns, no prefill needed
       } else {
         const size_t minimum_prefill =
@@ -1289,6 +1301,27 @@ void ReceiverWorker::RunLoop() {
               << " threshold_db=" << FormatDouble(report_squelch, 1)
               << " monitor=" << (config.scan_list_monitor_mode ? 1 : 0);
       PublishEvent(EventKind::kInfo, scan_ss.str(), report_chan.frequency_hz, false);
+    }
+
+    if (mode == RadioMode::kScanRange && !config.frequency_list_hz.empty() &&
+        now >= next_scan_check_at) {
+      next_scan_check_at = now + std::chrono::milliseconds(200);
+      const int n = static_cast<int>(config.frequency_list_hz.size());
+      int cur_idx;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        cur_idx = scan_channel_idx_;
+      }
+      const int64_t dwell_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           now - scan_dwell_started_at).count();
+      if (n > 1 && dwell_elapsed_ms >= static_cast<int64_t>(config.dwell_ms)) {
+        const int next_idx = (cur_idx + 1) % n;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          scan_channel_idx_ = next_idx;
+        }
+        scan_dwell_started_at = now;
+      }
     }
 
     if (now >= next_stats_at) {
