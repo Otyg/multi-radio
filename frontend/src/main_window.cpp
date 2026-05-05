@@ -31,6 +31,7 @@
 #include <QSignalBlocker>
 #include <QSettings>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -1364,11 +1365,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     signal_visualization_->SetNoiseFloorDb(noise_floor_db);
   }
 
+  scan_range_viz_ = new ScanRangeVisualizationWidget(central);
+
+  content_stack_ = new QStackedWidget(central);
+  content_stack_->addWidget(signal_visualization_);  // index 0 — normal modes
+  content_stack_->addWidget(scan_range_viz_);         // index 1 — scan range
+
   event_log_ = new QPlainTextEdit(central);
   event_log_->setReadOnly(true);
 
   root_layout->addLayout(top_layout);
-  root_layout->addWidget(signal_visualization_);
+  root_layout->addWidget(content_stack_, 1);
   root_layout->addWidget(event_log_);
 
   setCentralWidget(central);
@@ -1495,6 +1502,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     AppendLog(QString("Tab switch stop requested for receiver %1").arg(receiver_id));
     if (signal_visualization_ != nullptr) {
       signal_visualization_->SetChannelLabel(QString());
+    }
+    if (content_stack_ != nullptr) {
+      content_stack_->setCurrentIndex(index == kScanRangeModeTabIndex ? 1 : 0);
+    }
+    if (index == kScanRangeModeTabIndex && scan_range_viz_ != nullptr) {
+      const double start = range_start_edit_->text().toDouble() * 1e6;
+      const double end   = range_end_edit_->text().toDouble() * 1e6;
+      const double step  = range_step_edit_->text().toDouble() * 1e6;
+      bool fft_ok = false;
+      const int fft_val = range_fft_size_combo_
+                              ? range_fft_size_combo_->currentData().toInt(&fft_ok)
+                              : 1024;
+      scan_range_viz_->Configure(start, end, step, fft_ok ? fft_val : 1024);
     }
     RefreshReceivers();
     ApplyModeAndConfig();
@@ -1845,20 +1865,15 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     }
     return false;
   }
-  if (signal_visualization_ != nullptr) {
-    if (mode == v1::RADIO_MODE_SCAN_RANGE) {
-      const double vis_start = config.range_start_hz();
-      const double vis_end   = config.range_end_hz();
-      const double vis_step  = config.range_step_hz();
-      bool fft_ok = false;
-      const int fft_val = range_fft_size_combo_
-                              ? range_fft_size_combo_->currentData().toInt(&fft_ok)
-                              : 1024;
-      signal_visualization_->SetScanRange(vis_start, vis_end, vis_step,
-                                           fft_ok ? fft_val : 1024);
-    } else {
-      signal_visualization_->SetScanRange(0.0, 0.0, 0.0, 0);
-    }
+  if (mode == v1::RADIO_MODE_SCAN_RANGE && scan_range_viz_ != nullptr) {
+    const double vis_start = config.range_start_hz();
+    const double vis_end   = config.range_end_hz();
+    const double vis_step  = config.range_step_hz();
+    bool fft_ok = false;
+    const int fft_val = range_fft_size_combo_
+                            ? range_fft_size_combo_->currentData().toInt(&fft_ok)
+                            : 1024;
+    scan_range_viz_->Configure(vis_start, vis_end, vis_step, fft_ok ? fft_val : 1024);
   }
   return true;
 }
@@ -2149,10 +2164,21 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
     return;
   }
 
+  const bool is_scan_range = (mode_tabs_ != nullptr &&
+                               mode_tabs_->currentIndex() == kScanRangeModeTabIndex);
+
+  bool fft_ok = false;
+  const int fft_val = (is_scan_range && range_fft_size_combo_)
+                          ? range_fft_size_combo_->currentData().toInt(&fft_ok)
+                          : 0;
+  const int spectrum_bins = (is_scan_range && fft_ok)
+                                ? std::max(32, fft_val / 2)
+                                : signal_visualization_->FftSize() / 2;
+
   std::vector<double> waveform;
   std::vector<double> spectrum;
   double signal_level_db = -120.0;
-  BuildReceiverVisualizationFrame(interleaved_iq_s16le, signal_visualization_->FftSize() / 2,
+  BuildReceiverVisualizationFrame(interleaved_iq_s16le, spectrum_bins,
                                   iq_visual_dc_suppression_enabled_, &waveform, &spectrum,
                                   &signal_level_db);
   if (spectrum.empty()) {
@@ -2162,6 +2188,13 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
   const double half_rate_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
   const double frame_frequency_start_hz = tuned_frequency_hz - half_rate_hz;
   const double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
+
+  if (is_scan_range && scan_range_viz_ != nullptr) {
+    scan_range_viz_->PushSpectrum(spectrum, frame_frequency_start_hz,
+                                   frame_frequency_end_hz, tuned_frequency_hz);
+    return;
+  }
+
   signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_level_db);
   signal_visualization_->PushVisualizationFrame(
       receiver_id, waveform, spectrum, 0.0, 0.0,

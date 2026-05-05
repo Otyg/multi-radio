@@ -15,10 +15,12 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
 
 #include "grpc_client.hpp"
+#include "scan_range_visualization_widget.hpp"
 #include "signal_visualization_widget.hpp"
 
 class QIODevice;
@@ -176,6 +178,8 @@ class MainWindow : public QMainWindow {
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;
   SignalVisualizationWidget* signal_visualization_ = nullptr;
+  ScanRangeVisualizationWidget* scan_range_viz_ = nullptr;
+  QStackedWidget* content_stack_ = nullptr;
 #if MR_HAS_QT_MULTIMEDIA
   QAudioSink* audio_sink_ = nullptr;
 #endif

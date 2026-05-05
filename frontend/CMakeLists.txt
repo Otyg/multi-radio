@@ -19,9 +19,11 @@ add_executable(multi_radio_client
   src/main_window.cpp
   src/grpc_client.cpp
   src/signal_visualization_widget.cpp
+  src/scan_range_visualization_widget.cpp
   include/main_window.hpp
   include/grpc_client.hpp
   include/signal_visualization_widget.hpp
+  include/scan_range_visualization_widget.hpp
 )
 
 target_include_directories(multi_radio_client

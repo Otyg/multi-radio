@@ -1191,6 +1191,11 @@ void ReceiverWorker::RunLoop() {
       published_samples += static_cast<uint64_t>(frame_samples);
       ++published_frames;
       audio_sample_index += static_cast<uint64_t>(frame_samples);
+      // Scan range uses raw IQ visualization only — skip audio frames entirely.
+      if (mode == RadioMode::kScanRange) {
+        next_frame_at += frame_interval;
+        continue;
+      }
       event_bus_->PublishAudioFrame(frame);
       next_frame_at += frame_interval;
     }
