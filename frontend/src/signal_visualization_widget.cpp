@@ -350,7 +350,8 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                  display.has_signal_level_db, display.signal_level_db, display.has_iq_health,
                  display.psd_peak_db, display.psd_floor_db, display.snr_db, display.psd_peak_offset_hz,
                  display.has_quality_score, display.quality_score_pct, display.has_signal_ok,
-                 display.signal_ok);
+                 display.signal_ok,
+                 display.has_squelch_threshold_db, display.squelch_threshold_db);
   const bool apply_noise_floor_filter =
       noise_floor_filter_enabled_ && spectrum_source_ == SpectrumSource::kReceiverInput;
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
@@ -541,20 +542,33 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
                                                double psd_peak_db, double psd_floor_db, double snr_db,
                                                double psd_peak_offset_hz, bool has_quality_score,
                                                double quality_score_pct, bool has_signal_ok,
-                                               bool signal_ok) {
+                                               bool signal_ok, bool has_squelch_threshold_db,
+                                               double squelch_threshold_db) {
   if (painter == nullptr || !area.isValid()) {
     return;
   }
 
+  constexpr double kMinDb = -120.0;
+  constexpr double kMaxDb = 0.0;
+  constexpr double kDbRange = kMaxDb - kMinDb;
+
+  // Convert linear amplitude [0,1] to approximate dBFS.
+  auto amp_to_db = [=](double amp) -> double {
+    return kMinDb + std::pow(Clamp01(amp), 0.42) * kDbRange;
+  };
+  // Map dBFS value to [0,1] bar position (linear in dB: −120 = 0, 0 = 1).
+  auto db_to_ratio = [=](double db) -> double {
+    return (std::clamp(db, kMinDb, kMaxDb) - kMinDb) / kDbRange;
+  };
+
   const double clamped_level = Clamp01(level);
   const double clamped_peak = Clamp01(peak_hold);
-  auto amp_to_db = [](double amp) {
-    constexpr double kMinDb = -120.0;
-    constexpr double kMaxDb = 0.0;
-    return kMinDb + std::pow(Clamp01(amp), 0.42) * (kMaxDb - kMinDb);
-  };
-  const double level_db = has_signal_level_db ? std::clamp(signal_level_db, -120.0, 0.0)
+
+  // Prefer backend channelized RSSI (matches what squelch compares); fall back to audio amplitude.
+  const double level_db = has_signal_level_db ? std::clamp(signal_level_db, kMinDb, kMaxDb)
                                               : amp_to_db(clamped_level);
+  const double fill_ratio = db_to_ratio(level_db);
+  const double peak_ratio = db_to_ratio(amp_to_db(clamped_peak));
 
   painter->save();
   painter->setClipRect(area);
@@ -571,18 +585,72 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
   painter->fillRect(level_bar_rect, QColor(24, 32, 45));
   painter->fillRect(quality_bar_rect, QColor(24, 32, 45));
 
-  const int fill_width = static_cast<int>(std::round(clamped_level * level_bar_rect.width()));
+  // Level bar fill: dBFS scale, −120 left → 0 right.
+  const int fill_width = static_cast<int>(std::round(fill_ratio * level_bar_rect.width()));
   if (fill_width > 0) {
     QLinearGradient gradient(level_bar_rect.topLeft(), level_bar_rect.topRight());
     gradient.setColorAt(0.0, QColor(72, 168, 110));
-    gradient.setColorAt(0.5, QColor(238, 194, 83));
+    gradient.setColorAt(0.55, QColor(238, 194, 83));
     gradient.setColorAt(1.0, QColor(222, 98, 74));
-    painter->fillRect(QRect(level_bar_rect.left(), level_bar_rect.top(), fill_width, level_bar_rect.height()),
-                      gradient);
+    painter->fillRect(
+        QRect(level_bar_rect.left(), level_bar_rect.top(), fill_width, level_bar_rect.height()),
+        gradient);
   }
 
+  // Tick lines every 20 dBFS (−120, −100, −80, −60, −40, −20, 0).
+  painter->setPen(QPen(QColor(42, 55, 74), 1));
+  for (int tick_db = static_cast<int>(kMinDb); tick_db <= static_cast<int>(kMaxDb); tick_db += 20) {
+    const int tick_x = level_bar_rect.left() +
+        static_cast<int>(std::round(db_to_ratio(static_cast<double>(tick_db)) *
+                                    (level_bar_rect.width() - 1)));
+    painter->drawLine(tick_x, level_bar_rect.top(), tick_x, level_bar_rect.bottom());
+  }
+
+  // Peak hold tick (white).
+  const int peak_x = level_bar_rect.left() +
+      static_cast<int>(std::round(peak_ratio * static_cast<double>(level_bar_rect.width() - 1)));
+  painter->setPen(QPen(QColor(220, 230, 245), 1));
+  painter->drawLine(peak_x, level_bar_rect.top(), peak_x, level_bar_rect.bottom());
+
+  // Scale labels −120 / 0 dBFS at the bar edges (tiny font).
+  if (level_bar_rect.height() >= 14) {
+    QFont scale_font = painter->font();
+    scale_font.setPointSizeF(std::max(5.5, painter->font().pointSizeF() * 0.72));
+    painter->setFont(scale_font);
+    painter->setPen(QColor(72, 88, 115));
+    const QRect bar_label = level_bar_rect.adjusted(2, 0, -2, 0);
+    painter->drawText(bar_label, Qt::AlignLeft | Qt::AlignBottom, "-120");
+    painter->drawText(bar_label, Qt::AlignRight | Qt::AlignBottom, "0 dBFS");
+  }
+
+  // Squelch threshold marker: yellow-orange vertical line + value label.
+  if (has_squelch_threshold_db) {
+    const double sq_ratio = db_to_ratio(squelch_threshold_db);
+    const int sq_x = level_bar_rect.left() +
+        static_cast<int>(std::round(sq_ratio * (level_bar_rect.width() - 1)));
+    painter->setPen(QPen(QColor(255, 196, 48), 2));
+    painter->drawLine(sq_x, level_bar_rect.top(), sq_x, level_bar_rect.bottom());
+
+    // Value label above the bar (if there is vertical room between area top and bar top).
+    if (level_bar_rect.top() - area.top() >= 8) {
+      QFont sq_font = painter->font();
+      sq_font.setPointSizeF(std::max(5.5, sq_font.pointSizeF() * 0.72));
+      sq_font.setBold(true);
+      painter->setFont(sq_font);
+      painter->setPen(QColor(255, 196, 48));
+      const QString sq_label = QString("%1 dB").arg(squelch_threshold_db, 0, 'f', 0);
+      const int label_w = 40;
+      // Prefer drawing right of the line; flip left if close to right edge.
+      const int label_x = (sq_x + label_w > level_bar_rect.right()) ? sq_x - label_w : sq_x + 2;
+      painter->drawText(QRect(label_x, area.top(), label_w, level_bar_rect.top() - area.top()),
+                        Qt::AlignLeft | Qt::AlignVCenter, sq_label);
+    }
+  }
+
+  // Quality bar (IQ / signal-ok indicator).
   const double quality_ratio =
-      has_quality_score ? std::clamp(quality_score_pct / 100.0, 0.0, 1.0) : (has_signal_ok ? (signal_ok ? 1.0 : 0.0) : 0.0);
+      has_quality_score ? std::clamp(quality_score_pct / 100.0, 0.0, 1.0)
+                        : (has_signal_ok ? (signal_ok ? 1.0 : 0.0) : 0.0);
   const int quality_width = static_cast<int>(std::round(quality_ratio * quality_bar_rect.width()));
   if (quality_width > 0) {
     QLinearGradient quality_gradient(quality_bar_rect.topLeft(), quality_bar_rect.topRight());
@@ -594,16 +662,14 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
                       quality_gradient);
   }
 
-  const int peak_x =
-      level_bar_rect.left() +
-      static_cast<int>(std::round(clamped_peak * static_cast<double>(level_bar_rect.width() - 1)));
-  painter->setPen(QPen(QColor(233, 237, 244), 1));
-  painter->drawLine(peak_x, level_bar_rect.top(), peak_x, level_bar_rect.bottom());
-
+  // Text labels (drawn over bars with the default font).
+  painter->setFont(QFont());
   painter->setPen(QColor(178, 192, 214));
-  const QRect title_row = QRect(area.left() + 10, area.top(), area.width() - 20, area.height() / 2 - 2);
+  const QRect title_row =
+      QRect(area.left() + 10, area.top(), area.width() - 20, area.height() / 2 - 2);
   const QRect detail_row =
-      QRect(area.left() + 10, area.top() + area.height() / 2, area.width() - 20, area.height() - (area.height() / 2));
+      QRect(area.left() + 10, area.top() + area.height() / 2, area.width() - 20,
+            area.height() - area.height() / 2);
   painter->drawText(title_row, Qt::AlignLeft | Qt::AlignVCenter, "Signal Level");
   painter->drawText(title_row, Qt::AlignRight | Qt::AlignVCenter,
                     QString("%1 dBFS").arg(level_db, 0, 'f', 1));
@@ -624,12 +690,11 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
                                    : "Quality ?";
   const QString status_text =
       has_signal_ok ? (signal_ok ? "Signal OK" : "Signal CHECK") : "Signal ?";
-  const QString status_quality_text = QString("%1  %2").arg(quality_text, status_text);
-  const QColor status_color = has_signal_ok
-                                  ? (signal_ok ? QColor(92, 220, 168) : QColor(255, 184, 93))
-                                  : QColor(138, 152, 178);
+  const QColor status_color = has_signal_ok ? (signal_ok ? QColor(92, 220, 168) : QColor(255, 184, 93))
+                                            : QColor(138, 152, 178);
   painter->setPen(status_color);
-  painter->drawText(detail_row, Qt::AlignRight | Qt::AlignVCenter, status_quality_text);
+  painter->drawText(detail_row, Qt::AlignRight | Qt::AlignVCenter,
+                    QString("%1  %2").arg(quality_text, status_text));
   painter->restore();
 }
 

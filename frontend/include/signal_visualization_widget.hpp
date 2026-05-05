@@ -123,7 +123,8 @@ class SignalVisualizationWidget : public QWidget {
                              bool has_signal_level_db, double signal_level_db, bool has_iq_health,
                              double psd_peak_db, double psd_floor_db, double snr_db,
                              double psd_peak_offset_hz, bool has_quality_score, double quality_score_pct,
-                             bool has_signal_ok, bool signal_ok);
+                             bool has_signal_ok, bool signal_ok,
+                             bool has_squelch_threshold_db, double squelch_threshold_db);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
                                 double frequency_start_hz, double frequency_end_hz,
                                 bool suppress_below_mean, bool has_squelch_threshold_db,
