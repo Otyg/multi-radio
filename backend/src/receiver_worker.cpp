@@ -435,13 +435,29 @@ bool ReceiverWorker::SetMode(RadioMode mode, std::string* error) {
 bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error) {
   {
     std::lock_guard<std::mutex> lock(mu_);
-    mode_config_ = NormalizeModeConfig(config);
+    ModeConfig normalized = NormalizeModeConfig(config);
+    // For scan range: generate frequency list from range params if the client didn't send one.
+    if (mode_ == RadioMode::kScanRange && normalized.frequency_list_hz.empty() &&
+        normalized.range_step_hz > 0.0 &&
+        normalized.range_end_hz > normalized.range_start_hz) {
+      for (double f = normalized.range_start_hz;
+           f <= normalized.range_end_hz + normalized.range_step_hz * 0.01;
+           f += normalized.range_step_hz) {
+        normalized.frequency_list_hz.push_back(f);
+      }
+    }
+    mode_config_ = std::move(normalized);
     scan_channel_idx_ = 0;
   }
   if (error != nullptr) {
     error->clear();
   }
-  PublishEvent(EventKind::kInfo, "mode config updated");
+  std::ostringstream msg;
+  msg << "mode config updated freq_list=" << mode_config_.frequency_list_hz.size()
+      << " range=" << FormatDouble(mode_config_.range_start_hz / 1e6, 3)
+      << "-" << FormatDouble(mode_config_.range_end_hz / 1e6, 3)
+      << " MHz step=" << FormatDouble(mode_config_.range_step_hz / 1e3, 1) << " kHz";
+  PublishEvent(EventKind::kInfo, msg.str());
   return true;
 }
 
