@@ -484,6 +484,46 @@ std::vector<double> BuildNormalizedSpectrumFromComplexShifted(
   return normalized;
 }
 
+// Like BuildNormalizedSpectrumFromComplexShifted but uses a fixed dB scale instead of
+// per-frame normalization. Noise (-80 to -40 dBFS) stays dark; signals stand out.
+std::vector<double> BuildFixedScaleSpectrumFromComplex(
+    const std::vector<std::complex<double>>& complex_samples, int spectrum_bins,
+    double floor_db, double ceiling_db) {
+  if (complex_samples.size() < 16 || spectrum_bins <= 0) {
+    return {};
+  }
+  const size_t requested_bins = static_cast<size_t>(std::max(32, spectrum_bins));
+  const size_t desired_fft = std::max<size_t>(64U, requested_bins * 2U);
+  const size_t available = complex_samples.size();
+  const size_t fft_size = LargestPowerOfTwoLeq(std::min(available, desired_fft));
+  if (fft_size < 64U) {
+    return {};
+  }
+  std::vector<std::complex<double>> fft_in(fft_size);
+  const size_t start = available - fft_size;
+  constexpr double kPi = 3.14159265358979323846;
+  for (size_t i = 0; i < fft_size; ++i) {
+    const double phase = (2.0 * kPi * static_cast<double>(i)) / static_cast<double>(fft_size - 1U);
+    const double w = 0.5 * (1.0 - std::cos(phase));
+    fft_in[i] = complex_samples[start + i] * w;
+  }
+  FftRadix2InPlace(&fft_in);
+
+  const size_t half = fft_size / 2U;
+  const double span = std::max(1.0, ceiling_db - floor_db);
+  std::vector<double> out(fft_size, 0.0);
+  for (size_t i = 0; i < fft_size; ++i) {
+    const size_t idx = (i + half) % fft_size;
+    const double magnitude = std::abs(fft_in[idx]) / static_cast<double>(fft_size);
+    const double db = 20.0 * std::log10(std::max(1.0e-12, magnitude));
+    out[i] = std::clamp((db - floor_db) / span, 0.0, 1.0);
+  }
+  if (out.size() != requested_bins) {
+    out = ResampleVectorLinear(out, requested_bins);
+  }
+  return out;
+}
+
 void BuildReceiverVisualizationFrame(const QByteArray& interleaved_iq_s16le, int spectrum_bins,
                                      bool apply_dc_suppression, std::vector<double>* waveform,
                                      std::vector<double>* spectrum, double* signal_level_db) {
@@ -2170,13 +2210,55 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
   const bool is_scan_range = (mode_tabs_ != nullptr &&
                                mode_tabs_->currentIndex() == kScanRangeModeTabIndex);
 
+  const double half_rate_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
+  const double frame_frequency_start_hz = tuned_frequency_hz - half_rate_hz;
+  const double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
+
+  if (is_scan_range && scan_range_viz_ != nullptr) {
+    // Use a fixed absolute dB scale so noise stays dark and real signals stand out.
+    // Per-frame normalization (used by the normal viz) makes noise fill the full color
+    // range which is inappropriate for a multi-frequency sweep waterfall.
+    bool fft_ok = false;
+    const int fft_val = range_fft_size_combo_
+                            ? range_fft_size_combo_->currentData().toInt(&fft_ok)
+                            : 0;
+    const int scan_bins = fft_ok ? std::max(32, fft_val / 2) : 512;
+
+    std::vector<int16_t> iq_s16;
+    if (!DecodeInt16LeBytes(interleaved_iq_s16le, &iq_s16) || iq_s16.size() < 32) {
+      return;
+    }
+    if ((iq_s16.size() % 2U) != 0U) iq_s16.pop_back();
+    const size_t iq_pairs = iq_s16.size() / 2U;
+    double i_sum = 0.0, q_sum = 0.0;
+    std::vector<std::complex<double>> cx;
+    cx.reserve(iq_pairs);
+    for (size_t i = 0; i < iq_pairs; ++i) {
+      const double iv = static_cast<double>(iq_s16[i * 2U]) / 32768.0;
+      const double qv = static_cast<double>(iq_s16[i * 2U + 1U]) / 32768.0;
+      i_sum += iv; q_sum += qv;
+      cx.emplace_back(iv, qv);
+    }
+    if (iq_visual_dc_suppression_enabled_) {
+      const double im = i_sum / static_cast<double>(iq_pairs);
+      const double qm = q_sum / static_cast<double>(iq_pairs);
+      for (auto& s : cx) s -= std::complex<double>(im, qm);
+    }
+    // Floor/ceiling in dBFS: tune these to match your hardware's noise floor.
+    // RTL-SDR typically has noise at -70 to -50 dBFS; FM broadcasts at -30 to -10 dBFS.
+    constexpr double kFloorDb   = -90.0;
+    constexpr double kCeilingDb = -20.0;
+    const std::vector<double> spectrum =
+        BuildFixedScaleSpectrumFromComplex(cx, scan_bins, kFloorDb, kCeilingDb);
+    if (spectrum.empty()) return;
+    scan_range_viz_->PushSpectrum(spectrum, frame_frequency_start_hz,
+                                   frame_frequency_end_hz, tuned_frequency_hz);
+    return;
+  }
+
   bool fft_ok = false;
-  const int fft_val = (is_scan_range && range_fft_size_combo_)
-                          ? range_fft_size_combo_->currentData().toInt(&fft_ok)
-                          : 0;
-  const int spectrum_bins = (is_scan_range && fft_ok)
-                                ? std::max(32, fft_val / 2)
-                                : signal_visualization_->FftSize() / 2;
+  const int fft_val = 0;
+  const int spectrum_bins = signal_visualization_->FftSize() / 2;
 
   std::vector<double> waveform;
   std::vector<double> spectrum;
@@ -2185,16 +2267,6 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
                                   iq_visual_dc_suppression_enabled_, &waveform, &spectrum,
                                   &signal_level_db);
   if (spectrum.empty()) {
-    return;
-  }
-
-  const double half_rate_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
-  const double frame_frequency_start_hz = tuned_frequency_hz - half_rate_hz;
-  const double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
-
-  if (is_scan_range && scan_range_viz_ != nullptr) {
-    scan_range_viz_->PushSpectrum(spectrum, frame_frequency_start_hz,
-                                   frame_frequency_end_hz, tuned_frequency_hz);
     return;
   }
 
