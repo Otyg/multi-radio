@@ -737,9 +737,9 @@ void ReceiverWorker::ProcessLoop() {
         audio_channel_idx_ = new_idx;
       }
       last_processed_channel_idx = new_idx;
-      // Discard this first block: RTL-SDR needs a moment to settle after retuning
-      // and the demod filter is cold, so the audio would be garbage anyway.
-      continue;
+      // Fall through: process this block with the freshly reset demod state.
+      // The RTL-SDR PLL settles in <1 ms, so by the time the USB read finishes
+      // (128 ms later) the IQ data is clean. The demod reconfigures on this block.
     }
     if (last_processed_channel_idx < 0 && new_idx >= 0) {
       last_processed_channel_idx = new_idx;

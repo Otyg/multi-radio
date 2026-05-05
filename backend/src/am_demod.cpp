@@ -49,7 +49,6 @@ struct AmDemodulator::Impl {
 
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
   msresamp_crcf iq_channelizer = nullptr;
-  ampmodem am_demod = nullptr;
   msresamp_rrrf audio_resampler = nullptr;
   agc_crcf channel_agc = nullptr;
   std::vector<ComplexSample> agc_scratch;
@@ -73,10 +72,7 @@ struct AmDemodulator::Impl {
       msresamp_rrrf_destroy(audio_resampler);
       audio_resampler = nullptr;
     }
-    if (am_demod != nullptr) {
-      ampmodem_destroy(am_demod);
-      am_demod = nullptr;
-    }
+
     if (iq_channelizer != nullptr) {
       msresamp_crcf_destroy(iq_channelizer);
       iq_channelizer = nullptr;
@@ -153,17 +149,6 @@ bool AmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
     return false;
   }
 
-  // DSB-AM with carrier (standard AM broadcast and VHF aviation).
-  // mod_index=0.5 is a common default; the AGC in ProcessIq handles level normalization.
-  impl_->am_demod = ampmodem_create(0.5f, LIQUID_AMPMODEM_DSB, 0);
-  if (impl_->am_demod == nullptr) {
-    if (error != nullptr) {
-      *error = "failed to create AM demodulator";
-    }
-    impl_->DestroyObjects();
-    return false;
-  }
-
   impl_->audio_resampler = msresamp_rrrf_create(audio_ratio, kResamplerStopbandAttenuationDb);
   if (impl_->audio_resampler == nullptr) {
     if (error != nullptr) {
@@ -227,8 +212,7 @@ bool AmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq,
     }
     return false;
   }
-  if (impl_->am_demod == nullptr || impl_->iq_channelizer == nullptr ||
-      impl_->audio_resampler == nullptr) {
+  if (impl_->iq_channelizer == nullptr || impl_->audio_resampler == nullptr) {
     if (error != nullptr) {
       *error = "demodulator is not configured";
     }
@@ -276,12 +260,24 @@ bool AmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq,
     impl_->channel_rssi_db = agc_crcf_get_rssi(impl_->channel_agc);
   }
 
-  // AM demodulate: ampmodem_demodulate is per-sample (no block variant in libliquid).
+  // Envelope detection: |z| for each channelized sample, then remove the DC offset
+  // (the carrier amplitude A_c). This correctly demodulates standard AM regardless of
+  // carrier frequency offset — unlike ampmodem's PLL-based coherent detector which
+  // requires the carrier to be near DC and fails when peak_offset is large (e.g. 40 kHz).
+  // The audio signal is encoded in the amplitude envelope: |A_c*(1+m*x(t))*e^(j*w_c*t)| = A_c*(1+m*x(t)).
   impl_->demodulated.resize(channelized_count);
+  const auto* channelized =
+      reinterpret_cast<const std::complex<float>*>(impl_->channelized_complex.data());
+  float dc_acc = 0.0f;
   for (unsigned int i = 0; i < channelized_count; ++i) {
-    float out_sample = 0.0f;
-    ampmodem_demodulate(impl_->am_demod, impl_->channelized_complex[i], &out_sample);
-    impl_->demodulated[i] = out_sample;
+    const float mag = std::abs(channelized[i]);
+    impl_->demodulated[i] = mag;
+    dc_acc += mag;
+  }
+  // Block-mean DC removal keeps the audio centred at zero.
+  const float dc = dc_acc / static_cast<float>(channelized_count);
+  for (unsigned int i = 0; i < channelized_count; ++i) {
+    impl_->demodulated[i] -= dc;
   }
 
   const float audio_ratio = static_cast<float>(impl_->audio_sample_rate_hz) /
