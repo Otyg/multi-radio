@@ -1843,7 +1843,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     out->set_squelch_threshold_db(channel.use_default_squelch ? default_squelch_db
                                                                : channel.squelch_threshold_db);
     out->set_dwell_ms(static_cast<uint32_t>(std::max(0, channel.dwell_ms)));
-    if (channel.frequency_mhz > 0.0) {
+    if (channel.frequency_mhz > 0.0 && mode != v1::RADIO_MODE_SCAN_RANGE) {
       config.add_frequency_list_hz(channel.frequency_mhz * 1000000.0);
     }
   }
