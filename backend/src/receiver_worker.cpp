@@ -736,6 +736,14 @@ void ReceiverWorker::ProcessLoop() {
       iq_deque_.pop_front();
     }
 
+    // Scan range uses raw IQ visualization only — skip demodulation entirely.
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (mode_ == RadioMode::kScanRange) {
+        continue;
+      }
+    }
+
     // Detect scan channel transitions: clear ring buffer and reset demods so old-channel
     // audio cannot bleed into the new channel's output. audio_channel_idx_ is the source
     // of truth for SCAN_STATUS — it only advances when the audio actually switches.
@@ -1076,6 +1084,12 @@ void ReceiverWorker::RunLoop() {
       scan_ch_idx = scan_channel_idx_;
     }
 
+    // Scan range: no audio processing — raw IQ stream handles all visualization.
+    if (mode == RadioMode::kScanRange) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      continue;
+    }
+
     const RuntimeChannel ch = SelectRuntimeChannel(mode, config, scan_ch_idx);
     const uint32_t tuned_frequency_hz =
         ch.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(ch.frequency_hz));
@@ -1113,7 +1127,7 @@ void ReceiverWorker::RunLoop() {
     // Scanner mode bypasses this — it sends muted (zero) frames while squelch is closed,
     // so there is no underrun risk and no need to accumulate a prefill.
     if (!buffer_primed && audio_buffer_ != nullptr) {
-      if (mode == RadioMode::kScanList || mode == RadioMode::kScanRange) {
+      if (mode == RadioMode::kScanList) {
         buffer_primed = true;  // scanner: muted frames prevent underruns, no prefill needed
       } else {
         const size_t minimum_prefill =
@@ -1191,11 +1205,6 @@ void ReceiverWorker::RunLoop() {
       published_samples += static_cast<uint64_t>(frame_samples);
       ++published_frames;
       audio_sample_index += static_cast<uint64_t>(frame_samples);
-      // Scan range uses raw IQ visualization only — skip audio frames entirely.
-      if (mode == RadioMode::kScanRange) {
-        next_frame_at += frame_interval;
-        continue;
-      }
       event_bus_->PublishAudioFrame(frame);
       next_frame_at += frame_interval;
     }
