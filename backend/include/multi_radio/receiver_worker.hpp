@@ -72,7 +72,8 @@ class ReceiverWorker {
   };
   IqSharedState iq_shared_;  // guarded by mu_
 
-  int scan_channel_idx_ = 0;  // guarded by mu_; written by RunLoop, read by IngestLoop
+  int scan_channel_idx_ = 0;   // guarded by mu_; written by RunLoop, read by IngestLoop
+  int audio_channel_idx_ = -1; // guarded by mu_; written by ProcessLoop when audio switches channel
 
   struct IqQueueEntry {
     IQSampleBlock block;
@@ -81,6 +82,7 @@ class ReceiverWorker {
     uint32_t channel_bandwidth_hz = 0;
     double tuned_frequency_hz = 0.0;
     Modulation modulation = Modulation::kWfm;
+    int scan_channel_idx = -1;  // channel index active when IngestLoop captured this block
   };
   std::deque<IqQueueEntry> iq_deque_;  // guarded by iq_queue_mu_
   std::mutex iq_queue_mu_;

@@ -569,6 +569,7 @@ void ReceiverWorker::IngestLoop() {
       entry.channel_bandwidth_hz = config.channel_bandwidth_hz;
       entry.tuned_frequency_hz = ch.frequency_hz;
       entry.modulation = ch.modulation;
+      entry.scan_channel_idx = scan_ch_idx;
       {
         std::lock_guard<std::mutex> lock(iq_queue_mu_);
         constexpr size_t kMaxQueueDepth = 4;
@@ -714,6 +715,41 @@ void ReceiverWorker::ProcessLoop() {
       }
       entry = std::move(iq_deque_.front());
       iq_deque_.pop_front();
+    }
+
+    // Detect scan channel transitions: clear ring buffer and reset demods so old-channel
+    // audio cannot bleed into the new channel's output. audio_channel_idx_ is the source
+    // of truth for SCAN_STATUS — it only advances when the audio actually switches.
+    {
+      static int last_processed_channel_idx = -1;
+      const int new_idx = entry.scan_channel_idx;
+      if (new_idx >= 0 && new_idx != last_processed_channel_idx &&
+          last_processed_channel_idx >= 0) {
+        // Clear stale audio from the previous channel
+        if (audio_buffer_ != nullptr) {
+          audio_buffer_->Clear();
+        }
+        // Reset demod state so the first block of the new channel starts clean
+        fm_demod.Reset();
+        fm_demod_configured = false;
+        am_demod.Reset();
+        am_demod_configured = false;
+        rebuild_audio_filters(0);
+        audio_filter_sr_hz = 0;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          audio_channel_idx_ = new_idx;
+        }
+        last_processed_channel_idx = new_idx;
+        // Discard this first block: RTL-SDR needs a moment to settle after retuning
+        // and the demod filter is cold, so the audio would be garbage anyway.
+        continue;
+      }
+      if (last_processed_channel_idx < 0 && new_idx >= 0) {
+        last_processed_channel_idx = new_idx;
+        std::lock_guard<std::mutex> lock(mu_);
+        audio_channel_idx_ = new_idx;
+      }
     }
 
     // Measure inter-block arrival time and build adapted IQ rate estimate.
@@ -1129,13 +1165,14 @@ void ReceiverWorker::RunLoop() {
         now >= next_scan_check_at) {
       next_scan_check_at = now + std::chrono::milliseconds(200);
 
-      int cur_idx;
+      // Advance the hardware/ingest channel when dwell expires.
+      int cur_ingest_idx;
       {
         std::lock_guard<std::mutex> lock(mu_);
-        cur_idx = scan_channel_idx_;
+        cur_ingest_idx = scan_channel_idx_;
       }
       const int n = static_cast<int>(config.scan_list_channels.size());
-      const auto& cur_chan = config.scan_list_channels[static_cast<size_t>(cur_idx)];
+      const auto& cur_chan = config.scan_list_channels[static_cast<size_t>(cur_ingest_idx)];
 
       const uint32_t eff_dwell_ms = (cur_chan.dwell_ms > 0) ? cur_chan.dwell_ms : config.dwell_ms;
       const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1143,30 +1180,37 @@ void ReceiverWorker::RunLoop() {
                                   .count();
 
       if (n > 1 && elapsed_ms >= static_cast<int64_t>(eff_dwell_ms)) {
-        const int next_idx = (cur_idx + 1) % n;
+        const int next_idx = (cur_ingest_idx + 1) % n;
         {
           std::lock_guard<std::mutex> lock(mu_);
           scan_channel_idx_ = next_idx;
         }
         scan_dwell_started_at = now;
-        cur_idx = next_idx;
-        buffer_primed = false;  // re-prime buffer after tuning to new channel
+        // Do NOT set buffer_primed = false here or update cur_ingest_idx for the status
+        // report below. ProcessLoop detects the transition via entry.scan_channel_idx,
+        // clears the buffer, and updates audio_channel_idx_. SCAN_STATUS follows that.
       }
 
-      // Read channelized RSSI from libliquid AGC for squelch state display.
+      // SCAN_STATUS reflects audio_channel_idx_ — the channel whose audio is actually
+      // in the ring buffer — not scan_channel_idx_ which leads by one USB block.
+      int audio_idx;
       float channel_rssi_db = -120.0f;
       {
         std::lock_guard<std::mutex> lock(mu_);
+        audio_idx = audio_channel_idx_;
         channel_rssi_db = iq_shared_.channel_rssi_db;
       }
-      const auto& report_chan = config.scan_list_channels[static_cast<size_t>(cur_idx)];
+      if (audio_idx < 0 || audio_idx >= n) {
+        audio_idx = cur_ingest_idx;  // fallback before ProcessLoop has seen any blocks
+      }
+      const auto& report_chan = config.scan_list_channels[static_cast<size_t>(audio_idx)];
       const double report_squelch = report_chan.use_default_squelch
                                         ? config.scan_list_default_squelch_db
                                         : report_chan.squelch_threshold_db;
       const bool signal_open = static_cast<double>(channel_rssi_db) >= report_squelch;
 
       std::ostringstream scan_ss;
-      scan_ss << "SCAN_STATUS idx=" << cur_idx
+      scan_ss << "SCAN_STATUS idx=" << audio_idx
               << " state=" << (signal_open ? "open" : "closed")
               << " signal_db=" << FormatDouble(static_cast<double>(channel_rssi_db), 1)
               << " threshold_db=" << FormatDouble(report_squelch, 1)
