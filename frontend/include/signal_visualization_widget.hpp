@@ -29,6 +29,7 @@ class SignalVisualizationWidget : public QWidget {
   void SetReceiverFilter(int receiver_filter_id);
   void SetVisualizationSettings(int fft_size, double frequency_start_hz, double frequency_end_hz);
   void SetSpectrumSource(SpectrumSource source);
+  void SetChannelLabel(const QString& label);
   void SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db);
   void SetReceiverSignalLevelDb(uint32_t receiver_id, double signal_level_db);
   void SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db, double psd_floor_db, double snr_db,
@@ -147,6 +148,7 @@ class SignalVisualizationWidget : public QWidget {
   QHash<uint32_t, ReceiverState> states_;
   std::vector<uint32_t> known_receivers_;
   int receiver_filter_id_ = -1;
+  QString channel_label_;
   int fft_size_ = 256;
   int spectrum_bins_ = 128;
   double frequency_start_hz_ = 0.0;

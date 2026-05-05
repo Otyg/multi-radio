@@ -149,6 +149,14 @@ void SignalVisualizationWidget::SetSpectrumSource(SpectrumSource source) {
   update();
 }
 
+void SignalVisualizationWidget::SetChannelLabel(const QString& label) {
+  if (channel_label_ == label) {
+    return;
+  }
+  channel_label_ = label;
+  update();
+}
+
 void SignalVisualizationWidget::SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db) {
   ReceiverState& state = states_[receiver_id];
   const double clamped_db = std::clamp(threshold_db, -120.0, 0.0);
@@ -316,6 +324,28 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                                waveform_content.width(), meter_height);
 
   DrawWaveform(&painter, waveform_plot_rect, display.waveform);
+
+  // Channel label overlay: shown in scanner mode when a channel is active.
+  if (!channel_label_.isEmpty() && waveform_plot_rect.isValid()) {
+    painter.save();
+    painter.setClipRect(waveform_plot_rect);
+    QFont label_font = painter.font();
+    label_font.setPointSizeF(label_font.pointSizeF() * 1.5);
+    label_font.setBold(true);
+    painter.setFont(label_font);
+    const QFontMetrics fm(label_font);
+    // Measure bounding rect for multi-line text
+    const QRect text_bounds = fm.boundingRect(
+        waveform_plot_rect, Qt::AlignCenter | Qt::TextWordWrap, channel_label_);
+    const QRect bg_rect = text_bounds.adjusted(-14, -10, 14, 10);
+    painter.setBrush(QColor(8, 18, 32, 210));
+    painter.setPen(Qt::NoPen);
+    painter.drawRoundedRect(bg_rect.intersected(waveform_plot_rect), 8, 8);
+    painter.setPen(QColor(230, 240, 255));
+    painter.drawText(waveform_plot_rect, Qt::AlignCenter | Qt::TextWordWrap, channel_label_);
+    painter.restore();
+  }
+
   DrawLevelMeter(&painter, level_meter_rect, display.signal_level, display.signal_peak_hold,
                  display.has_signal_level_db, display.signal_level_db, display.has_iq_health,
                  display.psd_peak_db, display.psd_floor_db, display.snr_db, display.psd_peak_offset_hz,

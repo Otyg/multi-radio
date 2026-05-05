@@ -1448,6 +1448,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     auto_squelch_restore_monitor_mode_ = false;
     active_scan_list_channel_index_ = -1;
     active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+    if (signal_visualization_ != nullptr) {
+      signal_visualization_->SetChannelLabel(QString());
+    }
     if (receiver_combo_->currentIndex() >= 0 && scan_list_default_squelch_spin_ != nullptr) {
       const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
       signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id,
@@ -1475,6 +1478,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       return;
     }
     AppendLog(QString("Tab switch stop requested for receiver %1").arg(receiver_id));
+    if (signal_visualization_ != nullptr) {
+      signal_visualization_->SetChannelLabel(QString());
+    }
     RefreshReceivers();
     ApplyModeAndConfig();
   });
@@ -1684,6 +1690,9 @@ void MainWindow::StopSelectedReceiver() {
     return;
   }
   AppendLog(QString("Stop requested for receiver %1").arg(receiver_id));
+  if (signal_visualization_ != nullptr) {
+    signal_visualization_->SetChannelLabel(QString());
+  }
   RefreshReceivers();
 }
 
@@ -2732,6 +2741,23 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
     active_scan_list_channel_state_ = ScanListChannelState::kSquelchClosed;
   }
   RefreshScanListChannelCards();
+
+  // Update the waveform channel label so the user knows which channel's audio is playing.
+  if (signal_visualization_ != nullptr) {
+    const auto& ch = scan_list_channels_[static_cast<size_t>(index)];
+    QString name = ch.label.trimmed();
+    if (name.isEmpty()) {
+      name = QString("Kanal %1").arg(index + 1);
+    }
+    const QString freq_str =
+        (ch.frequency_mhz > 0.0) ? QString("%1 MHz").arg(ch.frequency_mhz, 0, 'f', 3) : QString();
+    const QString mod_str = ModulationLabel(ch.modulation);
+    QString label = name;
+    if (!freq_str.isEmpty()) {
+      label += QString("\n%1  %2").arg(freq_str).arg(mod_str);
+    }
+    signal_visualization_->SetChannelLabel(label);
+  }
 }
 
 void MainWindow::StartAutoSquelchCalibration() {
