@@ -590,6 +590,20 @@ void ReceiverWorker::ProcessLoop() {
   uint64_t iq_sequence = 0;
   uint64_t iq_sample_index = 0;
 
+  // Block arrival timing: measure the actual IQ delivery rate to compensate for
+  // the ~3ms per-call OS overhead of rtlsdr_read_sync. With 128ms nominal blocks
+  // a 3ms overhead gives 7.625 blocks/sec instead of 7.8125, producing only
+  // 31232 audio samples/sec. By measuring the true rate and adjusting the
+  // resampler's input_sr, we get the right number of output samples per block.
+  std::chrono::steady_clock::time_point last_block_time{};
+  bool have_last_block_time = false;
+  double ema_block_period_s = 0.131;
+  int block_rate_samples = 0;
+  uint32_t adapted_iq_sr_hz = 0;
+  bool adaptive_rate_applied = false;
+  constexpr int kAdaptiveWarmupBlocks = 15;
+  constexpr double kEmaAlpha = 0.08;
+
   while (running_.load()) {
     IqQueueEntry entry;
     {
@@ -600,6 +614,38 @@ void ReceiverWorker::ProcessLoop() {
       }
       entry = std::move(iq_deque_.front());
       iq_deque_.pop_front();
+    }
+
+    // Measure inter-block arrival time and build adapted IQ rate estimate.
+    // Freeze updates once the adapted rate has been applied to avoid reconfiguring.
+    if (!adaptive_rate_applied) {
+      const auto block_now = std::chrono::steady_clock::now();
+      if (have_last_block_time) {
+        const double period = std::chrono::duration<double>(block_now - last_block_time).count();
+        if (period > 0.04 && period < 0.6) {  // sanity gate: 40ms–600ms
+          ++block_rate_samples;
+          if (block_rate_samples <= 3) {
+            ema_block_period_s = ema_block_period_s + (period - ema_block_period_s) /
+                                 static_cast<double>(block_rate_samples + 1);
+          } else {
+            ema_block_period_s = kEmaAlpha * period + (1.0 - kEmaAlpha) * ema_block_period_s;
+          }
+          if (block_rate_samples >= kAdaptiveWarmupBlocks) {
+            const uint64_t block_iq_pairs = entry.block.interleaved_iq.size() / 2U;
+            if (block_iq_pairs > 0 && ema_block_period_s > 0.001) {
+              const double measured = static_cast<double>(block_iq_pairs) / ema_block_period_s;
+              const double nominal = static_cast<double>(entry.effective_sample_rate_hz);
+              // Only adopt if it deviates enough to matter (>0.5%) and is plausible (±15%)
+              if (std::abs(measured - nominal) / nominal > 0.005) {
+                adapted_iq_sr_hz = static_cast<uint32_t>(
+                    std::llround(std::clamp(measured, nominal * 0.85, nominal * 1.15)));
+              }
+            }
+          }
+        }
+      }
+      last_block_time = block_now;
+      have_last_block_time = true;
     }
 
     // IQ stats accumulation
@@ -649,13 +695,23 @@ void ReceiverWorker::ProcessLoop() {
           fm_demod_warned_unavailable = true;
         }
       } else {
-        const uint32_t demod_input_sr_hz = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
-                                                                            : entry.effective_sample_rate_hz;
-        const bool demod_reconfigure =
-            !fm_demod_configured || fm_demod_input_sr_hz != demod_input_sr_hz ||
+        // Use adapted IQ rate once measured (compensates for USB read overhead).
+        // After applying once, freeze adapted_iq_sr_hz to prevent repeated reconfigures.
+        const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
+                                                                        : entry.effective_sample_rate_hz;
+        const uint32_t demod_input_sr_hz =
+            (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) ? adapted_iq_sr_hz : nominal_iq_sr;
+
+        const bool other_params_changed =
             fm_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
             fm_demod_channel_bw_hz != entry.channel_bandwidth_hz ||
             fm_demod_modulation != entry.modulation;
+        // Trigger IQ-rate reconfigure only for the initial configure or the one-time
+        // adaptive correction. Ongoing jitter in the EMA never re-triggers reconfigure.
+        const bool iq_sr_changed = !fm_demod_configured ||
+            (adapted_iq_sr_hz != 0 && !adaptive_rate_applied &&
+             fm_demod_input_sr_hz != adapted_iq_sr_hz);
+        const bool demod_reconfigure = !fm_demod_configured || other_params_changed || iq_sr_changed;
         if (demod_reconfigure) {
           std::string demod_error;
           if (!fm_demod.Configure(demod_input_sr_hz, entry.audio_sample_rate_hz, entry.modulation,
@@ -669,10 +725,14 @@ void ReceiverWorker::ProcessLoop() {
             fm_demod_audio_sr_hz = entry.audio_sample_rate_hz;
             fm_demod_channel_bw_hz = entry.channel_bandwidth_hz;
             fm_demod_modulation = entry.modulation;
+            if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied && iq_sr_changed) {
+              adaptive_rate_applied = true;
+            }
             std::ostringstream demod_msg;
             demod_msg << "FM demod configured (process) mod=" << ModulationToken(entry.modulation)
                       << " iq_sr=" << fm_demod_input_sr_hz << " audio_sr=" << fm_demod_audio_sr_hz
-                      << " bw=" << fm_demod_channel_bw_hz;
+                      << " bw=" << fm_demod_channel_bw_hz
+                      << (adaptive_rate_applied ? " (adapted)" : " (nominal)");
             PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
           }
         }
