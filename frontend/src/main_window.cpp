@@ -1174,6 +1174,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   mode_tabs_ = new QTabWidget(control_group);
   mode_tabs_->setUsesScrollButtons(false);
+  mode_tabs_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  control_group->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
   auto* fixed_tab = new QWidget(mode_tabs_);
   auto* fixed_layout = new QFormLayout(fixed_tab);
@@ -1186,6 +1188,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
   mode_tabs_->addTab(fixed_tab, "FIXED");
+
+  // Create scan_range_viz_ here so it can live inside the SCAN_RANGE tab.
+  scan_range_viz_ = new ScanRangeVisualizationWidget(central);
+  scan_range_viz_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
   auto* range_tab = new QWidget(mode_tabs_);
   auto* range_outer = new QVBoxLayout(range_tab);
@@ -1200,7 +1206,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_row->addWidget(range_fft_size_combo_);
   range_row->addStretch(1);
   range_outer->addLayout(range_row);
-  range_outer->addStretch(1);
+  range_outer->addWidget(scan_range_viz_);  // fills remaining tab space
   mode_tabs_->addTab(range_tab, "SCAN_RANGE");
 
   auto* list_tab = new QWidget(mode_tabs_);
@@ -1405,17 +1411,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     signal_visualization_->SetNoiseFloorDb(noise_floor_db);
   }
 
-  scan_range_viz_ = new ScanRangeVisualizationWidget(central);
-
-  content_stack_ = new QStackedWidget(central);
-  content_stack_->addWidget(signal_visualization_);  // index 0 — normal modes
-  content_stack_->addWidget(scan_range_viz_);         // index 1 — scan range
-
   event_log_ = new QPlainTextEdit(central);
   event_log_->setReadOnly(true);
 
-  root_layout->addLayout(top_layout);
-  root_layout->addWidget(content_stack_, 1);
+  root_layout->addLayout(top_layout, 1);
+  root_layout->addWidget(signal_visualization_);
   root_layout->addWidget(event_log_);
 
   setCentralWidget(central);
@@ -1533,10 +1533,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       return;
     }
 
-    // Switch the visualization stack and configure scan range viz immediately,
+    // Show/hide signal_visualization_ and configure scan range viz immediately,
     // before StopReceiver — these are UI-only and safe to do unconditionally.
-    if (content_stack_ != nullptr) {
-      content_stack_->setCurrentIndex(index == kScanRangeModeTabIndex ? 1 : 0);
+    if (signal_visualization_ != nullptr) {
+      signal_visualization_->setVisible(index != kScanRangeModeTabIndex);
     }
     if (index == kScanRangeModeTabIndex && scan_range_viz_ != nullptr) {
       const double start = range_start_edit_->text().toDouble() * 1e6;

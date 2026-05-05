@@ -15,7 +15,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
-#include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
 
@@ -179,7 +178,6 @@ class MainWindow : public QMainWindow {
   QPlainTextEdit* event_log_ = nullptr;
   SignalVisualizationWidget* signal_visualization_ = nullptr;
   ScanRangeVisualizationWidget* scan_range_viz_ = nullptr;
-  QStackedWidget* content_stack_ = nullptr;
 #if MR_HAS_QT_MULTIMEDIA
   QAudioSink* audio_sink_ = nullptr;
 #endif
