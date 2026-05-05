@@ -20,6 +20,8 @@ class ScanRangeVisualizationWidget : public QWidget {
   // Called for each incoming IQ spectrum frame.
   void PushSpectrum(const std::vector<double>& spectrum, double frame_start_hz,
                     double frame_end_hz, double tuned_hz);
+  // Suppress waterfall pixels with normalized value < threshold (0–1).
+  void SetNoiseGate(bool enabled, double threshold);
 
  protected:
   void paintEvent(QPaintEvent* event) override;
@@ -35,6 +37,9 @@ class ScanRangeVisualizationWidget : public QWidget {
   double scan_end_hz_ = 0.0;
   double scan_step_hz_ = 0.0;
   int total_bins_ = 0;
+
+  bool noise_gate_enabled_ = false;
+  double noise_gate_threshold_ = 0.0;
 
   QVector<double> sweep_buffer_;
   QVector<double> latest_spectrum_;

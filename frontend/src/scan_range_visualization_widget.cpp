@@ -36,6 +36,12 @@ void ScanRangeVisualizationWidget::Configure(double start_hz, double end_hz,
   update();
 }
 
+void ScanRangeVisualizationWidget::SetNoiseGate(bool enabled, double threshold) {
+  noise_gate_enabled_ = enabled;
+  noise_gate_threshold_ = threshold;
+  update();
+}
+
 void ScanRangeVisualizationWidget::PushSpectrum(const std::vector<double>& spectrum,
                                                  double frame_start_hz,
                                                  double frame_end_hz,
@@ -250,7 +256,9 @@ void ScanRangeVisualizationWidget::DrawWaterfall(QPainter* p, const QRect& rect,
       const int lo = std::clamp(static_cast<int>(pos), 0, n - 1);
       const int hi = std::clamp(lo + 1, 0, n - 1);
       const double v = data[lo] + (pos - lo) * (data[hi] - data[lo]);
-      line[px] = HeatColor(Clamp01(v)).rgb();
+      line[px] = (noise_gate_enabled_ && v < noise_gate_threshold_)
+                     ? QColor(14, 18, 26).rgb()
+                     : HeatColor(Clamp01(v)).rgb();
     }
   };
 

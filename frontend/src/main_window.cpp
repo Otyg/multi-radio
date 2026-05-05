@@ -53,6 +53,8 @@ constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
 constexpr double kDefaultScanListSquelchDb = -67.5;
+constexpr double kScanSpectrumFloorDb   = -90.0;
+constexpr double kScanSpectrumCeilingDb = -20.0;
 constexpr int kAudioPrefillMs = 180;
 constexpr int kAudioPrefillMaxWaitMs = 450;
 constexpr int kAudioMinStartupMs = 40;
@@ -1206,6 +1208,21 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_row->addWidget(range_fft_size_combo_);
   range_row->addStretch(1);
   range_outer->addLayout(range_row);
+
+  range_noise_gate_checkbox_ = new QCheckBox("Göm brus under", range_tab);
+  range_noise_gate_spin_ = new QDoubleSpinBox(range_tab);
+  range_noise_gate_spin_->setRange(kScanSpectrumFloorDb, kScanSpectrumCeilingDb);
+  range_noise_gate_spin_->setSingleStep(1.0);
+  range_noise_gate_spin_->setDecimals(0);
+  range_noise_gate_spin_->setValue(-30.0);
+  range_noise_gate_spin_->setSuffix(" dBFS");
+  range_noise_gate_spin_->setEnabled(false);
+  auto* threshold_row = new QHBoxLayout();
+  threshold_row->addWidget(range_noise_gate_checkbox_);
+  threshold_row->addWidget(range_noise_gate_spin_);
+  threshold_row->addStretch(1);
+  range_outer->addLayout(threshold_row);
+
   range_outer->addWidget(scan_range_viz_);  // fills remaining tab space
   mode_tabs_->addTab(range_tab, "SCAN_RANGE");
 
@@ -1571,6 +1588,21 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(lo_offset_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
     lo_offset_spin_->setEnabled(enabled);
   });
+
+  auto update_scan_noise_gate = [this]() {
+    if (scan_range_viz_ == nullptr) return;
+    const bool enabled = range_noise_gate_checkbox_->isChecked();
+    const double db = range_noise_gate_spin_->value();
+    const double span = kScanSpectrumCeilingDb - kScanSpectrumFloorDb;
+    const double normalized = std::clamp((db - kScanSpectrumFloorDb) / span, 0.0, 1.0);
+    scan_range_viz_->SetNoiseGate(enabled, normalized);
+  };
+  connect(range_noise_gate_checkbox_, &QCheckBox::toggled, this, [this, update_scan_noise_gate](bool checked) {
+    range_noise_gate_spin_->setEnabled(checked);
+    update_scan_noise_gate();
+  });
+  connect(range_noise_gate_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [update_scan_noise_gate](double) { update_scan_noise_gate(); });
 
   connect(client_.get(), &GrpcClient::ReceiverEventReceived, this, &MainWindow::OnReceiverEvent,
           Qt::QueuedConnection);
@@ -2244,12 +2276,9 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
       const double qm = q_sum / static_cast<double>(iq_pairs);
       for (auto& s : cx) s -= std::complex<double>(im, qm);
     }
-    // Floor/ceiling in dBFS: tune these to match your hardware's noise floor.
-    // RTL-SDR typically has noise at -70 to -50 dBFS; FM broadcasts at -30 to -10 dBFS.
-    constexpr double kFloorDb   = -90.0;
-    constexpr double kCeilingDb = -20.0;
     const std::vector<double> spectrum =
-        BuildFixedScaleSpectrumFromComplex(cx, scan_bins, kFloorDb, kCeilingDb);
+        BuildFixedScaleSpectrumFromComplex(cx, scan_bins,
+                                           kScanSpectrumFloorDb, kScanSpectrumCeilingDb);
     if (spectrum.empty()) return;
     scan_range_viz_->PushSpectrum(spectrum, frame_frequency_start_hz,
                                    frame_frequency_end_hz, tuned_frequency_hz);
