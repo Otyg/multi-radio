@@ -1493,16 +1493,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       return;
     }
 
-    const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
-    std::string error;
-    if (!client_->StopReceiver(receiver_id, &error)) {
-      QMessageBox::warning(this, "StopReceiver failed", QString::fromStdString(error));
-      return;
-    }
-    AppendLog(QString("Tab switch stop requested for receiver %1").arg(receiver_id));
-    if (signal_visualization_ != nullptr) {
-      signal_visualization_->SetChannelLabel(QString());
-    }
+    // Switch the visualization stack and configure scan range viz immediately,
+    // before StopReceiver — these are UI-only and safe to do unconditionally.
     if (content_stack_ != nullptr) {
       content_stack_->setCurrentIndex(index == kScanRangeModeTabIndex ? 1 : 0);
     }
@@ -1515,6 +1507,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
                               ? range_fft_size_combo_->currentData().toInt(&fft_ok)
                               : 1024;
       scan_range_viz_->Configure(start, end, step, fft_ok ? fft_val : 1024);
+    }
+
+    const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+    std::string error;
+    if (!client_->StopReceiver(receiver_id, &error)) {
+      QMessageBox::warning(this, "StopReceiver failed", QString::fromStdString(error));
+      return;
+    }
+    AppendLog(QString("Tab switch stop requested for receiver %1").arg(receiver_id));
+    if (signal_visualization_ != nullptr) {
+      signal_visualization_->SetChannelLabel(QString());
     }
     RefreshReceivers();
     ApplyModeAndConfig();

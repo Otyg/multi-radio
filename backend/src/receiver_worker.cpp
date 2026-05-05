@@ -436,10 +436,12 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
   {
     std::lock_guard<std::mutex> lock(mu_);
     ModeConfig normalized = NormalizeModeConfig(config);
-    // For scan range: generate frequency list from range params if the client didn't send one.
-    if (mode_ == RadioMode::kScanRange && normalized.frequency_list_hz.empty() &&
+    // For scan range: always generate the frequency list from range params.
+    // The client-supplied list may be polluted with entries from other modes.
+    if (mode_ == RadioMode::kScanRange &&
         normalized.range_step_hz > 0.0 &&
         normalized.range_end_hz > normalized.range_start_hz) {
+      normalized.frequency_list_hz.clear();
       for (double f = normalized.range_start_hz;
            f <= normalized.range_end_hz + normalized.range_step_hz * 0.01;
            f += normalized.range_step_hz) {
@@ -1100,8 +1102,28 @@ void ReceiverWorker::RunLoop() {
       scan_ch_idx = scan_channel_idx_;
     }
 
-    // Scan range: no audio processing — raw IQ stream handles all visualization.
+    // Scan range: advance scan channel on dwell expiry, then sleep — no audio processing.
     if (mode == RadioMode::kScanRange) {
+      const auto now_sr = std::chrono::steady_clock::now();
+      if (!config.frequency_list_hz.empty() && now_sr >= next_scan_check_at) {
+        next_scan_check_at = now_sr + std::chrono::milliseconds(200);
+        const int n = static_cast<int>(config.frequency_list_hz.size());
+        int cur_idx;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          cur_idx = scan_channel_idx_;
+        }
+        const int64_t dwell_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     now_sr - scan_dwell_started_at).count();
+        if (n > 1 && dwell_ms >= static_cast<int64_t>(config.dwell_ms)) {
+          const int next_idx = (cur_idx + 1) % n;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            scan_channel_idx_ = next_idx;
+          }
+          scan_dwell_started_at = now_sr;
+        }
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
       continue;
     }
@@ -1331,27 +1353,6 @@ void ReceiverWorker::RunLoop() {
               << " threshold_db=" << FormatDouble(report_squelch, 1)
               << " monitor=" << (config.scan_list_monitor_mode ? 1 : 0);
       PublishEvent(EventKind::kInfo, scan_ss.str(), report_chan.frequency_hz, false);
-    }
-
-    if (mode == RadioMode::kScanRange && !config.frequency_list_hz.empty() &&
-        now >= next_scan_check_at) {
-      next_scan_check_at = now + std::chrono::milliseconds(200);
-      const int n = static_cast<int>(config.frequency_list_hz.size());
-      int cur_idx;
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        cur_idx = scan_channel_idx_;
-      }
-      const int64_t dwell_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           now - scan_dwell_started_at).count();
-      if (n > 1 && dwell_elapsed_ms >= static_cast<int64_t>(config.dwell_ms)) {
-        const int next_idx = (cur_idx + 1) % n;
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          scan_channel_idx_ = next_idx;
-        }
-        scan_dwell_started_at = now;
-      }
     }
 
     if (now >= next_stats_at) {
