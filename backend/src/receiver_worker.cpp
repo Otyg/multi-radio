@@ -838,23 +838,19 @@ void ReceiverWorker::ProcessLoop() {
           fm_demod_warned_unavailable = true;
         }
       } else {
-        // Use adapted IQ rate once measured (compensates for USB read overhead).
-        // After applying once, freeze adapted_iq_sr_hz to prevent repeated reconfigures.
+        // Use adapted IQ rate whenever measured (compensates for USB read overhead).
+        // adaptive_rate_applied only freezes the EMA measurement; it does NOT gate
+        // which rate is used for demod — the adapted rate is always preferred once known.
         const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
                                                                         : entry.effective_sample_rate_hz;
-        const uint32_t demod_input_sr_hz =
-            (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) ? adapted_iq_sr_hz : nominal_iq_sr;
+        const uint32_t demod_input_sr_hz = (adapted_iq_sr_hz != 0) ? adapted_iq_sr_hz : nominal_iq_sr;
 
         const bool other_params_changed =
             fm_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
             fm_demod_channel_bw_hz != entry.channel_bandwidth_hz ||
             fm_demod_modulation != entry.modulation;
-        // Trigger IQ-rate reconfigure only for the initial configure or the one-time
-        // adaptive correction. Ongoing jitter in the EMA never re-triggers reconfigure.
-        const bool iq_sr_changed = !fm_demod_configured ||
-            (adapted_iq_sr_hz != 0 && !adaptive_rate_applied &&
-             fm_demod_input_sr_hz != adapted_iq_sr_hz);
-        const bool demod_reconfigure = !fm_demod_configured || other_params_changed || iq_sr_changed;
+        const bool demod_reconfigure = !fm_demod_configured || other_params_changed ||
+                                       fm_demod_input_sr_hz != demod_input_sr_hz;
         if (demod_reconfigure) {
           std::string demod_error;
           if (!fm_demod.Configure(demod_input_sr_hz, entry.audio_sample_rate_hz, entry.modulation,
@@ -868,14 +864,14 @@ void ReceiverWorker::ProcessLoop() {
             fm_demod_audio_sr_hz = entry.audio_sample_rate_hz;
             fm_demod_channel_bw_hz = entry.channel_bandwidth_hz;
             fm_demod_modulation = entry.modulation;
-            if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied && iq_sr_changed) {
-              adaptive_rate_applied = true;
+            if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
+              adaptive_rate_applied = true;  // freeze EMA once first adapted config is applied
             }
             std::ostringstream demod_msg;
             demod_msg << "FM demod configured (process) mod=" << ModulationToken(entry.modulation)
                       << " iq_sr=" << fm_demod_input_sr_hz << " audio_sr=" << fm_demod_audio_sr_hz
                       << " bw=" << fm_demod_channel_bw_hz
-                      << (adaptive_rate_applied ? " (adapted)" : " (nominal)");
+                      << (adapted_iq_sr_hz != 0 ? " (adapted)" : " (nominal)");
             PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
           }
         }
@@ -928,8 +924,7 @@ void ReceiverWorker::ProcessLoop() {
         const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0
                                            ? entry.block.sample_rate_hz
                                            : entry.effective_sample_rate_hz;
-        const uint32_t demod_input_sr =
-            (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) ? adapted_iq_sr_hz : nominal_iq_sr;
+        const uint32_t demod_input_sr = (adapted_iq_sr_hz != 0) ? adapted_iq_sr_hz : nominal_iq_sr;
         const bool am_reconfigure = !am_demod_configured ||
                                     am_demod_input_sr_hz != demod_input_sr ||
                                     am_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
@@ -947,11 +942,15 @@ void ReceiverWorker::ProcessLoop() {
             am_demod_input_sr_hz = demod_input_sr;
             am_demod_audio_sr_hz = entry.audio_sample_rate_hz;
             am_demod_channel_bw_hz = entry.channel_bandwidth_hz;
+            if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
+              adaptive_rate_applied = true;  // freeze EMA
+            }
             std::ostringstream demod_msg;
             demod_msg << "AM demod configured (process)"
                       << " iq_sr=" << am_demod_input_sr_hz
                       << " audio_sr=" << am_demod_audio_sr_hz
-                      << " bw=" << am_demod_channel_bw_hz;
+                      << " bw=" << am_demod_channel_bw_hz
+                      << (adapted_iq_sr_hz != 0 ? " (adapted)" : " (nominal)");
             PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
           }
         }
