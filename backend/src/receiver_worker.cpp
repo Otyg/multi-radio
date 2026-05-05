@@ -1045,8 +1045,13 @@ void ReceiverWorker::RunLoop() {
   bool buffer_primed = false;
 
   // Scan list state machine
+  enum class ScanState { kWaiting, kOpen, kTail };
+  ScanState scan_state = ScanState::kWaiting;
+  bool scan_audio_muted = true;   // true → zero-fill frames; only active for scanner non-monitor mode
   auto scan_dwell_started_at = std::chrono::steady_clock::now();
+  auto scan_tail_started_at = std::chrono::steady_clock::now();
   auto next_scan_check_at = std::chrono::steady_clock::now();
+  constexpr int64_t kScanTailMs = 500;  // hold time after signal drops before advancing
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -1093,19 +1098,21 @@ void ReceiverWorker::RunLoop() {
     }
 
     // Pre-buffering: wait until the ring buffer holds ~300ms of audio before starting output.
-    // RTL-SDR delivers IQ in large blocks (~128ms each at 1024kHz), so the audio fill rate is
-    // bursty. Without sufficient pre-fill the output side outruns the ingest side between
-    // block deliveries, causing concealment (click/dropout). 300ms covers ~2.3 IQ blocks,
-    // giving a comfortable margin against timing jitter.
+    // Scanner mode bypasses this — it sends muted (zero) frames while squelch is closed,
+    // so there is no underrun risk and no need to accumulate a prefill.
     if (!buffer_primed && audio_buffer_ != nullptr) {
-      const size_t minimum_prefill =
-          static_cast<size_t>(static_cast<uint64_t>(audio_sample_rate_hz) * 300U / 1000U);
-      if (audio_buffer_->AvailableForRead() < minimum_prefill) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        continue;
+      if (mode == RadioMode::kScanList) {
+        buffer_primed = true;  // scanner: muted frames prevent underruns, no prefill needed
+      } else {
+        const size_t minimum_prefill =
+            static_cast<size_t>(static_cast<uint64_t>(audio_sample_rate_hz) * 300U / 1000U);
+        if (audio_buffer_->AvailableForRead() < minimum_prefill) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
+        buffer_primed = true;
+        PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
       }
-      buffer_primed = true;
-      PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -1162,6 +1169,12 @@ void ReceiverWorker::RunLoop() {
         ++demod_ok_blocks;
       }
 
+      // Squelch audio gate: mute frame when scanner squelch is closed (non-monitor mode).
+      // The ring buffer is still drained above to prevent overflow; only output is silenced.
+      if (mode == RadioMode::kScanList && !config.scan_list_monitor_mode && scan_audio_muted) {
+        std::fill(frame.pcm_s16le.begin(), frame.pcm_s16le.end(), int16_t{0});
+      }
+
       generated_samples += frame_filled;
       published_samples += static_cast<uint64_t>(frame_samples);
       ++published_frames;
@@ -1170,60 +1183,108 @@ void ReceiverWorker::RunLoop() {
       next_frame_at += frame_interval;
     }
 
-    // Scan list: emit SCAN_STATUS every 200ms and advance channel when dwell expires.
-    // The frontend routes "SCAN_STATUS " messages to ApplyScanListStatusEvent() which
-    // updates channel cards and drives auto-squelch calibration loop counting.
+    // Scan list: check squelch and advance channel every 200ms.
+    // Normal mode: squelch-gated audio + channel advance only on squelch close.
+    // Monitor mode: full dwell always, audio always on (for calibration).
     if (mode == RadioMode::kScanList && !config.scan_list_channels.empty() &&
         now >= next_scan_check_at) {
       next_scan_check_at = now + std::chrono::milliseconds(200);
 
-      // Advance the hardware/ingest channel when dwell expires.
       int cur_ingest_idx;
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        cur_ingest_idx = scan_channel_idx_;
-      }
-      const int n = static_cast<int>(config.scan_list_channels.size());
-      const auto& cur_chan = config.scan_list_channels[static_cast<size_t>(cur_ingest_idx)];
-
-      const uint32_t eff_dwell_ms = (cur_chan.dwell_ms > 0) ? cur_chan.dwell_ms : config.dwell_ms;
-      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  now - scan_dwell_started_at)
-                                  .count();
-
-      if (n > 1 && elapsed_ms >= static_cast<int64_t>(eff_dwell_ms)) {
-        const int next_idx = (cur_ingest_idx + 1) % n;
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          scan_channel_idx_ = next_idx;
-        }
-        scan_dwell_started_at = now;
-        // Do NOT set buffer_primed = false here or update cur_ingest_idx for the status
-        // report below. ProcessLoop detects the transition via entry.scan_channel_idx,
-        // clears the buffer, and updates audio_channel_idx_. SCAN_STATUS follows that.
-      }
-
-      // SCAN_STATUS reflects audio_channel_idx_ — the channel whose audio is actually
-      // in the ring buffer — not scan_channel_idx_ which leads by one USB block.
-      int audio_idx;
       float channel_rssi_db = -120.0f;
       {
         std::lock_guard<std::mutex> lock(mu_);
-        audio_idx = audio_channel_idx_;
+        cur_ingest_idx = scan_channel_idx_;
         channel_rssi_db = iq_shared_.channel_rssi_db;
       }
+      const int n = static_cast<int>(config.scan_list_channels.size());
+      const auto& cur_chan = config.scan_list_channels[static_cast<size_t>(cur_ingest_idx)];
+      const double squelch_db = cur_chan.use_default_squelch
+                                    ? config.scan_list_default_squelch_db
+                                    : cur_chan.squelch_threshold_db;
+      const bool signal_above = static_cast<double>(channel_rssi_db) >= squelch_db;
+      const uint32_t eff_dwell_ms = (cur_chan.dwell_ms > 0) ? cur_chan.dwell_ms : config.dwell_ms;
+      const int64_t dwell_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           now - scan_dwell_started_at).count();
+
+      bool should_advance = false;
+
+      if (config.scan_list_monitor_mode) {
+        // Monitor mode: advance on dwell only, audio always unmuted.
+        scan_audio_muted = false;
+        if (n > 1 && dwell_elapsed_ms >= static_cast<int64_t>(eff_dwell_ms)) {
+          should_advance = true;
+        }
+      } else {
+        // Normal scanner mode: squelch gates audio and channel advance.
+        switch (scan_state) {
+          case ScanState::kWaiting:
+            // No signal yet — wait for squelch to open or dwell to expire.
+            if (signal_above) {
+              scan_state = ScanState::kOpen;
+              scan_audio_muted = false;
+            } else if (n > 1 && dwell_elapsed_ms >= static_cast<int64_t>(eff_dwell_ms)) {
+              should_advance = true;  // no signal in dwell window, skip channel
+            }
+            break;
+          case ScanState::kOpen:
+            // Signal is present — stay on channel regardless of dwell.
+            if (!signal_above) {
+              scan_state = ScanState::kTail;
+              scan_tail_started_at = now;
+              scan_audio_muted = true;
+            }
+            break;
+          case ScanState::kTail:
+            // Signal just dropped — brief hold before advancing (handles gaps in transmission).
+            if (signal_above) {
+              scan_state = ScanState::kOpen;  // signal came back
+              scan_audio_muted = false;
+            } else {
+              const int64_t tail_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  now - scan_tail_started_at).count();
+              if (tail_elapsed_ms >= kScanTailMs) {
+                should_advance = true;  // tail expired, move on
+              }
+            }
+            break;
+        }
+      }
+
+      if (should_advance) {
+        if (n > 1) {
+          const int next_idx = (cur_ingest_idx + 1) % n;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            scan_channel_idx_ = next_idx;
+          }
+        }
+        scan_dwell_started_at = now;
+        scan_state = ScanState::kWaiting;
+        scan_audio_muted = true;
+      }
+
+      // SCAN_STATUS: report audio_channel_idx_ (the channel whose audio is in the ring buffer).
+      int audio_idx;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        audio_idx = audio_channel_idx_;
+      }
       if (audio_idx < 0 || audio_idx >= n) {
-        audio_idx = cur_ingest_idx;  // fallback before ProcessLoop has seen any blocks
+        audio_idx = cur_ingest_idx;
       }
       const auto& report_chan = config.scan_list_channels[static_cast<size_t>(audio_idx)];
       const double report_squelch = report_chan.use_default_squelch
                                         ? config.scan_list_default_squelch_db
                                         : report_chan.squelch_threshold_db;
-      const bool signal_open = static_cast<double>(channel_rssi_db) >= report_squelch;
+      // State for SCAN_STATUS: in monitor mode use raw RSSI; in normal mode use scan_state.
+      const bool state_open = config.scan_list_monitor_mode
+                                  ? (static_cast<double>(channel_rssi_db) >= report_squelch)
+                                  : (scan_state == ScanState::kOpen);
 
       std::ostringstream scan_ss;
       scan_ss << "SCAN_STATUS idx=" << audio_idx
-              << " state=" << (signal_open ? "open" : "closed")
+              << " state=" << (state_open ? "open" : "closed")
               << " signal_db=" << FormatDouble(static_cast<double>(channel_rssi_db), 1)
               << " threshold_db=" << FormatDouble(report_squelch, 1)
               << " monitor=" << (config.scan_list_monitor_mode ? 1 : 0);
