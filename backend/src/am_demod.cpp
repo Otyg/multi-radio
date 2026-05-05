@@ -1,4 +1,4 @@
-#include "multi_radio/fm_demod.hpp"
+#include "multi_radio/am_demod.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +17,6 @@ namespace multi_radio {
 namespace {
 
 constexpr float kResamplerStopbandAttenuationDb = 70.0f;
-constexpr float kTwoPi = 6.28318530717958647692f;
 
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
 using ComplexSample = liquid_float_complex;
@@ -25,77 +24,43 @@ using ComplexSample = liquid_float_complex;
 using ComplexSample = std::complex<float>;
 #endif
 
-bool IsFm(Modulation modulation) {
-  return modulation == Modulation::kNfm || modulation == Modulation::kWfm;
-}
-
-uint32_t TargetChannelSampleRateHz(Modulation modulation, uint32_t channel_bandwidth_hz,
-                                   uint32_t input_sample_rate_hz) {
-  if (modulation == Modulation::kWfm) {
-    // Keep the WFM demod channel rate moderate to avoid CPU starvation that
-    // causes audible pulsing from concealment in real-time playback.
-    const uint32_t requested_hz = std::max<uint32_t>(220000U, channel_bandwidth_hz + 60000U);
-    const uint32_t capped_hz = std::min<uint32_t>(requested_hz, 320000U);
-    return std::clamp(capped_hz, 48000U, std::max(48000U, input_sample_rate_hz));
-  }
-
-  const uint32_t requested_hz = std::max(channel_bandwidth_hz, 64000U);
-  const uint32_t expanded_hz = std::max(requested_hz, channel_bandwidth_hz * 2U);
-  return std::clamp(expanded_hz, 48000U, std::max(48000U, input_sample_rate_hz));
-}
-
-float FmDeviationHz(Modulation modulation) {
-  return modulation == Modulation::kWfm ? 75000.0f : 5000.0f;
-}
-
-float DeemphasisTauSeconds(Modulation modulation) {
-  return modulation == Modulation::kWfm ? 75.0e-6f : 300.0e-6f;
+// Channel sample rate: 4× channel bandwidth, clamped to [32 kHz, input_sr].
+// For 10 kHz AM this gives 40 kHz — shallow decimation, keeps ampmodem well-sampled.
+uint32_t TargetChannelSampleRateHz(uint32_t channel_bandwidth_hz, uint32_t input_sample_rate_hz) {
+  const uint32_t requested = std::max(channel_bandwidth_hz * 4U, 32000U);
+  return std::clamp(requested, 32000U, std::max(32000U, input_sample_rate_hz));
 }
 
 }  // namespace
 
-struct FmDemodulator::Impl {
+struct AmDemodulator::Impl {
   uint32_t input_sample_rate_hz = 0;
   uint32_t channel_sample_rate_hz = 0;
   uint32_t audio_sample_rate_hz = 0;
   uint32_t channel_bandwidth_hz = 0;
-  Modulation modulation = Modulation::kNfm;
 
-  float deemphasis_alpha = 0.0f;
-  float deemphasis_state = 0.0f;
   float pcm_gain = 13000.0f;
-
-  // Pilot notch (WFM only, 19 kHz stereo pilot)
-  bool use_pilot_notch = false;
-  float notch_b0 = 1.0f, notch_b1 = 0.0f, notch_b2 = 1.0f;
-  float notch_a1 = 0.0f, notch_a2 = 0.0f;
-  float notch_x1 = 0.0f, notch_x2 = 0.0f;
-  float notch_y1 = 0.0f, notch_y2 = 0.0f;
+  float channel_rssi_db = -120.0f;
 
   std::vector<ComplexSample> iq_complex;
   std::vector<ComplexSample> channelized_complex;
   std::vector<float> demodulated;
-  std::vector<float> deemphasized;
   std::vector<float> audio_resampled;
 
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
   msresamp_crcf iq_channelizer = nullptr;
-  freqdem fm_demod = nullptr;
+  ampmodem am_demod = nullptr;
   msresamp_rrrf audio_resampler = nullptr;
   agc_crcf channel_agc = nullptr;
   std::vector<ComplexSample> agc_scratch;
 #endif
-  float channel_rssi_db = -120.0f;
 
   void ResetStateOnly() {
-    deemphasis_state = 0.0f;
-    notch_x1 = 0.0f; notch_x2 = 0.0f;
-    notch_y1 = 0.0f; notch_y2 = 0.0f;
     iq_complex.clear();
     channelized_complex.clear();
     demodulated.clear();
-    deemphasized.clear();
     audio_resampled.clear();
+    channel_rssi_db = -120.0f;
   }
 
   void DestroyObjects() {
@@ -108,9 +73,9 @@ struct FmDemodulator::Impl {
       msresamp_rrrf_destroy(audio_resampler);
       audio_resampler = nullptr;
     }
-    if (fm_demod != nullptr) {
-      freqdem_destroy(fm_demod);
-      fm_demod = nullptr;
+    if (am_demod != nullptr) {
+      ampmodem_destroy(am_demod);
+      am_demod = nullptr;
     }
     if (iq_channelizer != nullptr) {
       msresamp_crcf_destroy(iq_channelizer);
@@ -122,13 +87,12 @@ struct FmDemodulator::Impl {
     channel_sample_rate_hz = 0;
     audio_sample_rate_hz = 0;
     channel_bandwidth_hz = 0;
-    modulation = Modulation::kNfm;
   }
 };
 
-FmDemodulator::FmDemodulator() : impl_(new Impl()) {}
+AmDemodulator::AmDemodulator() : impl_(new Impl()) {}
 
-FmDemodulator::~FmDemodulator() {
+AmDemodulator::~AmDemodulator() {
   if (impl_ != nullptr) {
     impl_->DestroyObjects();
     delete impl_;
@@ -136,7 +100,7 @@ FmDemodulator::~FmDemodulator() {
   }
 }
 
-bool FmDemodulator::Available() {
+bool AmDemodulator::Available() {
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
   return true;
 #else
@@ -144,25 +108,18 @@ bool FmDemodulator::Available() {
 #endif
 }
 
-void FmDemodulator::Reset() {
+void AmDemodulator::Reset() {
   if (impl_ == nullptr) {
     return;
   }
   impl_->DestroyObjects();
 }
 
-bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_sample_rate_hz,
-                              Modulation modulation, uint32_t channel_bandwidth_hz,
-                              std::string* error) {
+bool AmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_sample_rate_hz,
+                               uint32_t channel_bandwidth_hz, std::string* error) {
   if (impl_ == nullptr) {
     if (error != nullptr) {
       *error = "demodulator not initialized";
-    }
-    return false;
-  }
-  if (!IsFm(modulation)) {
-    if (error != nullptr) {
-      *error = "modulation is not FM";
     }
     return false;
   }
@@ -181,15 +138,11 @@ bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
   impl_->DestroyObjects();
 
   const uint32_t channel_sample_rate_hz =
-      TargetChannelSampleRateHz(modulation, channel_bandwidth_hz, input_sample_rate_hz);
+      TargetChannelSampleRateHz(channel_bandwidth_hz, input_sample_rate_hz);
   const float channel_ratio =
       static_cast<float>(channel_sample_rate_hz) / static_cast<float>(input_sample_rate_hz);
   const float audio_ratio =
       static_cast<float>(audio_sample_rate_hz) / static_cast<float>(channel_sample_rate_hz);
-  const float deviation_hz = FmDeviationHz(modulation);
-  // kf = f_deviation / f_sample (normalized deviation per sample, no 2π)
-  const float kf = deviation_hz /
-                   static_cast<float>(std::max<uint32_t>(1U, channel_sample_rate_hz));
 
   impl_->iq_channelizer = msresamp_crcf_create(channel_ratio, kResamplerStopbandAttenuationDb);
   if (impl_->iq_channelizer == nullptr) {
@@ -200,10 +153,12 @@ bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
     return false;
   }
 
-  impl_->fm_demod = freqdem_create(std::max(1.0e-4f, kf));
-  if (impl_->fm_demod == nullptr) {
+  // DSB-AM with carrier (standard AM broadcast and VHF aviation).
+  // mod_index=0.5 is a common default; the AGC in ProcessIq handles level normalization.
+  impl_->am_demod = ampmodem_create(0.5f, LIQUID_AMPMODEM_DSB, 0);
+  if (impl_->am_demod == nullptr) {
     if (error != nullptr) {
-      *error = "failed to create FM demodulator";
+      *error = "failed to create AM demodulator";
     }
     impl_->DestroyObjects();
     return false;
@@ -222,29 +177,6 @@ bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
   agc_crcf_set_bandwidth(impl_->channel_agc, 1e-3f);
   impl_->channel_rssi_db = -120.0f;
 
-  const float tau = DeemphasisTauSeconds(modulation);
-  impl_->deemphasis_alpha =
-      std::exp(-1.0f / (tau * static_cast<float>(std::max<uint32_t>(1U, channel_sample_rate_hz))));
-  impl_->deemphasis_state = 0.0f;
-
-  // 19 kHz stereo pilot notch for WFM (IIR biquad, zeros at e^(±jw0), poles at r*e^(±jw0))
-  if (modulation == Modulation::kWfm) {
-    const float w0 = kTwoPi * 19000.0f / static_cast<float>(std::max<uint32_t>(1U, channel_sample_rate_hz));
-    const float cos_w0 = std::cos(w0);
-    const float r = 0.95f;
-    impl_->notch_b0 = 1.0f;
-    impl_->notch_b1 = -2.0f * cos_w0;
-    impl_->notch_b2 = 1.0f;
-    impl_->notch_a1 = -2.0f * r * cos_w0;
-    impl_->notch_a2 = r * r;
-    impl_->use_pilot_notch = true;
-  } else {
-    impl_->use_pilot_notch = false;
-  }
-  impl_->notch_x1 = 0.0f; impl_->notch_x2 = 0.0f;
-  impl_->notch_y1 = 0.0f; impl_->notch_y2 = 0.0f;
-
-  impl_->modulation = modulation;
   impl_->input_sample_rate_hz = input_sample_rate_hz;
   impl_->channel_sample_rate_hz = channel_sample_rate_hz;
   impl_->audio_sample_rate_hz = audio_sample_rate_hz;
@@ -257,8 +189,9 @@ bool FmDemodulator::Configure(uint32_t input_sample_rate_hz, uint32_t audio_samp
 #endif
 }
 
-bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::vector<int16_t>* pcm_out,
-                              FmDemodProcessStats* stats, std::string* error) {
+bool AmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq,
+                               std::vector<int16_t>* pcm_out, AmDemodProcessStats* stats,
+                               std::string* error) {
   if (pcm_out == nullptr) {
     if (error != nullptr) {
       *error = "pcm_out is null";
@@ -294,7 +227,8 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
     }
     return false;
   }
-  if (impl_->fm_demod == nullptr || impl_->iq_channelizer == nullptr || impl_->audio_resampler == nullptr) {
+  if (impl_->am_demod == nullptr || impl_->iq_channelizer == nullptr ||
+      impl_->audio_resampler == nullptr) {
     if (error != nullptr) {
       *error = "demodulator is not configured";
     }
@@ -335,7 +269,6 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
   impl_->channelized_complex.resize(channelized_count);
 
   // Measure channelized signal level via AGC (non-destructive: write to scratch).
-  // agc_crcf provides a calibrated, bandwidth-limited RSSI suitable for squelch.
   if (impl_->channel_agc != nullptr) {
     impl_->agc_scratch.resize(channelized_count);
     agc_crcf_execute_block(impl_->channel_agc, impl_->channelized_complex.data(),
@@ -343,39 +276,13 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
     impl_->channel_rssi_db = agc_crcf_get_rssi(impl_->channel_agc);
   }
 
+  // AM demodulate: ampmodem_demodulate is per-sample (no block variant in libliquid).
   impl_->demodulated.resize(channelized_count);
-  if (freqdem_demodulate_block(impl_->fm_demod, impl_->channelized_complex.data(), channelized_count,
-                               impl_->demodulated.data()) != LIQUID_OK) {
-    if (error != nullptr) {
-      *error = "FM demodulation failed";
-    }
-    return false;
-  }
-
-  if (impl_->use_pilot_notch) {
-    const float b0 = impl_->notch_b0, b1 = impl_->notch_b1, b2 = impl_->notch_b2;
-    const float a1 = impl_->notch_a1, a2 = impl_->notch_a2;
-    float x1 = impl_->notch_x1, x2 = impl_->notch_x2;
-    float y1 = impl_->notch_y1, y2 = impl_->notch_y2;
-    for (unsigned int i = 0; i < channelized_count; ++i) {
-      const float x = impl_->demodulated[i];
-      const float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      x2 = x1; x1 = x;
-      y2 = y1; y1 = y;
-      impl_->demodulated[i] = y;
-    }
-    impl_->notch_x1 = x1; impl_->notch_x2 = x2;
-    impl_->notch_y1 = y1; impl_->notch_y2 = y2;
-  }
-
-  impl_->deemphasized.resize(channelized_count);
-  const float a = impl_->deemphasis_alpha;
-  float state = impl_->deemphasis_state;
   for (unsigned int i = 0; i < channelized_count; ++i) {
-    state = (a * state) + ((1.0f - a) * impl_->demodulated[i]);
-    impl_->deemphasized[i] = state;
+    float out_sample = 0.0f;
+    ampmodem_demodulate(impl_->am_demod, impl_->channelized_complex[i], &out_sample);
+    impl_->demodulated[i] = out_sample;
   }
-  impl_->deemphasis_state = state;
 
   const float audio_ratio = static_cast<float>(impl_->audio_sample_rate_hz) /
                             static_cast<float>(std::max<uint32_t>(1U, impl_->channel_sample_rate_hz));
@@ -383,7 +290,7 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
       static_cast<unsigned int>(2U + std::ceil((2.2f * audio_ratio) * static_cast<float>(channelized_count)));
   impl_->audio_resampled.resize(std::max(2U, max_audio_samples));
   unsigned int audio_count = 0;
-  if (msresamp_rrrf_execute(impl_->audio_resampler, impl_->deemphasized.data(), channelized_count,
+  if (msresamp_rrrf_execute(impl_->audio_resampler, impl_->demodulated.data(), channelized_count,
                             impl_->audio_resampled.data(), &audio_count) != LIQUID_OK) {
     if (error != nullptr) {
       *error = "audio resampler failed";
@@ -400,7 +307,6 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
     if (peak_abs > 0.0f) {
       const float target_peak = 0.75f;
       const float desired_gain = target_peak / peak_abs;
-      // Slow AGC to keep demod output visible but avoid pumping.
       impl_->pcm_gain = std::clamp((0.92f * impl_->pcm_gain) + (0.08f * (desired_gain * 32767.0f)),
                                    1500.0f, 22000.0f);
     }
@@ -416,7 +322,6 @@ bool FmDemodulator::ProcessIq(const std::vector<int16_t>& interleaved_iq, std::v
   if (stats != nullptr) {
     stats->input_iq_samples = iq_pairs;
     stats->channelized_samples = channelized_count;
-    stats->demodulated_samples = channelized_count;
     stats->audio_samples = audio_count;
     stats->channel_rssi_db = impl_->channel_rssi_db;
   }

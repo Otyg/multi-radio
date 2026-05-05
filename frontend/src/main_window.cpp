@@ -1133,6 +1133,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_ = new QComboBox(fixed_tab);
   fixed_modulation_combo_->addItem("NFM", QVariant::fromValue<int>(v1::MODULATION_NFM));
   fixed_modulation_combo_->addItem("WFM", QVariant::fromValue<int>(v1::MODULATION_WFM));
+  fixed_modulation_combo_->addItem("AM", QVariant::fromValue<int>(v1::MODULATION_AM));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);

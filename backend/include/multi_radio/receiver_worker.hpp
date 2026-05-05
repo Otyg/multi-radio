@@ -68,8 +68,11 @@ class ReceiverWorker {
     uint64_t window_clipped_components = 0;
     double window_component_power = 0.0;
     uint64_t interleaved_samples = 0;
+    float channel_rssi_db = -120.0f;  // channelized RSSI from agc_crcf, updated per block
   };
   IqSharedState iq_shared_;  // guarded by mu_
+
+  int scan_channel_idx_ = 0;  // guarded by mu_; written by RunLoop, read by IngestLoop
 
   struct IqQueueEntry {
     IQSampleBlock block;

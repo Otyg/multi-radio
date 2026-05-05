@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "multi_radio/am_demod.hpp"
 #include "multi_radio/fm_demod.hpp"
 
 namespace multi_radio {
@@ -168,17 +169,22 @@ struct RuntimeChannel {
   double frequency_hz = 0.0;
   Modulation modulation = Modulation::kWfm;
   double squelch_threshold_db = -67.5;
+  uint32_t dwell_ms = 0;
 };
 
-RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config) {
+RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config, int channel_idx) {
   RuntimeChannel out;
   if (mode == RadioMode::kScanList && !config.scan_list_channels.empty()) {
-    const auto& ch = config.scan_list_channels.front();
-    out.index = 0;
-    out.label = ch.label.empty() ? "ch0" : ch.label;
+    const int n = static_cast<int>(config.scan_list_channels.size());
+    const int idx = std::clamp(channel_idx, 0, n - 1);
+    const auto& ch = config.scan_list_channels[static_cast<size_t>(idx)];
+    out.index = idx;
+    out.label = ch.label.empty() ? ("ch" + std::to_string(idx)) : ch.label;
     out.frequency_hz = ch.frequency_hz;
     out.modulation = ch.modulation;
-    out.squelch_threshold_db = ch.squelch_threshold_db;
+    out.squelch_threshold_db =
+        ch.use_default_squelch ? config.scan_list_default_squelch_db : ch.squelch_threshold_db;
+    out.dwell_ms = (ch.dwell_ms > 0) ? ch.dwell_ms : config.dwell_ms;
     return out;
   }
 
@@ -409,6 +415,7 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
   {
     std::lock_guard<std::mutex> lock(mu_);
     mode_config_ = NormalizeModeConfig(config);
+    scan_channel_idx_ = 0;
   }
   if (error != nullptr) {
     error->clear();
@@ -437,13 +444,15 @@ void ReceiverWorker::IngestLoop() {
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
     ModeConfig config;
+    int scan_ch_idx = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode = mode_;
       config = mode_config_;
+      scan_ch_idx = scan_channel_idx_;
     }
 
-    const RuntimeChannel ch = SelectRuntimeChannel(mode, config);
+    const RuntimeChannel ch = SelectRuntimeChannel(mode, config, scan_ch_idx);
     const uint32_t tuned_frequency_hz =
         ch.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(ch.frequency_hz));
     int64_t hardware_frequency_i64 = static_cast<int64_t>(tuned_frequency_hz);
@@ -586,6 +595,13 @@ void ReceiverWorker::ProcessLoop() {
   uint32_t fm_demod_audio_sr_hz = 0;
   uint32_t fm_demod_channel_bw_hz = 0;
   Modulation fm_demod_modulation = Modulation::kNfm;
+
+  AmDemodulator am_demod;
+  bool am_demod_available = AmDemodulator::Available();
+  bool am_demod_configured = false;
+  uint32_t am_demod_input_sr_hz = 0;
+  uint32_t am_demod_audio_sr_hz = 0;
+  uint32_t am_demod_channel_bw_hz = 0;
   auto next_iq_visualization_at = std::chrono::steady_clock::now();
   uint64_t iq_sequence = 0;
   uint64_t iq_sample_index = 0;
@@ -745,6 +761,85 @@ void ReceiverWorker::ProcessLoop() {
             PublishEvent(EventKind::kWarning, FormatRuntimeError("fm demod (process)", demod_error),
                          entry.tuned_frequency_hz);
           } else {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
+            }
+            if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
+              size_t samples_written = 0;
+              const size_t to_write = demod_pcm.size();
+              size_t attempts = 0;
+              while (samples_written < to_write && running_.load() && attempts < 10) {
+                samples_written += audio_buffer_->Write(demod_pcm.data() + samples_written,
+                                                        to_write - samples_written);
+                if (samples_written < to_write) {
+                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  ++attempts;
+                }
+              }
+              if (samples_written < to_write) {
+                PublishEvent(EventKind::kWarning,
+                             FormatRuntimeError("audio buffer overflow (process)",
+                                                "dropped " + std::to_string(to_write - samples_written) +
+                                                    " samples"),
+                             entry.tuned_frequency_hz);
+              }
+            }
+          }
+        }
+        am_demod.Reset();
+        am_demod_configured = false;
+      }
+    } else if (entry.modulation == Modulation::kAm) {
+      fm_demod.Reset();
+      fm_demod_configured = false;
+
+      if (!am_demod_available) {
+        // No action; AM requires libliquid
+      } else {
+        const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0
+                                           ? entry.block.sample_rate_hz
+                                           : entry.effective_sample_rate_hz;
+        const uint32_t demod_input_sr =
+            (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) ? adapted_iq_sr_hz : nominal_iq_sr;
+        const bool am_reconfigure = !am_demod_configured ||
+                                    am_demod_input_sr_hz != demod_input_sr ||
+                                    am_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
+                                    am_demod_channel_bw_hz != entry.channel_bandwidth_hz;
+        if (am_reconfigure) {
+          std::string demod_error;
+          if (!am_demod.Configure(demod_input_sr, entry.audio_sample_rate_hz,
+                                  entry.channel_bandwidth_hz, &demod_error)) {
+            am_demod_configured = false;
+            PublishEvent(EventKind::kWarning,
+                         FormatRuntimeError("configure am demod (process)", demod_error),
+                         entry.tuned_frequency_hz);
+          } else {
+            am_demod_configured = true;
+            am_demod_input_sr_hz = demod_input_sr;
+            am_demod_audio_sr_hz = entry.audio_sample_rate_hz;
+            am_demod_channel_bw_hz = entry.channel_bandwidth_hz;
+            std::ostringstream demod_msg;
+            demod_msg << "AM demod configured (process)"
+                      << " iq_sr=" << am_demod_input_sr_hz
+                      << " audio_sr=" << am_demod_audio_sr_hz
+                      << " bw=" << am_demod_channel_bw_hz;
+            PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
+          }
+        }
+
+        if (am_demod_configured) {
+          std::vector<int16_t> demod_pcm;
+          AmDemodProcessStats demod_stats;
+          std::string demod_error;
+          if (!am_demod.ProcessIq(entry.block.interleaved_iq, &demod_pcm, &demod_stats, &demod_error)) {
+            PublishEvent(EventKind::kWarning, FormatRuntimeError("am demod (process)", demod_error),
+                         entry.tuned_frequency_hz);
+          } else {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
+            }
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();
@@ -771,6 +866,8 @@ void ReceiverWorker::ProcessLoop() {
     } else {
       fm_demod.Reset();
       fm_demod_configured = false;
+      am_demod.Reset();
+      am_demod_configured = false;
     }
   }
 }
@@ -801,20 +898,25 @@ void ReceiverWorker::RunLoop() {
 
   uint32_t last_requested_sample_rate_hz = 0;
   uint32_t last_effective_sample_rate_hz = 0;
-  bool squelch_open_emitted = false;
   bool thresholds_emitted = false;
   bool buffer_primed = false;
+
+  // Scan list state machine
+  auto scan_dwell_started_at = std::chrono::steady_clock::now();
+  auto next_scan_check_at = std::chrono::steady_clock::now();
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
     ModeConfig config;
+    int scan_ch_idx = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
       mode = mode_;
       config = mode_config_;
+      scan_ch_idx = scan_channel_idx_;
     }
 
-    const RuntimeChannel ch = SelectRuntimeChannel(mode, config);
+    const RuntimeChannel ch = SelectRuntimeChannel(mode, config, scan_ch_idx);
     const uint32_t tuned_frequency_hz =
         ch.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(ch.frequency_hz));
     int64_t hardware_frequency_i64 = static_cast<int64_t>(tuned_frequency_hz);
@@ -863,14 +965,6 @@ void ReceiverWorker::RunLoop() {
       }
       buffer_primed = true;
       PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
-    }
-
-    if (!squelch_open_emitted && mode == RadioMode::kScanList) {
-      std::ostringstream opened;
-      opened << "SCAN squelch OPEN ch=" << ch.label << " idx=" << ch.index
-             << " signal=-20.0 dB threshold=" << FormatDouble(ch.squelch_threshold_db, 1) << " dB";
-      PublishEvent(EventKind::kInfo, opened.str(), ch.frequency_hz);
-      squelch_open_emitted = true;
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -933,6 +1027,58 @@ void ReceiverWorker::RunLoop() {
       audio_sample_index += static_cast<uint64_t>(frame_samples);
       event_bus_->PublishAudioFrame(frame);
       next_frame_at += frame_interval;
+    }
+
+    // Scan list: emit SCAN_STATUS every 200ms and advance channel when dwell expires.
+    // The frontend routes "SCAN_STATUS " messages to ApplyScanListStatusEvent() which
+    // updates channel cards and drives auto-squelch calibration loop counting.
+    if (mode == RadioMode::kScanList && !config.scan_list_channels.empty() &&
+        now >= next_scan_check_at) {
+      next_scan_check_at = now + std::chrono::milliseconds(200);
+
+      int cur_idx;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        cur_idx = scan_channel_idx_;
+      }
+      const int n = static_cast<int>(config.scan_list_channels.size());
+      const auto& cur_chan = config.scan_list_channels[static_cast<size_t>(cur_idx)];
+
+      const uint32_t eff_dwell_ms = (cur_chan.dwell_ms > 0) ? cur_chan.dwell_ms : config.dwell_ms;
+      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  now - scan_dwell_started_at)
+                                  .count();
+
+      if (n > 1 && elapsed_ms >= static_cast<int64_t>(eff_dwell_ms)) {
+        const int next_idx = (cur_idx + 1) % n;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          scan_channel_idx_ = next_idx;
+        }
+        scan_dwell_started_at = now;
+        cur_idx = next_idx;
+        buffer_primed = false;  // re-prime buffer after tuning to new channel
+      }
+
+      // Read channelized RSSI from libliquid AGC for squelch state display.
+      float channel_rssi_db = -120.0f;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        channel_rssi_db = iq_shared_.channel_rssi_db;
+      }
+      const auto& report_chan = config.scan_list_channels[static_cast<size_t>(cur_idx)];
+      const double report_squelch = report_chan.use_default_squelch
+                                        ? config.scan_list_default_squelch_db
+                                        : report_chan.squelch_threshold_db;
+      const bool signal_open = static_cast<double>(channel_rssi_db) >= report_squelch;
+
+      std::ostringstream scan_ss;
+      scan_ss << "SCAN_STATUS idx=" << cur_idx
+              << " state=" << (signal_open ? "open" : "closed")
+              << " signal_db=" << FormatDouble(static_cast<double>(channel_rssi_db), 1)
+              << " threshold_db=" << FormatDouble(report_squelch, 1)
+              << " monitor=" << (config.scan_list_monitor_mode ? 1 : 0);
+      PublishEvent(EventKind::kInfo, scan_ss.str(), report_chan.frequency_hz, false);
     }
 
     if (now >= next_stats_at) {
@@ -1164,17 +1310,6 @@ void ReceiverWorker::RunLoop() {
     }
   }
 
-  if (squelch_open_emitted) {
-    RuntimeChannel ch;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      ch = SelectRuntimeChannel(mode_, mode_config_);
-    }
-    std::ostringstream closed;
-    closed << "SCAN squelch CLOSE ch=" << ch.label << " idx=" << ch.index
-           << " open=0 ms signal=-20.0 dB threshold=" << FormatDouble(ch.squelch_threshold_db, 1) << " dB";
-    PublishEvent(EventKind::kInfo, closed.str(), ch.frequency_hz);
-  }
 }
 
 void ReceiverWorker::PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz,
