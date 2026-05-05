@@ -355,6 +355,7 @@ bool ReceiverWorker::Start(std::string* error) {
 
   thread_ = std::thread(&ReceiverWorker::RunLoop, this);
   ingest_thread_ = std::thread(&ReceiverWorker::IngestLoop, this);
+  process_thread_ = std::thread(&ReceiverWorker::ProcessLoop, this);
   if (error != nullptr) {
     error->clear();
   }
@@ -371,8 +372,12 @@ bool ReceiverWorker::Stop(std::string* error) {
     return true;
   }
 
+  iq_queue_cv_.notify_all();
   if (ingest_thread_.joinable()) {
     ingest_thread_.join();
+  }
+  if (process_thread_.joinable()) {
+    process_thread_.join();
   }
   if (thread_.joinable()) {
     thread_.join();
@@ -423,24 +428,11 @@ ReceiverStatus ReceiverWorker::Status() const {
 }
 
 void ReceiverWorker::IngestLoop() {
-  FmDemodulator fm_demod;
-  bool fm_demod_available = FmDemodulator::Available();
-  bool fm_demod_configured = false;
-  bool fm_demod_warned_unavailable = false;
-  uint32_t fm_demod_input_sr_hz = 0;
-  uint32_t fm_demod_audio_sr_hz = 0;
-  uint32_t fm_demod_channel_bw_hz = 0;
-  Modulation fm_demod_modulation = Modulation::kNfm;
   uint32_t configured_frequency_hz = 0;
   uint32_t configured_sample_rate_hz = 0;
-  uint32_t last_requested_sample_rate_hz = 0;
-  uint32_t last_effective_sample_rate_hz = 0;
   uint32_t configured_hardware_bandwidth_hz = 0;
   int configured_gain_tenth_db = std::numeric_limits<int>::min();
   bool device_opened = false;
-  auto next_iq_visualization_at = std::chrono::steady_clock::now();
-  uint64_t iq_sequence = 0;
-  uint64_t iq_sample_index = 0;
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -557,121 +549,22 @@ void ReceiverWorker::IngestLoop() {
     }
 
     if (have_iq) {
-      uint64_t block_components = 0;
-      uint64_t block_clipped = 0;
-      double block_power = 0.0;
-      for (int16_t s : iq_block.interleaved_iq) {
-        const double norm = static_cast<double>(s) / 32768.0;
-        block_power += norm * norm;
-        ++block_components;
-        if (s >= kIqClipThresholdS16 || s <= -kIqClipThresholdS16) {
-          ++block_clipped;
-        }
-      }
-      const uint64_t block_samples = iq_block.interleaved_iq.size() / 2U;
-      const uint32_t block_sr_hz =
-          iq_block.sample_rate_hz != 0 ? iq_block.sample_rate_hz : effective_sample_rate_hz;
-
+      IqQueueEntry entry;
+      entry.block = std::move(iq_block);
+      entry.effective_sample_rate_hz = effective_sample_rate_hz;
+      entry.audio_sample_rate_hz = audio_sample_rate_hz;
+      entry.channel_bandwidth_hz = config.channel_bandwidth_hz;
+      entry.tuned_frequency_hz = ch.frequency_hz;
+      entry.modulation = ch.modulation;
       {
-        std::lock_guard<std::mutex> lock(mu_);
-        iq_shared_.sample_rate_hz = block_sr_hz;
-        iq_shared_.latest_block = iq_block;
-        iq_shared_.have_latest_block = true;
-        iq_shared_.window_samples += block_samples;
-        iq_shared_.window_components += block_components;
-        iq_shared_.window_clipped_components += block_clipped;
-        iq_shared_.window_component_power += block_power;
-        iq_shared_.interleaved_samples += static_cast<uint64_t>(iq_block.interleaved_iq.size());
-      }
-
-      const auto iq_now = std::chrono::steady_clock::now();
-      if (iq_now >= next_iq_visualization_at) {
-        IqFrame iq_frame = BuildIqFrame(iq_block, receiver_id_, ch.frequency_hz,
-                                        iq_sequence++, iq_sample_index);
-        event_bus_->PublishIqFrame(iq_frame);
-        next_iq_visualization_at =
-            iq_now + std::chrono::milliseconds(kIqVisualizationIntervalMs);
-      }
-      iq_sample_index += block_samples;
-    }
-
-    if (have_iq && IsFmModulation(ch.modulation)) {
-      if (!fm_demod_available) {
-        if (!fm_demod_warned_unavailable) {
-          PublishEvent(EventKind::kWarning, "FM demod unavailable: backend built without libliquid",
-                       ch.frequency_hz);
-          fm_demod_warned_unavailable = true;
+        std::lock_guard<std::mutex> lock(iq_queue_mu_);
+        constexpr size_t kMaxQueueDepth = 4;
+        if (iq_deque_.size() >= kMaxQueueDepth) {
+          iq_deque_.pop_front();
         }
-      } else {
-        const uint32_t demod_input_sr_hz =
-            iq_block.sample_rate_hz != 0 ? iq_block.sample_rate_hz : effective_sample_rate_hz;
-        const bool demod_reconfigure = !fm_demod_configured || fm_demod_input_sr_hz != demod_input_sr_hz ||
-                                       fm_demod_audio_sr_hz != audio_sample_rate_hz ||
-                                       fm_demod_channel_bw_hz != config.channel_bandwidth_hz ||
-                                       fm_demod_modulation != ch.modulation;
-        if (demod_reconfigure) {
-          std::string demod_error;
-          if (!fm_demod.Configure(demod_input_sr_hz, audio_sample_rate_hz, ch.modulation,
-                                  config.channel_bandwidth_hz, &demod_error)) {
-            fm_demod_configured = false;
-            PublishEvent(EventKind::kWarning, FormatRuntimeError("configure fm demod (ingest)", demod_error),
-                         ch.frequency_hz);
-          } else {
-            fm_demod_configured = true;
-            fm_demod_input_sr_hz = demod_input_sr_hz;
-            fm_demod_audio_sr_hz = audio_sample_rate_hz;
-            fm_demod_channel_bw_hz = config.channel_bandwidth_hz;
-            fm_demod_modulation = ch.modulation;
-            std::ostringstream demod_msg;
-            demod_msg << "FM demod configured (ingest) mod=" << ModulationToken(ch.modulation)
-                      << " iq_sr=" << fm_demod_input_sr_hz << " audio_sr=" << fm_demod_audio_sr_hz
-                      << " bw=" << fm_demod_channel_bw_hz;
-            PublishEvent(EventKind::kInfo, demod_msg.str(), ch.frequency_hz);
-          }
-        }
-
-        if (fm_demod_configured) {
-          std::vector<int16_t> demod_pcm;
-          FmDemodProcessStats demod_stats;
-          std::string demod_error;
-          if (!fm_demod.ProcessIq(iq_block.interleaved_iq, &demod_pcm, &demod_stats, &demod_error)) {
-            PublishEvent(EventKind::kWarning, FormatRuntimeError("fm demod (ingest)", demod_error),
-                         ch.frequency_hz);
-          } else {
-            // Write demodulated audio to ring buffer for output thread to consume
-            // Implement backpressure: if buffer is full, sleep briefly instead of dropping samples
-            if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
-              size_t samples_written = 0;
-              size_t to_write = demod_pcm.size();
-              size_t attempts = 0;
-              
-              while (samples_written < to_write && running_.load() && attempts < 10) {
-                size_t written_now = audio_buffer_->Write(
-                    demod_pcm.data() + samples_written, 
-                    to_write - samples_written);
-                samples_written += written_now;
-                
-                if (samples_written < to_write) {
-                  // Buffer full, apply backpressure - sleep briefly and retry
-                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                  ++attempts;
-                }
-              }
-              
-              if (samples_written < to_write) {
-                // Still couldn't write all samples - log as warning
-                PublishEvent(EventKind::kWarning, 
-                  FormatRuntimeError("audio buffer overflow (ingest)", 
-                    "dropped " + std::to_string(to_write - samples_written) + " samples"),
-                  ch.frequency_hz);
-              }
-            }
-          }
-        }
+        iq_deque_.push_back(std::move(entry));
       }
-    } else if (!IsFmModulation(ch.modulation)) {
-      fm_demod.Reset();
-      fm_demod_configured = false;
+      iq_queue_cv_.notify_one();
     }
 
     if (device_ == nullptr) {
@@ -681,6 +574,144 @@ void ReceiverWorker::IngestLoop() {
 
   if (device_ != nullptr && device_opened) {
     device_->Close();
+  }
+}
+
+void ReceiverWorker::ProcessLoop() {
+  FmDemodulator fm_demod;
+  bool fm_demod_available = FmDemodulator::Available();
+  bool fm_demod_configured = false;
+  bool fm_demod_warned_unavailable = false;
+  uint32_t fm_demod_input_sr_hz = 0;
+  uint32_t fm_demod_audio_sr_hz = 0;
+  uint32_t fm_demod_channel_bw_hz = 0;
+  Modulation fm_demod_modulation = Modulation::kNfm;
+  auto next_iq_visualization_at = std::chrono::steady_clock::now();
+  uint64_t iq_sequence = 0;
+  uint64_t iq_sample_index = 0;
+
+  while (running_.load()) {
+    IqQueueEntry entry;
+    {
+      std::unique_lock<std::mutex> lock(iq_queue_mu_);
+      iq_queue_cv_.wait(lock, [this] { return !iq_deque_.empty() || !running_.load(); });
+      if (!running_.load() && iq_deque_.empty()) {
+        break;
+      }
+      entry = std::move(iq_deque_.front());
+      iq_deque_.pop_front();
+    }
+
+    // IQ stats accumulation
+    {
+      uint64_t block_components = 0;
+      uint64_t block_clipped = 0;
+      double block_power = 0.0;
+      for (int16_t s : entry.block.interleaved_iq) {
+        const double norm = static_cast<double>(s) / 32768.0;
+        block_power += norm * norm;
+        ++block_components;
+        if (s >= kIqClipThresholdS16 || s <= -kIqClipThresholdS16) {
+          ++block_clipped;
+        }
+      }
+      const uint64_t block_samples = entry.block.interleaved_iq.size() / 2U;
+      const uint32_t block_sr_hz = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
+                                                                    : entry.effective_sample_rate_hz;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        iq_shared_.sample_rate_hz = block_sr_hz;
+        iq_shared_.latest_block = entry.block;
+        iq_shared_.have_latest_block = true;
+        iq_shared_.window_samples += block_samples;
+        iq_shared_.window_components += block_components;
+        iq_shared_.window_clipped_components += block_clipped;
+        iq_shared_.window_component_power += block_power;
+        iq_shared_.interleaved_samples += static_cast<uint64_t>(entry.block.interleaved_iq.size());
+      }
+
+      const auto iq_now = std::chrono::steady_clock::now();
+      if (iq_now >= next_iq_visualization_at) {
+        IqFrame iq_frame = BuildIqFrame(entry.block, receiver_id_, entry.tuned_frequency_hz,
+                                        iq_sequence++, iq_sample_index);
+        event_bus_->PublishIqFrame(iq_frame);
+        next_iq_visualization_at = iq_now + std::chrono::milliseconds(kIqVisualizationIntervalMs);
+      }
+      iq_sample_index += block_samples;
+    }
+
+    // FM demodulation
+    if (IsFmModulation(entry.modulation)) {
+      if (!fm_demod_available) {
+        if (!fm_demod_warned_unavailable) {
+          PublishEvent(EventKind::kWarning, "FM demod unavailable: backend built without libliquid",
+                       entry.tuned_frequency_hz);
+          fm_demod_warned_unavailable = true;
+        }
+      } else {
+        const uint32_t demod_input_sr_hz = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
+                                                                            : entry.effective_sample_rate_hz;
+        const bool demod_reconfigure =
+            !fm_demod_configured || fm_demod_input_sr_hz != demod_input_sr_hz ||
+            fm_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
+            fm_demod_channel_bw_hz != entry.channel_bandwidth_hz ||
+            fm_demod_modulation != entry.modulation;
+        if (demod_reconfigure) {
+          std::string demod_error;
+          if (!fm_demod.Configure(demod_input_sr_hz, entry.audio_sample_rate_hz, entry.modulation,
+                                  entry.channel_bandwidth_hz, &demod_error)) {
+            fm_demod_configured = false;
+            PublishEvent(EventKind::kWarning, FormatRuntimeError("configure fm demod (process)", demod_error),
+                         entry.tuned_frequency_hz);
+          } else {
+            fm_demod_configured = true;
+            fm_demod_input_sr_hz = demod_input_sr_hz;
+            fm_demod_audio_sr_hz = entry.audio_sample_rate_hz;
+            fm_demod_channel_bw_hz = entry.channel_bandwidth_hz;
+            fm_demod_modulation = entry.modulation;
+            std::ostringstream demod_msg;
+            demod_msg << "FM demod configured (process) mod=" << ModulationToken(entry.modulation)
+                      << " iq_sr=" << fm_demod_input_sr_hz << " audio_sr=" << fm_demod_audio_sr_hz
+                      << " bw=" << fm_demod_channel_bw_hz;
+            PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
+          }
+        }
+
+        if (fm_demod_configured) {
+          std::vector<int16_t> demod_pcm;
+          FmDemodProcessStats demod_stats;
+          std::string demod_error;
+          if (!fm_demod.ProcessIq(entry.block.interleaved_iq, &demod_pcm, &demod_stats, &demod_error)) {
+            PublishEvent(EventKind::kWarning, FormatRuntimeError("fm demod (process)", demod_error),
+                         entry.tuned_frequency_hz);
+          } else {
+            if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
+              size_t samples_written = 0;
+              const size_t to_write = demod_pcm.size();
+              size_t attempts = 0;
+              while (samples_written < to_write && running_.load() && attempts < 10) {
+                samples_written += audio_buffer_->Write(demod_pcm.data() + samples_written,
+                                                        to_write - samples_written);
+                if (samples_written < to_write) {
+                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  ++attempts;
+                }
+              }
+              if (samples_written < to_write) {
+                PublishEvent(EventKind::kWarning,
+                             FormatRuntimeError("audio buffer overflow (process)",
+                                                "dropped " + std::to_string(to_write - samples_written) +
+                                                    " samples"),
+                             entry.tuned_frequency_hz);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      fm_demod.Reset();
+      fm_demod_configured = false;
+    }
   }
 }
 

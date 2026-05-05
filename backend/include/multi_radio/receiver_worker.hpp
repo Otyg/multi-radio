@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -33,6 +35,7 @@ class ReceiverWorker {
  private:
   void RunLoop();
   void IngestLoop();
+  void ProcessLoop();
   void PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz = 0.0,
                     bool log_event = true);
 
@@ -46,6 +49,7 @@ class ReceiverWorker {
   mutable std::mutex mu_;
   std::thread thread_;
   std::thread ingest_thread_;
+  std::thread process_thread_;
   std::atomic<bool> running_{false};
 
   RadioMode mode_ = RadioMode::kFixed;
@@ -66,6 +70,18 @@ class ReceiverWorker {
     uint64_t interleaved_samples = 0;
   };
   IqSharedState iq_shared_;  // guarded by mu_
+
+  struct IqQueueEntry {
+    IQSampleBlock block;
+    uint32_t effective_sample_rate_hz = 0;
+    uint32_t audio_sample_rate_hz = 0;
+    uint32_t channel_bandwidth_hz = 0;
+    double tuned_frequency_hz = 0.0;
+    Modulation modulation = Modulation::kWfm;
+  };
+  std::deque<IqQueueEntry> iq_deque_;  // guarded by iq_queue_mu_
+  std::mutex iq_queue_mu_;
+  std::condition_variable iq_queue_cv_;
 };
 
 }  // namespace multi_radio
