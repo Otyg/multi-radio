@@ -469,9 +469,7 @@ void ReceiverWorker::IngestLoop() {
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
     const uint32_t effective_sample_rate_hz =
-        (ch.modulation == Modulation::kWfm)
-            ? std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz)
-            : requested_sample_rate_hz;
+        std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
 
     IQSampleBlock iq_block;
     bool have_iq = false;
@@ -705,6 +703,8 @@ void ReceiverWorker::ProcessLoop() {
 #endif
   };
 
+  int last_processed_channel_idx = -1;
+
   while (running_.load()) {
     IqQueueEntry entry;
     {
@@ -720,36 +720,31 @@ void ReceiverWorker::ProcessLoop() {
     // Detect scan channel transitions: clear ring buffer and reset demods so old-channel
     // audio cannot bleed into the new channel's output. audio_channel_idx_ is the source
     // of truth for SCAN_STATUS — it only advances when the audio actually switches.
-    {
-      static int last_processed_channel_idx = -1;
-      const int new_idx = entry.scan_channel_idx;
-      if (new_idx >= 0 && new_idx != last_processed_channel_idx &&
-          last_processed_channel_idx >= 0) {
-        // Clear stale audio from the previous channel
-        if (audio_buffer_ != nullptr) {
-          audio_buffer_->Clear();
-        }
-        // Reset demod state so the first block of the new channel starts clean
-        fm_demod.Reset();
-        fm_demod_configured = false;
-        am_demod.Reset();
-        am_demod_configured = false;
-        rebuild_audio_filters(0);
-        audio_filter_sr_hz = 0;
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          audio_channel_idx_ = new_idx;
-        }
-        last_processed_channel_idx = new_idx;
-        // Discard this first block: RTL-SDR needs a moment to settle after retuning
-        // and the demod filter is cold, so the audio would be garbage anyway.
-        continue;
+    const int new_idx = entry.scan_channel_idx;
+    if (new_idx >= 0 && new_idx != last_processed_channel_idx &&
+        last_processed_channel_idx >= 0) {
+      if (audio_buffer_ != nullptr) {
+        audio_buffer_->Clear();
       }
-      if (last_processed_channel_idx < 0 && new_idx >= 0) {
-        last_processed_channel_idx = new_idx;
+      fm_demod.Reset();
+      fm_demod_configured = false;
+      am_demod.Reset();
+      am_demod_configured = false;
+      rebuild_audio_filters(0);
+      audio_filter_sr_hz = 0;
+      {
         std::lock_guard<std::mutex> lock(mu_);
         audio_channel_idx_ = new_idx;
       }
+      last_processed_channel_idx = new_idx;
+      // Discard this first block: RTL-SDR needs a moment to settle after retuning
+      // and the demod filter is cold, so the audio would be garbage anyway.
+      continue;
+    }
+    if (last_processed_channel_idx < 0 && new_idx >= 0) {
+      last_processed_channel_idx = new_idx;
+      std::lock_guard<std::mutex> lock(mu_);
+      audio_channel_idx_ = new_idx;
     }
 
     // Measure inter-block arrival time and build adapted IQ rate estimate.
@@ -1058,9 +1053,7 @@ void ReceiverWorker::RunLoop() {
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
     const uint32_t effective_sample_rate_hz =
-        (ch.modulation == Modulation::kWfm)
-            ? std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz)
-            : requested_sample_rate_hz;
+        std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
     if (effective_sample_rate_hz != requested_sample_rate_hz &&
         (last_requested_sample_rate_hz != requested_sample_rate_hz ||
          last_effective_sample_rate_hz != effective_sample_rate_hz)) {
