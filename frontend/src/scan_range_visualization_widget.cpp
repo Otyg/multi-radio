@@ -123,16 +123,12 @@ void ScanRangeVisualizationWidget::paintEvent(QPaintEvent* event) {
     return;
   }
 
-  const QVector<double>& spec = latest_spectrum_.isEmpty() ? sweep_buffer_ : latest_spectrum_;
-  if (!spec.isEmpty() && spec_content.isValid()) {
-    DrawSpectrum(&painter, spec_content, spec);
+  // Always draw the current in-progress sweep so each block appears immediately.
+  if (!sweep_buffer_.isEmpty() && spec_content.isValid()) {
+    DrawSpectrum(&painter, spec_content, sweep_buffer_);
   }
-  if (!waterfall_rows_.isEmpty() && wfall_content.isValid()) {
-    DrawWaterfall(&painter, wfall_content, waterfall_rows_);
-  } else if (waterfall_rows_.isEmpty() && !sweep_buffer_.isEmpty() &&
-             wfall_content.isValid()) {
-    painter.setPen(QColor(100, 115, 140));
-    painter.drawText(wfall_content, Qt::AlignCenter, "Väntar på första svep...");
+  if ((!sweep_buffer_.isEmpty() || !waterfall_rows_.isEmpty()) && wfall_content.isValid()) {
+    DrawWaterfall(&painter, wfall_content, sweep_buffer_, waterfall_rows_);
   }
 }
 
@@ -226,23 +222,28 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
 }
 
 void ScanRangeVisualizationWidget::DrawWaterfall(QPainter* p, const QRect& rect,
+                                                  const QVector<double>& current_row,
                                                   const QVector<QVector<double>>& rows) {
-  if (rect.isEmpty() || rows.isEmpty()) return;
+  const bool have_current = !current_row.isEmpty();
+  const int n_completed = rows.size();
+  const int n_rows = n_completed + (have_current ? 1 : 0);
+  if (rect.isEmpty() || n_rows == 0) return;
+
+  const int n_bins = have_current ? current_row.size()
+                                  : (n_completed > 0 ? rows[0].size() : 0);
+  if (n_bins == 0) return;
 
   const int W = rect.width();
   const int H = rect.height();
-  const int n_rows = rows.size();
-  const int n_bins = rows[0].size();
-  if (n_bins == 0) return;
 
-  // Build a QImage (img_w × n_rows), then scale to rect.
+  // Build QImage: row 0 = current in-progress sweep, rows 1..N = completed sweeps.
   const int img_w = std::min(W, 2048);
   QImage img(img_w, n_rows, QImage::Format_RGB32);
 
-  for (int row = 0; row < n_rows; ++row) {
-    const QVector<double>& data = rows[row];
+  auto draw_row = [&](int img_row, const QVector<double>& data) {
     const int n = data.size();
-    QRgb* line = reinterpret_cast<QRgb*>(img.scanLine(row));
+    if (n == 0) return;
+    QRgb* line = reinterpret_cast<QRgb*>(img.scanLine(img_row));
     for (int px = 0; px < img_w; ++px) {
       const double t = (img_w <= 1) ? 0.0 : static_cast<double>(px) / (img_w - 1);
       const double pos = t * (n - 1);
@@ -251,6 +252,13 @@ void ScanRangeVisualizationWidget::DrawWaterfall(QPainter* p, const QRect& rect,
       const double v = data[lo] + (pos - lo) * (data[hi] - data[lo]);
       line[px] = HeatColor(Clamp01(v)).rgb();
     }
+  };
+
+  if (have_current) {
+    draw_row(0, current_row);
+  }
+  for (int i = 0; i < n_completed; ++i) {
+    draw_row(have_current ? i + 1 : i, rows[i]);
   }
 
   p->setRenderHint(QPainter::SmoothPixmapTransform, false);
@@ -271,10 +279,10 @@ void ScanRangeVisualizationWidget::DrawWaterfall(QPainter* p, const QRect& rect,
     p->drawText(tx, rect.bottom() - 2, label);
   }
 
-  // Row count label
+  // Row count label (completed sweeps only)
   p->setPen(QColor(100, 120, 155));
   p->drawText(rect.adjusted(4, 0, -4, -14), Qt::AlignBottom | Qt::AlignRight,
-              QString("%1 svep").arg(n_rows));
+              QString("%1 svep").arg(n_completed));
 }
 
 }  // namespace multi_radio

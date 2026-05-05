@@ -28,7 +28,7 @@ class ScanRangeVisualizationWidget : public QWidget {
   static QColor HeatColor(double v);
   static QString FormatFreq(double hz);
   void DrawSpectrum(QPainter* p, const QRect& rect, const QVector<double>& spectrum);
-  void DrawWaterfall(QPainter* p, const QRect& rect,
+  void DrawWaterfall(QPainter* p, const QRect& rect, const QVector<double>& current_row,
                      const QVector<QVector<double>>& rows);
 
   double scan_start_hz_ = 0.0;
