@@ -126,7 +126,8 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
   if (out.channel_bandwidth_hz == 0) {
     out.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
   }
-  if (out.fixed_modulation != Modulation::kNfm && out.fixed_modulation != Modulation::kWfm) {
+  if (out.fixed_modulation != Modulation::kNfm && out.fixed_modulation != Modulation::kWfm &&
+      out.fixed_modulation != Modulation::kAm) {
     out.fixed_modulation = Modulation::kWfm;
   }
   return out;
@@ -174,6 +175,7 @@ struct RuntimeChannel {
   Modulation modulation = Modulation::kWfm;
   double squelch_threshold_db = -67.5;
   uint32_t dwell_ms = 0;
+  uint32_t channel_bandwidth_hz = 0;
 };
 
 RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config, int channel_idx) {
@@ -189,11 +191,14 @@ RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config, in
     out.squelch_threshold_db =
         ch.use_default_squelch ? config.scan_list_default_squelch_db : ch.squelch_threshold_db;
     out.dwell_ms = (ch.dwell_ms > 0) ? ch.dwell_ms : config.dwell_ms;
+    out.channel_bandwidth_hz = (ch.channel_bandwidth_hz > 0) ? ch.channel_bandwidth_hz
+                                                             : config.channel_bandwidth_hz;
     return out;
   }
 
   out.frequency_hz = config.fixed_frequency_hz;
   out.modulation = config.fixed_modulation;
+  out.channel_bandwidth_hz = config.channel_bandwidth_hz;
   if (out.frequency_hz <= 0.0 && !config.frequency_list_hz.empty()) {
     out.frequency_hz = config.frequency_list_hz.front();
   }
@@ -564,7 +569,8 @@ void ReceiverWorker::IngestLoop() {
       entry.block = std::move(iq_block);
       entry.effective_sample_rate_hz = effective_sample_rate_hz;
       entry.audio_sample_rate_hz = audio_sample_rate_hz;
-      entry.channel_bandwidth_hz = config.channel_bandwidth_hz;
+      entry.channel_bandwidth_hz = (ch.channel_bandwidth_hz > 0) ? ch.channel_bandwidth_hz
+                                                                  : config.channel_bandwidth_hz;
       entry.tuned_frequency_hz = ch.frequency_hz;
       entry.modulation = ch.modulation;
       entry.scan_channel_idx = scan_ch_idx;
@@ -605,6 +611,7 @@ void ReceiverWorker::ProcessLoop() {
   uint32_t am_demod_input_sr_hz = 0;
   uint32_t am_demod_audio_sr_hz = 0;
   uint32_t am_demod_channel_bw_hz = 0;
+  uint32_t am_block_log_counter = 0;
   auto next_iq_visualization_at = std::chrono::steady_clock::now();
   uint64_t iq_sequence = 0;
   uint64_t iq_sample_index = 0;
@@ -960,6 +967,19 @@ void ReceiverWorker::ProcessLoop() {
             {
               std::lock_guard<std::mutex> lock(mu_);
               iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
+            }
+            // Periodic diagnostic: log peak PCM amplitude every ~2 seconds (~16 blocks at 128ms/block).
+            // Helps diagnose silence: if peak=0, the AM signal has no modulation (unmodulated carrier).
+            if ((++am_block_log_counter % 16U) == 0U) {
+              int16_t peak_pcm = 0;
+              for (int16_t s : demod_pcm) {
+                peak_pcm = std::max(peak_pcm, static_cast<int16_t>(std::abs(s)));
+              }
+              std::ostringstream am_diag;
+              am_diag << "AM_DIAG samples=" << demod_pcm.size()
+                      << " peak_pcm=" << peak_pcm
+                      << " rssi_db=" << FormatDouble(static_cast<double>(demod_stats.channel_rssi_db), 1);
+              PublishEvent(EventKind::kInfo, am_diag.str(), entry.tuned_frequency_hz, false);
             }
             apply_audio_filters(&demod_pcm);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
