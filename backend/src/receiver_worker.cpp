@@ -16,6 +16,10 @@
 #include "multi_radio/am_demod.hpp"
 #include "multi_radio/fm_demod.hpp"
 
+#if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
+#include <liquid/liquid.h>
+#endif
+
 namespace multi_radio {
 
 namespace {
@@ -620,6 +624,86 @@ void ReceiverWorker::ProcessLoop() {
   constexpr int kAdaptiveWarmupBlocks = 15;
   constexpr double kEmaAlpha = 0.08;
 
+  // Post-demodulation audio filters (optional, applied to final PCM before ring buffer).
+  // Three independent Butterworth IIR filters; recreated when audio sample rate changes.
+#if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
+  iirfilt_rrrf audio_hpf300 = nullptr;  // standalone HPF at 300 Hz
+  iirfilt_rrrf audio_lpf8k = nullptr;   // standalone LPF at 8 kHz
+  iirfilt_rrrf audio_bpf_hpf = nullptr; // BPF internal HPF component at 300 Hz
+  iirfilt_rrrf audio_bpf_lpf = nullptr; // BPF internal LPF component at 3 kHz
+#endif
+  uint32_t audio_filter_sr_hz = 0;
+  std::vector<float> audio_filter_scratch;
+
+  auto rebuild_audio_filters = [&](uint32_t sr_hz) {
+#if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
+    if (audio_hpf300 != nullptr) { iirfilt_rrrf_destroy(audio_hpf300); audio_hpf300 = nullptr; }
+    if (audio_lpf8k != nullptr) { iirfilt_rrrf_destroy(audio_lpf8k); audio_lpf8k = nullptr; }
+    if (audio_bpf_hpf != nullptr) { iirfilt_rrrf_destroy(audio_bpf_hpf); audio_bpf_hpf = nullptr; }
+    if (audio_bpf_lpf != nullptr) { iirfilt_rrrf_destroy(audio_bpf_lpf); audio_bpf_lpf = nullptr; }
+    if (sr_hz > 0) {
+      const float sr = static_cast<float>(sr_hz);
+      const float fc_hpf = 300.0f / sr;
+      const float fc_lpf3k = std::min(3000.0f, sr * 0.45f) / sr;
+      const float fc_lpf8k = std::min(8000.0f, sr * 0.45f) / sr;
+      audio_hpf300 = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 2, fc_hpf, 0.0f, 1.0f, 60.0f);
+      audio_lpf8k = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 2, fc_lpf8k, 0.0f, 1.0f, 60.0f);
+      audio_bpf_hpf = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 2, fc_hpf, 0.0f, 1.0f, 60.0f);
+      audio_bpf_lpf = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 2, fc_lpf3k, 0.0f, 1.0f, 60.0f);
+    }
+#else
+    (void)sr_hz;
+#endif
+    audio_filter_sr_hz = sr_hz;
+  };
+
+  auto apply_audio_filters = [&](std::vector<int16_t>* pcm) {
+#if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
+    if (pcm == nullptr || pcm->empty()) return;
+    bool do_hpf = false, do_lpf = false, do_bpf = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      do_hpf = mode_config_.audio_hpf300_enabled;
+      do_lpf = mode_config_.audio_lpf8k_enabled;
+      do_bpf = mode_config_.audio_bpf_voice_enabled;
+    }
+    if (!do_hpf && !do_lpf && !do_bpf) return;
+    const size_t n = pcm->size();
+    audio_filter_scratch.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+      audio_filter_scratch[i] = static_cast<float>((*pcm)[i]) / 32768.0f;
+    }
+    if (do_bpf) {
+      if (audio_bpf_hpf != nullptr) {
+        iirfilt_rrrf_execute_block(audio_bpf_hpf, audio_filter_scratch.data(),
+                                   static_cast<unsigned int>(n), audio_filter_scratch.data());
+      }
+      if (audio_bpf_lpf != nullptr) {
+        iirfilt_rrrf_execute_block(audio_bpf_lpf, audio_filter_scratch.data(),
+                                   static_cast<unsigned int>(n), audio_filter_scratch.data());
+      }
+    }
+    if (do_hpf && audio_hpf300 != nullptr) {
+      iirfilt_rrrf_execute_block(audio_hpf300, audio_filter_scratch.data(),
+                                 static_cast<unsigned int>(n), audio_filter_scratch.data());
+    }
+    if (do_lpf && audio_lpf8k != nullptr) {
+      iirfilt_rrrf_execute_block(audio_lpf8k, audio_filter_scratch.data(),
+                                 static_cast<unsigned int>(n), audio_filter_scratch.data());
+    }
+    for (size_t i = 0; i < n; ++i) {
+      const float s = std::clamp(audio_filter_scratch[i], -1.0f, 1.0f);
+      (*pcm)[i] = static_cast<int16_t>(std::lrint(s * 32767.0f));
+    }
+#else
+    (void)pcm;
+#endif
+  };
+
   while (running_.load()) {
     IqQueueEntry entry;
     {
@@ -702,6 +786,11 @@ void ReceiverWorker::ProcessLoop() {
       iq_sample_index += block_samples;
     }
 
+    // Rebuild post-demod audio filters if sample rate changed
+    if (entry.audio_sample_rate_hz != audio_filter_sr_hz) {
+      rebuild_audio_filters(entry.audio_sample_rate_hz);
+    }
+
     // FM demodulation
     if (IsFmModulation(entry.modulation)) {
       if (!fm_demod_available) {
@@ -765,6 +854,7 @@ void ReceiverWorker::ProcessLoop() {
               std::lock_guard<std::mutex> lock(mu_);
               iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
             }
+            apply_audio_filters(&demod_pcm);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();
@@ -840,6 +930,7 @@ void ReceiverWorker::ProcessLoop() {
               std::lock_guard<std::mutex> lock(mu_);
               iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
             }
+            apply_audio_filters(&demod_pcm);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();
@@ -870,6 +961,8 @@ void ReceiverWorker::ProcessLoop() {
       am_demod_configured = false;
     }
   }
+
+  rebuild_audio_filters(0);  // destroy filter objects on exit
 }
 
 void ReceiverWorker::RunLoop() {

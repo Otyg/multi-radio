@@ -1171,6 +1171,21 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   default_squelch_row->addStretch(1);
   list_layout->addLayout(default_squelch_row);
 
+  auto* audio_filter_row = new QHBoxLayout();
+  auto* audio_filter_label = new QLabel("Ljudfilter:", list_tab);
+  audio_hpf300_checkbox_ = new QCheckBox("HP 300 Hz", list_tab);
+  audio_lpf8k_checkbox_ = new QCheckBox("LP 8 kHz", list_tab);
+  audio_bpf_voice_checkbox_ = new QCheckBox("BP 300 Hz–3 kHz", list_tab);
+  audio_hpf300_checkbox_->setToolTip("High-pass filter at 300 Hz — removes low-frequency hum and rumble");
+  audio_lpf8k_checkbox_->setToolTip("Low-pass filter at 8 kHz — removes high-frequency noise (only effective for WFM at 32 kHz audio)");
+  audio_bpf_voice_checkbox_->setToolTip("Band-pass filter 300 Hz – 3 kHz — pass-band optimised for voice communications");
+  audio_filter_row->addWidget(audio_filter_label);
+  audio_filter_row->addWidget(audio_hpf300_checkbox_);
+  audio_filter_row->addWidget(audio_lpf8k_checkbox_);
+  audio_filter_row->addWidget(audio_bpf_voice_checkbox_);
+  audio_filter_row->addStretch(1);
+  list_layout->addLayout(audio_filter_row);
+
   auto* list_actions = new QHBoxLayout();
   auto* add_channel_button = new QPushButton("Add channel", list_tab);
   auto* import_csv_button = new QPushButton("Import CSV", list_tab);
@@ -1226,6 +1241,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       ApplyModeAndConfig();
     }
   });
+  auto apply_on_toggle = [this](bool /*checked*/) {
+    if (receiver_combo_->currentIndex() >= 0) {
+      ApplyModeAndConfig();
+    }
+  };
+  connect(audio_hpf300_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_lpf8k_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   connect(clear_channels_button, &QPushButton::clicked, this, [this]() {
     if (QMessageBox::question(this, "Clear channels",
                               "Remove all scan-list channels?") != QMessageBox::Yes) {
@@ -1757,6 +1780,12 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       (scan_list_default_squelch_spin_ != nullptr) ? scan_list_default_squelch_spin_->value()
                                                    : kDefaultScanListSquelchDb;
   config.set_scan_list_default_squelch_db(default_squelch_db);
+  config.set_audio_hpf300_enabled(audio_hpf300_checkbox_ != nullptr &&
+                                  audio_hpf300_checkbox_->isChecked());
+  config.set_audio_lpf8k_enabled(audio_lpf8k_checkbox_ != nullptr &&
+                                  audio_lpf8k_checkbox_->isChecked());
+  config.set_audio_bpf_voice_enabled(audio_bpf_voice_checkbox_ != nullptr &&
+                                     audio_bpf_voice_checkbox_->isChecked());
 
   config.clear_scan_list_channels();
   config.clear_frequency_list_hz();

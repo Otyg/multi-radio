@@ -66,6 +66,9 @@ struct ModeConfig {
   int32_t lo_offset_hz = 0;
   bool scan_list_monitor_mode = false;
   double scan_list_default_squelch_db = -67.5;
+  bool audio_hpf300_enabled = false;
+  bool audio_lpf8k_enabled = false;
+  bool audio_bpf_voice_enabled = false;
 };
 
 struct ReceiverDescriptor {
