@@ -736,14 +736,6 @@ void ReceiverWorker::ProcessLoop() {
       iq_deque_.pop_front();
     }
 
-    // Scan range uses raw IQ visualization only — skip demodulation entirely.
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      if (mode_ == RadioMode::kScanRange) {
-        continue;
-      }
-    }
-
     // Detect scan channel transitions: clear ring buffer and reset demods so old-channel
     // audio cannot bleed into the new channel's output. audio_channel_idx_ is the source
     // of truth for SCAN_STATUS — it only advances when the audio actually switches.
@@ -842,6 +834,14 @@ void ReceiverWorker::ProcessLoop() {
         next_iq_visualization_at = iq_now + std::chrono::milliseconds(kIqVisualizationIntervalMs);
       }
       iq_sample_index += block_samples;
+    }
+
+    // Scan range: IQ frames published above; skip all demodulation and audio.
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (mode_ == RadioMode::kScanRange) {
+        continue;
+      }
     }
 
     // Rebuild post-demod audio filters if sample rate changed
