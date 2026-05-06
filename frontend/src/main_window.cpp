@@ -1861,6 +1861,7 @@ void MainWindow::StartSelectedReceiver() {
   if (signal_visualization_ != nullptr) {
     signal_visualization_->ResetPeakHold();
   }
+  scan_channel_heat_.clear();
   AppendLog(QString("Start requested for receiver %1").arg(receiver_id));
   RefreshReceivers();
 }
@@ -2093,6 +2094,22 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     const qint64 open_ms = TokenValue(message, "open_ms").toLongLong(&open_ms_ok);
 
     if (message.startsWith("SCAN_SQUELCH_OPEN ")) {
+      if (IsSelectedReceiver(receiver_id) && idx_ok && channel_index >= 0) {
+        constexpr double kDecayTimeConstantS = 120.0;
+        constexpr double kBump = 0.25;
+        const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+        if (static_cast<size_t>(channel_index) >= scan_channel_heat_.size()) {
+          scan_channel_heat_.resize(static_cast<size_t>(channel_index) + 1);
+        }
+        auto& h = scan_channel_heat_[static_cast<size_t>(channel_index)];
+        if (h.last_update_ms > 0) {
+          const double elapsed_s = (now_ms - h.last_update_ms) / 1000.0;
+          h.value *= std::exp(-elapsed_s / kDecayTimeConstantS);
+        }
+        h.value = std::min(1.0, h.value + kBump);
+        h.last_update_ms = now_ms;
+        RefreshScanListChannelCards();
+      }
       if (IsSelectedReceiver(receiver_id)) {
         audio_stream_seq_valid_ = false;
         audio_stream_sample_index_valid_ = false;
@@ -2652,8 +2669,26 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
     return QString(kBase) +
            "border: 2px solid #EF6C00; background: #0B1018; color: #FFB85D; }";
   }
+  // Interpolate standby text color from dark base toward squelch-open green based on activity heat.
+  constexpr double kDecayTimeConstantS = 120.0;
+  double heat = 0.0;
+  if (index >= 0 && static_cast<size_t>(index) < scan_channel_heat_.size()) {
+    const auto& h = scan_channel_heat_[static_cast<size_t>(index)];
+    if (h.last_update_ms > 0) {
+      const double elapsed_s = (QDateTime::currentMSecsSinceEpoch() - h.last_update_ms) / 1000.0;
+      heat = h.value * std::exp(-elapsed_s / kDecayTimeConstantS);
+    }
+  }
+  // Base: #163803 (R=22, G=56, B=3), Active: #5CDB95 (R=92, G=219, B=149)
+  const int r = static_cast<int>(22  + heat * (92  - 22));
+  const int g = static_cast<int>(56  + heat * (219 - 56));
+  const int b = static_cast<int>(3   + heat * (149 - 3));
+  const QString text_color = QString("#%1%2%3")
+      .arg(r, 2, 16, QChar('0'))
+      .arg(g, 2, 16, QChar('0'))
+      .arg(b, 2, 16, QChar('0'));
   return QString(kBase) +
-         "border: 1px solid #1E2A38; background: #0B1018; color: #1B4503; }";
+         QString("border: 1px solid #1E2A38; background: #0B1018; color: %1; }").arg(text_color);
 }
 
 void MainWindow::RefreshScanListChannelCards() {

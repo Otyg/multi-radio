@@ -178,6 +178,12 @@ class MainWindow : public QMainWindow {
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
   int frozen_scan_channel_index_ = -1;
+
+  struct ChannelHeat {
+    double value = 0.0;
+    qint64 last_update_ms = 0;
+  };
+  std::vector<ChannelHeat> scan_channel_heat_;
   bool auto_squelch_active_ = false;
   bool auto_squelch_restore_monitor_mode_ = false;
   uint32_t auto_squelch_receiver_id_ = 0;
