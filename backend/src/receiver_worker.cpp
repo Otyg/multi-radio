@@ -460,7 +460,8 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
       << "-" << FormatDouble(mode_config_.range_end_hz / 1e6, 3)
       << " MHz step=" << FormatDouble(mode_config_.range_step_hz / 1e3, 1) << " kHz"
       << " audio_filters=hpf300:" << mode_config_.audio_hpf300_enabled
-      << " lpf8k:" << mode_config_.audio_lpf8k_enabled
+      << " lpf3k5:" << mode_config_.audio_lpf3k5_enabled
+      << " lpf4k5:" << mode_config_.audio_lpf4k5_enabled
       << " bpf:" << mode_config_.audio_bpf_voice_enabled;
   PublishEvent(EventKind::kInfo, msg.str());
   return true;
