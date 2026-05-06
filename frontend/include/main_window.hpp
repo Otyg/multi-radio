@@ -134,6 +134,10 @@ class MainWindow : public QMainWindow {
   QCheckBox* audio_lpf3k5_checkbox_ = nullptr;
   QCheckBox* audio_lpf4k5_checkbox_ = nullptr;
   QCheckBox* audio_bpf_voice_checkbox_ = nullptr;
+  QCheckBox* fixed_audio_hpf300_checkbox_ = nullptr;
+  QCheckBox* fixed_audio_lpf3k5_checkbox_ = nullptr;
+  QCheckBox* fixed_audio_lpf4k5_checkbox_ = nullptr;
+  QCheckBox* fixed_audio_bpf_voice_checkbox_ = nullptr;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QComboBox* fixed_modulation_combo_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;

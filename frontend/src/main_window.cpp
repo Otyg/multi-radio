@@ -1188,8 +1188,24 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_->addItem("AM", QVariant::fromValue<int>(v1::MODULATION_AM));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
+  fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
+  fixed_audio_lpf3k5_checkbox_   = new QCheckBox("LP 3.5 kHz",  fixed_tab);
+  fixed_audio_lpf4k5_checkbox_   = new QCheckBox("LP 4.5 kHz",  fixed_tab);
+  fixed_audio_bpf_voice_checkbox_ = new QCheckBox("BP 300\xe2\x80\x933k Hz", fixed_tab);
+  fixed_audio_hpf300_checkbox_->setToolTip("High-pass filter at 300 Hz \xe2\x80\x94 removes low-frequency hum and rumble");
+  fixed_audio_lpf3k5_checkbox_->setToolTip("Low-pass filter at 3.5 kHz \xe2\x80\x94 aggressive double-pass, very steep rolloff (~96 dB/octave)");
+  fixed_audio_lpf4k5_checkbox_->setToolTip("Low-pass filter at 4.5 kHz \xe2\x80\x94 order-8 Butterworth, cuts noise above wider speech band");
+  fixed_audio_bpf_voice_checkbox_->setToolTip("Band-pass filter 300 Hz \xe2\x80\x93 3 kHz \xe2\x80\x94 pass-band optimised for voice communications");
+  auto* fixed_filter_row = new QHBoxLayout();
+  fixed_filter_row->addWidget(fixed_audio_hpf300_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_lpf3k5_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_lpf4k5_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_bpf_voice_checkbox_);
+  fixed_filter_row->addStretch(1);
+
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
+  fixed_layout->addRow("Ljudfilter", fixed_filter_row);
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   // Create scan_range_viz_ here so it can live inside the SCAN_RANGE tab.
@@ -1325,10 +1341,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       ApplyModeAndConfig();
     }
   };
-  connect(audio_hpf300_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
-  connect(audio_lpf3k5_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
-  connect(audio_lpf4k5_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
+  connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
+  connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
+  connect(fixed_audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   connect(clear_channels_button, &QPushButton::clicked, this, [this]() {
     if (QMessageBox::question(this, "Clear channels",
                               "Remove all scan-list channels?") != QMessageBox::Yes) {
@@ -1906,14 +1926,18 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       (scan_list_default_squelch_spin_ != nullptr) ? scan_list_default_squelch_spin_->value()
                                                    : kDefaultScanListSquelchDb;
   config.set_scan_list_default_squelch_db(default_squelch_db);
-  config.set_audio_hpf300_enabled(audio_hpf300_checkbox_ != nullptr &&
-                                  audio_hpf300_checkbox_->isChecked());
-  config.set_audio_lpf3k5_enabled(audio_lpf3k5_checkbox_ != nullptr &&
-                                  audio_lpf3k5_checkbox_->isChecked());
-  config.set_audio_lpf4k5_enabled(audio_lpf4k5_checkbox_ != nullptr &&
-                                   audio_lpf4k5_checkbox_->isChecked());
-  config.set_audio_bpf_voice_enabled(audio_bpf_voice_checkbox_ != nullptr &&
-                                     audio_bpf_voice_checkbox_->isChecked());
+  config.set_audio_hpf300_enabled(
+      (audio_hpf300_checkbox_ != nullptr && audio_hpf300_checkbox_->isChecked()) ||
+      (fixed_audio_hpf300_checkbox_ != nullptr && fixed_audio_hpf300_checkbox_->isChecked()));
+  config.set_audio_lpf3k5_enabled(
+      (audio_lpf3k5_checkbox_ != nullptr && audio_lpf3k5_checkbox_->isChecked()) ||
+      (fixed_audio_lpf3k5_checkbox_ != nullptr && fixed_audio_lpf3k5_checkbox_->isChecked()));
+  config.set_audio_lpf4k5_enabled(
+      (audio_lpf4k5_checkbox_ != nullptr && audio_lpf4k5_checkbox_->isChecked()) ||
+      (fixed_audio_lpf4k5_checkbox_ != nullptr && fixed_audio_lpf4k5_checkbox_->isChecked()));
+  config.set_audio_bpf_voice_enabled(
+      (audio_bpf_voice_checkbox_ != nullptr && audio_bpf_voice_checkbox_->isChecked()) ||
+      (fixed_audio_bpf_voice_checkbox_ != nullptr && fixed_audio_bpf_voice_checkbox_->isChecked()));
 
   config.clear_scan_list_channels();
   config.clear_frequency_list_hz();
