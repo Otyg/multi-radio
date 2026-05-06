@@ -2096,7 +2096,7 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     if (message.startsWith("SCAN_SQUELCH_OPEN ")) {
       if (IsSelectedReceiver(receiver_id) && idx_ok && channel_index >= 0) {
         constexpr double kDecayTimeConstantS = 120.0;
-        constexpr double kBump = 0.25;
+        constexpr double kBump = 0.4;
         const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
         if (static_cast<size_t>(channel_index) >= scan_channel_heat_.size()) {
           scan_channel_heat_.resize(static_cast<size_t>(channel_index) + 1);
@@ -2669,7 +2669,7 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
     return QString(kBase) +
            "border: 2px solid #EF6C00; background: #0B1018; color: #FFB85D; }";
   }
-  // Interpolate standby text color from dark base toward squelch-open green based on activity heat.
+  // Interpolate text and border color toward squelch-open green based on activity heat.
   constexpr double kDecayTimeConstantS = 120.0;
   double heat = 0.0;
   if (index >= 0 && static_cast<size_t>(index) < scan_channel_heat_.size()) {
@@ -2679,16 +2679,25 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
       heat = h.value * std::exp(-elapsed_s / kDecayTimeConstantS);
     }
   }
-  // Base: #163803 (R=22, G=56, B=3), Active: #5CDB95 (R=92, G=219, B=149)
-  const int r = static_cast<int>(22  + heat * (92  - 22));
-  const int g = static_cast<int>(56  + heat * (219 - 56));
-  const int b = static_cast<int>(3   + heat * (149 - 3));
-  const QString text_color = QString("#%1%2%3")
-      .arg(r, 2, 16, QChar('0'))
-      .arg(g, 2, 16, QChar('0'))
-      .arg(b, 2, 16, QChar('0'));
+  // Text: #163803 (22,56,3) → #5CDB95 (92,219,149)
+  const int tr = static_cast<int>(22  + heat * (92  - 22));
+  const int tg = static_cast<int>(56  + heat * (219 - 56));
+  const int tb = static_cast<int>(3   + heat * (149 - 3));
+  // Border: #1E2A38 (30,42,56) → #2E7D32 (46,125,50)
+  const int br = static_cast<int>(30  + heat * (46  - 30));
+  const int bg = static_cast<int>(42  + heat * (125 - 42));
+  const int bb = static_cast<int>(56  + heat * (50  - 56));
+  const auto toHex = [](int r, int g, int b) {
+    return QString("#%1%2%3").arg(r, 2, 16, QChar('0'))
+                             .arg(g, 2, 16, QChar('0'))
+                             .arg(b, 2, 16, QChar('0'));
+  };
+  const int border_px = heat > 0.05 ? 2 : 1;
   return QString(kBase) +
-         QString("border: 1px solid #1E2A38; background: #0B1018; color: %1; }").arg(text_color);
+         QString("border: %1px solid %2; background: #0B1018; color: %3; }")
+             .arg(border_px)
+             .arg(toHex(br, bg, bb))
+             .arg(toHex(tr, tg, tb));
 }
 
 void MainWindow::RefreshScanListChannelCards() {
