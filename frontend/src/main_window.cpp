@@ -2665,8 +2665,8 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
            "border: 2px solid #2E7D32; background: #0B1018; color: #5CDB95; }";
   }
 
-  // Compute heat-based text color for all non-squelch-open states.
-  // kSquelchClosed keeps its orange border (scanner is on this channel) but uses heat text.
+  // Compute heat for all non-squelch-open states.
+  // Use sqrt mapping so even a single squelch-open gives a clearly visible color change.
   constexpr double kDecayTimeConstantS = 120.0;
   double heat = 0.0;
   if (index >= 0 && static_cast<size_t>(index) < scan_channel_heat_.size()) {
@@ -2676,32 +2676,34 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
       heat = h.value * std::exp(-elapsed_s / kDecayTimeConstantS);
     }
   }
-  // Text: #163803 (22,56,3) → #5CDB95 (92,219,149)
-  const int tr = static_cast<int>(22 + heat * (92  - 22));
-  const int tg = static_cast<int>(56 + heat * (219 - 56));
-  const int tb = static_cast<int>(3  + heat * (149 - 3));
+  const double t = std::sqrt(std::clamp(heat, 0.0, 1.0));  // sqrt for fast initial response
+
+  const auto lerp = [](int a, int b, double f) {
+    return static_cast<int>(a + f * (b - a));
+  };
   const auto toHex = [](int r, int g, int b) {
     return QString("#%1%2%3").arg(r, 2, 16, QChar('0'))
                              .arg(g, 2, 16, QChar('0'))
                              .arg(b, 2, 16, QChar('0'));
   };
-  const QString text_color = toHex(tr, tg, tb);
+
+  // Text: #163803 (22,56,3) → #5CDB95 (92,219,149)
+  const QString text_color = toHex(lerp(22,92,t), lerp(56,219,t), lerp(3,149,t));
+  // Background: #0B1018 (11,16,24) → #0D2012 (13,32,18) subtle green tint
+  const QString bg_color = toHex(lerp(11,13,t), lerp(16,32,t), lerp(24,18,t));
+  // Border: #1E2A38 → #2E7D32, always 2px when heat > 0
+  const QString border_color = toHex(lerp(30,46,t), lerp(42,125,t), lerp(56,50,t));
+  const int border_px = t > 0.01 ? 2 : 1;
 
   if (active_scan_list_channel_index_ == index &&
       active_scan_list_channel_state_ == ScanListChannelState::kSquelchClosed) {
     return QString(kBase) +
-           QString("border: 2px solid #EF6C00; background: #0B1018; color: %1; }").arg(text_color);
+           QString("border: 2px solid #EF6C00; background: %1; color: %2; }")
+               .arg(bg_color).arg(text_color);
   }
-  // Border: #1E2A38 (30,42,56) → #2E7D32 (46,125,50)
-  const int br = static_cast<int>(30 + heat * (46  - 30));
-  const int bg = static_cast<int>(42 + heat * (125 - 42));
-  const int bb = static_cast<int>(56 + heat * (50  - 56));
-  const int border_px = heat > 0.05 ? 2 : 1;
   return QString(kBase) +
-         QString("border: %1px solid %2; background: #0B1018; color: %3; }")
-             .arg(border_px)
-             .arg(toHex(br, bg, bb))
-             .arg(text_color);
+         QString("border: %1px solid %2; background: %3; color: %4; }")
+             .arg(border_px).arg(border_color).arg(bg_color).arg(text_color);
 }
 
 void MainWindow::RefreshScanListChannelCards() {
