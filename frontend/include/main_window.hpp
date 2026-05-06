@@ -131,8 +131,8 @@ class MainWindow : public QMainWindow {
   QCheckBox* scan_list_monitor_checkbox_ = nullptr;
   QDoubleSpinBox* scan_list_default_squelch_spin_ = nullptr;
   QCheckBox* audio_hpf300_checkbox_ = nullptr;
-  QCheckBox* audio_lpf8k_checkbox_ = nullptr;
-  QCheckBox* audio_lpf15k_checkbox_ = nullptr;
+  QCheckBox* audio_lpf3k5_checkbox_ = nullptr;
+  QCheckBox* audio_lpf4k5_checkbox_ = nullptr;
   QCheckBox* audio_bpf_voice_checkbox_ = nullptr;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QComboBox* fixed_modulation_combo_ = nullptr;

@@ -103,6 +103,13 @@ void SignalVisualizationWidget::SetKnownReceivers(const std::vector<uint32_t>& r
   update();
 }
 
+void SignalVisualizationWidget::ResetPeakHold() {
+  for (auto it = states_.begin(); it != states_.end(); ++it) {
+    it.value().spectrum_peak_hold.fill(0.0);
+  }
+  update();
+}
+
 void SignalVisualizationWidget::SetReceiverFilter(int receiver_filter_id) {
   receiver_filter_id_ = receiver_filter_id;
   update();
@@ -356,6 +363,7 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
   const bool apply_noise_floor_filter =
       noise_floor_filter_enabled_ && spectrum_source_ == SpectrumSource::kReceiverInput;
   DrawSpectrumCurve(&painter, spectrogram_rect.adjusted(8, 30, -8, -8), display.spectrum,
+                    display.spectrum_peak_hold,
                     display.frequency_start_hz, display.frequency_end_hz, false,
                     display.has_squelch_threshold_db, display.squelch_threshold_db,
                     apply_noise_floor_filter, noise_floor_db_);
@@ -700,7 +708,9 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
 }
 
 void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect& area,
-                                                  const QVector<double>& spectrum, double frequency_start_hz,
+                                                  const QVector<double>& spectrum,
+                                                  const QVector<double>& spectrum_peak_hold,
+                                                  double frequency_start_hz,
                                                   double frequency_end_hz, bool suppress_below_mean,
                                                   bool has_squelch_threshold_db,
                                                   double squelch_threshold_db,
@@ -832,6 +842,36 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
     painter->setPen(QPen(QColor(255, 176, 95), 2));
     painter->drawPath(path);
   }
+
+  // Peak-hold curve.
+  if (!spectrum_peak_hold.isEmpty()) {
+    QPainterPath peak_path;
+    bool peak_open = false;
+    for (int i = 0; i < spectrum_peak_hold.size(); ++i) {
+      const double amplitude = Clamp01(spectrum_peak_hold[i]);
+      const double db = amp_to_db(amplitude);
+      if (has_noise_floor_threshold_db && db <= clamped_noise_floor_db) {
+        peak_open = false;
+        continue;
+      }
+      const double t = (spectrum_peak_hold.size() <= 1)
+                           ? 0.0
+                           : static_cast<double>(i) / (spectrum_peak_hold.size() - 1);
+      const int x = plot.left() + static_cast<int>(t * (plot.width() - 1));
+      const int y = db_to_y(db);
+      if (!peak_open) {
+        peak_path.moveTo(x, y);
+        peak_open = true;
+      } else {
+        peak_path.lineTo(x, y);
+      }
+    }
+    if (!peak_path.isEmpty()) {
+      painter->setPen(QPen(QColor(220, 230, 255, 180), 1));
+      painter->drawPath(peak_path);
+    }
+  }
+
   painter->restore();
 }
 
@@ -951,6 +991,7 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
         }
       } else {
         display.spectrum = selected.spectrum;
+        display.spectrum_peak_hold = selected.spectrum_peak_hold;
         display.spectrogram_rows = selected.spectrogram_rows;
         display.waterfall_rows = selected.waterfall_rows;
         display.frequency_start_hz = 0.0;
@@ -995,6 +1036,7 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       }
     } else {
       display.spectrum = selected.spectrum;
+      display.spectrum_peak_hold = selected.spectrum_peak_hold;
       display.spectrogram_rows = selected.spectrogram_rows;
       display.waterfall_rows = selected.waterfall_rows;
       display.frequency_start_hz = 0.0;
@@ -1188,6 +1230,14 @@ void SignalVisualizationWidget::BlendFrameIntoState(ReceiverState* state, const 
   EnsureState(state);
   if (frame_frequency_end_hz > 1.0) {
     state->demod_frequency_end_hz = frame_frequency_end_hz;
+  }
+  // Update per-bin peak hold.
+  const QVector<double> resampled = ResampleToSize(spectrum, spectrum_bins_);
+  if (state->spectrum_peak_hold.size() != resampled.size()) {
+    state->spectrum_peak_hold = QVector<double>(resampled.size(), 0.0);
+  }
+  for (int i = 0; i < resampled.size(); ++i) {
+    state->spectrum_peak_hold[i] = std::max(state->spectrum_peak_hold[i], resampled[i]);
   }
 
   const double waveform_point = ComputeWaveformSamplePoint(waveform);

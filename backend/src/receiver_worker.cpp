@@ -664,40 +664,44 @@ void ReceiverWorker::ProcessLoop() {
   constexpr double kEmaAlpha = 0.08;
 
   // Post-demodulation audio filters; recreated when audio sample rate changes.
-  // audio_lpf15k is always-on for WFM-rate audio (sr > 30 kHz); the rest are user-controlled.
+  // lpf3k5_a + lpf3k5_b run in cascade when LP 3.5 kHz is enabled (double-pass = very steep rolloff).
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
-  iirfilt_rrrf audio_hpf300 = nullptr;   // standalone HPF at 300 Hz
-  iirfilt_rrrf audio_lpf8k = nullptr;    // standalone LPF at 8 kHz
-  iirfilt_rrrf audio_lpf15k = nullptr;   // always-on hard ceiling at 15 kHz (WFM only)
-  iirfilt_rrrf audio_bpf_hpf = nullptr;  // BPF internal HPF component at 300 Hz
-  iirfilt_rrrf audio_bpf_lpf = nullptr;  // BPF internal LPF component at 3 kHz
+  iirfilt_rrrf audio_hpf300    = nullptr;  // HPF at 300 Hz
+  iirfilt_rrrf audio_lpf3k5_a  = nullptr;  // LPF at 3.5 kHz, first pass
+  iirfilt_rrrf audio_lpf3k5_b  = nullptr;  // LPF at 3.5 kHz, second pass (cascade)
+  iirfilt_rrrf audio_lpf4k5    = nullptr;  // LPF at 4.5 kHz
+  iirfilt_rrrf audio_bpf_hpf   = nullptr;  // BPF internal HPF at 300 Hz
+  iirfilt_rrrf audio_bpf_lpf   = nullptr;  // BPF internal LPF at 3 kHz
 #endif
   uint32_t audio_filter_sr_hz = 0;
   std::vector<float> audio_filter_scratch;
 
   auto rebuild_audio_filters = [&](uint32_t sr_hz) {
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
-    if (audio_hpf300 != nullptr)  { iirfilt_rrrf_destroy(audio_hpf300);  audio_hpf300  = nullptr; }
-    if (audio_lpf8k != nullptr)   { iirfilt_rrrf_destroy(audio_lpf8k);   audio_lpf8k   = nullptr; }
-    if (audio_lpf15k != nullptr)  { iirfilt_rrrf_destroy(audio_lpf15k);  audio_lpf15k  = nullptr; }
-    if (audio_bpf_hpf != nullptr) { iirfilt_rrrf_destroy(audio_bpf_hpf); audio_bpf_hpf = nullptr; }
-    if (audio_bpf_lpf != nullptr) { iirfilt_rrrf_destroy(audio_bpf_lpf); audio_bpf_lpf = nullptr; }
+    if (audio_hpf300   != nullptr) { iirfilt_rrrf_destroy(audio_hpf300);   audio_hpf300   = nullptr; }
+    if (audio_lpf3k5_a != nullptr) { iirfilt_rrrf_destroy(audio_lpf3k5_a); audio_lpf3k5_a = nullptr; }
+    if (audio_lpf3k5_b != nullptr) { iirfilt_rrrf_destroy(audio_lpf3k5_b); audio_lpf3k5_b = nullptr; }
+    if (audio_lpf4k5   != nullptr) { iirfilt_rrrf_destroy(audio_lpf4k5);   audio_lpf4k5   = nullptr; }
+    if (audio_bpf_hpf  != nullptr) { iirfilt_rrrf_destroy(audio_bpf_hpf);  audio_bpf_hpf  = nullptr; }
+    if (audio_bpf_lpf  != nullptr) { iirfilt_rrrf_destroy(audio_bpf_lpf);  audio_bpf_lpf  = nullptr; }
     if (sr_hz > 0) {
-      const float sr = static_cast<float>(sr_hz);
+      const float sr       = static_cast<float>(sr_hz);
       const float fc_hpf   = 300.0f / sr;
       const float fc_lpf3k = std::min(3000.0f, sr * 0.45f) / sr;
-      const float fc_lpf8k = std::min(8000.0f, sr * 0.45f) / sr;
+      const float fc_3k5   = std::min(3500.0f, sr * 0.45f) / sr;
+      const float fc_4k5   = std::min(4500.0f, sr * 0.45f) / sr;
       audio_hpf300 = iirfilt_rrrf_create_prototype(
           LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 4, fc_hpf, 0.0f, 1.0f, 60.0f);
-      audio_lpf8k = iirfilt_rrrf_create_prototype(
-          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 8, fc_lpf8k, 0.0f, 1.0f, 60.0f);
+      audio_lpf3k5_a = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 8, fc_3k5, 0.0f, 1.0f, 60.0f);
+      audio_lpf3k5_b = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 8, fc_3k5, 0.0f, 1.0f, 60.0f);
+      audio_lpf4k5 = iirfilt_rrrf_create_prototype(
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 8, fc_4k5, 0.0f, 1.0f, 60.0f);
       audio_bpf_hpf = iirfilt_rrrf_create_prototype(
           LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 4, fc_hpf, 0.0f, 1.0f, 60.0f);
       audio_bpf_lpf = iirfilt_rrrf_create_prototype(
           LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 4, fc_lpf3k, 0.0f, 1.0f, 60.0f);
-      const float fc_lpf15k = std::min(15000.0f, sr * 0.45f) / sr;
-      audio_lpf15k = iirfilt_rrrf_create_prototype(
-          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 8, fc_lpf15k, 0.0f, 1.0f, 60.0f);
     }
 #else
     (void)sr_hz;
@@ -710,16 +714,15 @@ void ReceiverWorker::ProcessLoop() {
   auto apply_audio_filters = [&](std::vector<int16_t>* pcm) {
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
     if (pcm == nullptr || pcm->empty()) return;
-    bool do_hpf = false, do_lpf = false, do_bpf = false, do_lpf15k = false;
+    bool do_hpf = false, do_lpf3k5 = false, do_lpf4k5 = false, do_bpf = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       do_hpf    = mode_config_.audio_hpf300_enabled;
-      do_lpf    = mode_config_.audio_lpf8k_enabled;
+      do_lpf3k5 = mode_config_.audio_lpf3k5_enabled;
+      do_lpf4k5 = mode_config_.audio_lpf4k5_enabled;
       do_bpf    = mode_config_.audio_bpf_voice_enabled;
-      do_lpf15k = mode_config_.audio_lpf15k_enabled;
     }
-    do_lpf15k = do_lpf15k && (audio_lpf15k != nullptr);
-    const bool now_active = do_hpf || do_lpf || do_bpf || do_lpf15k;
+    const bool now_active = do_hpf || do_lpf3k5 || do_lpf4k5 || do_bpf;
     if (!audio_filter_last_active && now_active) {
       audio_filter_log_pending = true;
     }
@@ -729,7 +732,7 @@ void ReceiverWorker::ProcessLoop() {
       audio_filter_log_pending = false;
       std::ostringstream filter_msg;
       filter_msg << "audio filters active: hpf300=" << do_hpf
-                 << " lpf8k=" << do_lpf << " lpf15k=" << do_lpf15k << " bpf=" << do_bpf
+                 << " lpf3k5=" << do_lpf3k5 << " lpf4k5=" << do_lpf4k5 << " bpf=" << do_bpf
                  << " samples=" << pcm->size();
       PublishEvent(EventKind::kInfo, filter_msg.str());
     }
@@ -737,11 +740,6 @@ void ReceiverWorker::ProcessLoop() {
     audio_filter_scratch.resize(n);
     for (size_t i = 0; i < n; ++i) {
       audio_filter_scratch[i] = static_cast<float>((*pcm)[i]) / 32768.0f;
-    }
-    // Always-on hard ceiling at 15 kHz (only exists for WFM-rate audio).
-    if (do_lpf15k) {
-      iirfilt_rrrf_execute_block(audio_lpf15k, audio_filter_scratch.data(),
-                                 static_cast<unsigned int>(n), audio_filter_scratch.data());
     }
     if (do_bpf) {
       if (audio_bpf_hpf != nullptr) {
@@ -757,8 +755,19 @@ void ReceiverWorker::ProcessLoop() {
       iirfilt_rrrf_execute_block(audio_hpf300, audio_filter_scratch.data(),
                                  static_cast<unsigned int>(n), audio_filter_scratch.data());
     }
-    if (do_lpf && audio_lpf8k != nullptr) {
-      iirfilt_rrrf_execute_block(audio_lpf8k, audio_filter_scratch.data(),
+    // LP 3.5 kHz: two cascaded passes for very steep rolloff (~96 dB/octave effective).
+    if (do_lpf3k5) {
+      if (audio_lpf3k5_a != nullptr) {
+        iirfilt_rrrf_execute_block(audio_lpf3k5_a, audio_filter_scratch.data(),
+                                   static_cast<unsigned int>(n), audio_filter_scratch.data());
+      }
+      if (audio_lpf3k5_b != nullptr) {
+        iirfilt_rrrf_execute_block(audio_lpf3k5_b, audio_filter_scratch.data(),
+                                   static_cast<unsigned int>(n), audio_filter_scratch.data());
+      }
+    }
+    if (do_lpf4k5 && audio_lpf4k5 != nullptr) {
+      iirfilt_rrrf_execute_block(audio_lpf4k5, audio_filter_scratch.data(),
                                  static_cast<unsigned int>(n), audio_filter_scratch.data());
     }
     for (size_t i = 0; i < n; ++i) {

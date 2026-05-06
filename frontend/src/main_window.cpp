@@ -1246,12 +1246,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   scan_list_default_squelch_spin_->setSuffix(" dB");
   scan_list_default_squelch_spin_->setValue(kDefaultScanListSquelchDb);
   audio_hpf300_checkbox_ = new QCheckBox("HP 300 Hz", list_tab);
-  audio_lpf8k_checkbox_ = new QCheckBox("LP 8 kHz", list_tab);
-  audio_lpf15k_checkbox_ = new QCheckBox("LP 15 kHz", list_tab);
+  audio_lpf3k5_checkbox_ = new QCheckBox("LP 3.5 kHz", list_tab);
+  audio_lpf4k5_checkbox_ = new QCheckBox("LP 4.5 kHz", list_tab);
   audio_bpf_voice_checkbox_ = new QCheckBox("BP 300–3k Hz", list_tab);
   audio_hpf300_checkbox_->setToolTip("High-pass filter at 300 Hz — removes low-frequency hum and rumble");
-  audio_lpf8k_checkbox_->setToolTip("Low-pass filter at 8 kHz — removes high-frequency noise above speech range");
-  audio_lpf15k_checkbox_->setToolTip("Low-pass filter at 15 kHz — hard ceiling for high-frequency noise (adapts to audio sample rate)");
+  audio_lpf3k5_checkbox_->setToolTip("Low-pass filter at 3.5 kHz — aggressive double-pass, very steep rolloff (~96 dB/octave)");
+  audio_lpf4k5_checkbox_->setToolTip("Low-pass filter at 4.5 kHz — order-8 Butterworth, cuts noise above wider speech band");
   audio_bpf_voice_checkbox_->setToolTip("Band-pass filter 300 Hz – 3 kHz — pass-band optimised for voice communications");
   controls_row->addWidget(scan_list_monitor_checkbox_);
   controls_row->addSpacing(12);
@@ -1259,8 +1259,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_row->addWidget(scan_list_default_squelch_spin_);
   controls_row->addSpacing(12);
   controls_row->addWidget(audio_hpf300_checkbox_);
-  controls_row->addWidget(audio_lpf8k_checkbox_);
-  controls_row->addWidget(audio_lpf15k_checkbox_);
+  controls_row->addWidget(audio_lpf3k5_checkbox_);
+  controls_row->addWidget(audio_lpf4k5_checkbox_);
   controls_row->addWidget(audio_bpf_voice_checkbox_);
   controls_row->addStretch(1);
   list_layout->addLayout(controls_row);
@@ -1326,8 +1326,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     }
   };
   connect(audio_hpf300_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
-  connect(audio_lpf8k_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
-  connect(audio_lpf15k_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_lpf3k5_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_lpf4k5_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   connect(audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   connect(clear_channels_button, &QPushButton::clicked, this, [this]() {
     if (QMessageBox::question(this, "Clear channels",
@@ -1787,6 +1787,9 @@ void MainWindow::StartSelectedReceiver() {
     QMessageBox::warning(this, "StartReceiver failed", QString::fromStdString(error));
     return;
   }
+  if (signal_visualization_ != nullptr) {
+    signal_visualization_->ResetPeakHold();
+  }
   AppendLog(QString("Start requested for receiver %1").arg(receiver_id));
   RefreshReceivers();
 }
@@ -1905,10 +1908,10 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_scan_list_default_squelch_db(default_squelch_db);
   config.set_audio_hpf300_enabled(audio_hpf300_checkbox_ != nullptr &&
                                   audio_hpf300_checkbox_->isChecked());
-  config.set_audio_lpf8k_enabled(audio_lpf8k_checkbox_ != nullptr &&
-                                  audio_lpf8k_checkbox_->isChecked());
-  config.set_audio_lpf15k_enabled(audio_lpf15k_checkbox_ != nullptr &&
-                                   audio_lpf15k_checkbox_->isChecked());
+  config.set_audio_lpf3k5_enabled(audio_lpf3k5_checkbox_ != nullptr &&
+                                  audio_lpf3k5_checkbox_->isChecked());
+  config.set_audio_lpf4k5_enabled(audio_lpf4k5_checkbox_ != nullptr &&
+                                   audio_lpf4k5_checkbox_->isChecked());
   config.set_audio_bpf_voice_enabled(audio_bpf_voice_checkbox_ != nullptr &&
                                      audio_bpf_voice_checkbox_->isChecked());
 

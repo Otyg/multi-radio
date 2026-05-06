@@ -175,8 +175,18 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
                                                  const QVector<double>& spectrum) {
   if (rect.isEmpty() || spectrum.isEmpty()) return;
 
-  const int W = rect.width();
-  const int H = rect.height();
+  constexpr double kFloorDb   = -90.0;
+  constexpr double kCeilDb    = -20.0;
+  constexpr double kDbSpan    = kCeilDb - kFloorDb;
+  constexpr int    kLabelW    = 38;
+  constexpr int    kFreqAxisH = 14;
+
+  const QRect plot(rect.left() + kLabelW, rect.top(),
+                   rect.width() - kLabelW, rect.height() - kFreqAxisH);
+  if (plot.isEmpty()) return;
+
+  const int W = plot.width();
+  const int H = plot.height();
   const int n = spectrum.size();
 
   auto sample_at = [&](double t) -> double {
@@ -186,44 +196,58 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
     return spectrum[lo] + (pos - lo) * (spectrum[hi] - spectrum[lo]);
   };
 
+  // dBFS grid lines at every 10 dB.
+  const QFontMetrics fm(p->font());
+  for (int db = static_cast<int>(kFloorDb); db <= static_cast<int>(kCeilDb); db += 10) {
+    const double t = (static_cast<double>(db) - kFloorDb) / kDbSpan;
+    const int y = plot.bottom() - static_cast<int>(t * (H - 1));
+    p->setPen(QPen(QColor(50, 62, 84), 1));
+    p->drawLine(plot.left(), y, plot.right(), y);
+    const QString lbl = QString::number(db);
+    const int lw = fm.horizontalAdvance(lbl);
+    p->setPen(QColor(110, 128, 160));
+    p->drawText(rect.left() + kLabelW - lw - 4, y + fm.ascent() / 2, lbl);
+  }
+
+  // Filled area under curve.
   QPainterPath fill_path;
-  fill_path.moveTo(rect.left(), rect.bottom());
+  fill_path.moveTo(plot.left(), plot.bottom());
   for (int px = 0; px < W; ++px) {
     const double t = (W <= 1) ? 0.0 : static_cast<double>(px) / (W - 1);
-    const double y = rect.bottom() - Clamp01(sample_at(t)) * H;
-    if (px == 0) fill_path.lineTo(rect.left(), y);
-    fill_path.lineTo(rect.left() + px, y);
+    const double y = plot.bottom() - Clamp01(sample_at(t)) * H;
+    if (px == 0) fill_path.lineTo(plot.left(), y);
+    fill_path.lineTo(plot.left() + px, y);
   }
-  fill_path.lineTo(rect.right(), rect.bottom());
+  fill_path.lineTo(plot.right(), plot.bottom());
   fill_path.closeSubpath();
 
-  QLinearGradient grad(0, rect.top(), 0, rect.bottom());
+  QLinearGradient grad(0, plot.top(), 0, plot.bottom());
   grad.setColorAt(0.0, QColor(0, 210, 190, 90));
   grad.setColorAt(1.0, QColor(0, 210, 190, 0));
   p->fillPath(fill_path, QBrush(grad));
 
+  // Spectrum line.
   QPainterPath line_path;
   for (int px = 0; px < W; ++px) {
     const double t = (W <= 1) ? 0.0 : static_cast<double>(px) / (W - 1);
-    const double y = rect.bottom() - Clamp01(sample_at(t)) * H;
-    if (px == 0) line_path.moveTo(rect.left(), y);
-    else line_path.lineTo(rect.left() + px, y);
+    const double y = plot.bottom() - Clamp01(sample_at(t)) * H;
+    if (px == 0) line_path.moveTo(plot.left(), y);
+    else line_path.lineTo(plot.left() + px, y);
   }
   p->setPen(QPen(QColor(0, 210, 190), 1.5));
   p->drawPath(line_path);
 
-  // Frequency axis ticks
+  // Frequency axis ticks below the plot.
   p->setPen(QColor(100, 120, 155));
-  const QFontMetrics fm(p->font());
   const double span = scan_end_hz_ - scan_start_hz_;
   for (int i = 0; i <= 4; ++i) {
     const double frac = static_cast<double>(i) / 4.0;
     const double freq = (scan_start_hz_ - scan_step_hz_ * 0.5) + frac * (span + scan_step_hz_);
-    const int px = rect.left() + static_cast<int>(frac * (W - 1));
+    const int px = plot.left() + static_cast<int>(frac * (W - 1));
     const QString label = FormatFreq(freq);
     const int lw = fm.horizontalAdvance(label);
-    const int tx = std::clamp(px - lw / 2, rect.left(), rect.right() - lw);
-    p->drawText(tx, rect.bottom() - 2, label);
+    const int tx = std::clamp(px - lw / 2, plot.left(), plot.right() - lw);
+    p->drawText(tx, rect.bottom(), label);
   }
 }
 

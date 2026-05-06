@@ -35,6 +35,7 @@ class SignalVisualizationWidget : public QWidget {
   void SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db, double psd_floor_db, double snr_db,
                            double psd_peak_offset_hz, bool has_quality_score,
                            double quality_score_pct, bool has_signal_ok, bool signal_ok);
+  void ResetPeakHold();
   void SetAutoNoiseReductionEnabled(bool enabled);
   void SetNoiseFloorFilterEnabled(bool enabled);
   void SetNoiseFloorDb(double noise_floor_db);
@@ -61,6 +62,7 @@ class SignalVisualizationWidget : public QWidget {
   struct DisplayState {
     QVector<double> waveform;
     QVector<double> spectrum;
+    QVector<double> spectrum_peak_hold;
     QVector<QVector<double>> spectrogram_rows;
     QVector<QVector<double>> waterfall_rows;
     double signal_level = 0.0;
@@ -89,6 +91,7 @@ class SignalVisualizationWidget : public QWidget {
     double last_frequency_hz = 0.0;
     double signal_level = 0.0;
     double signal_peak_hold = 0.0;
+    QVector<double> spectrum_peak_hold;
     QVector<double> receiver_spectrum;
     QVector<QVector<double>> receiver_spectrogram_rows;
     QVector<QVector<double>> receiver_waterfall_rows;
@@ -127,6 +130,7 @@ class SignalVisualizationWidget : public QWidget {
                              bool has_signal_ok, bool signal_ok,
                              bool has_squelch_threshold_db, double squelch_threshold_db);
   static void DrawSpectrumCurve(QPainter* painter, const QRect& area, const QVector<double>& spectrum,
+                                const QVector<double>& spectrum_peak_hold,
                                 double frequency_start_hz, double frequency_end_hz,
                                 bool suppress_below_mean, bool has_squelch_threshold_db,
                                 double squelch_threshold_db, bool has_noise_floor_threshold_db,

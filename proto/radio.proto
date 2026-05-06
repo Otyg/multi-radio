@@ -55,9 +55,9 @@ message ModeConfig {
   bool scan_list_monitor_mode = 19;
   double scan_list_default_squelch_db = 20;
   bool audio_hpf300_enabled = 22;
-  bool audio_lpf8k_enabled = 23;
+  bool audio_lpf3k5_enabled = 23;
   bool audio_bpf_voice_enabled = 24;
-  bool audio_lpf15k_enabled = 25;
+  bool audio_lpf4k5_enabled = 25;
 }
 
 message ScanListChannel {
