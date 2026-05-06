@@ -3084,7 +3084,7 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
   const QString state = TokenValue(message, "state").trimmed().toLower();
   if (state == "open") {
     constexpr double kDecayTimeConstantS = 120.0;
-    constexpr double kBump = 0.4;
+    constexpr double kBump = 0.125;
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
     if (static_cast<size_t>(index) >= scan_channel_heat_.size()) {
       scan_channel_heat_.resize(static_cast<size_t>(index) + 1);
