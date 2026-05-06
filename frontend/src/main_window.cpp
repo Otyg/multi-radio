@@ -2094,22 +2094,6 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     const qint64 open_ms = TokenValue(message, "open_ms").toLongLong(&open_ms_ok);
 
     if (message.startsWith("SCAN_SQUELCH_OPEN ")) {
-      if (IsSelectedReceiver(receiver_id) && idx_ok && channel_index >= 0) {
-        constexpr double kDecayTimeConstantS = 120.0;
-        constexpr double kBump = 0.4;
-        const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
-        if (static_cast<size_t>(channel_index) >= scan_channel_heat_.size()) {
-          scan_channel_heat_.resize(static_cast<size_t>(channel_index) + 1);
-        }
-        auto& h = scan_channel_heat_[static_cast<size_t>(channel_index)];
-        if (h.last_update_ms > 0) {
-          const double elapsed_s = (now_ms - h.last_update_ms) / 1000.0;
-          h.value *= std::exp(-elapsed_s / kDecayTimeConstantS);
-        }
-        h.value = std::min(1.0, h.value + kBump);
-        h.last_update_ms = now_ms;
-        RefreshScanListChannelCards();
-      }
       if (IsSelectedReceiver(receiver_id)) {
         audio_stream_seq_valid_ = false;
         audio_stream_sample_index_valid_ = false;
@@ -2758,18 +2742,6 @@ void MainWindow::RefreshScanListChannelCards() {
     scan_list_channel_buttons_.push_back(channel_button);
   }
 
-  // DEBUG: log heat values for all channels
-  for (size_t idx = 0; idx < scan_channel_heat_.size(); ++idx) {
-    const auto& h = scan_channel_heat_[idx];
-    if (h.last_update_ms > 0) {
-      const double elapsed_s = (QDateTime::currentMSecsSinceEpoch() - h.last_update_ms) / 1000.0;
-      const double heat = h.value * std::exp(-elapsed_s / 120.0);
-      AppendLog(QString("DEBUG heat ch%1 raw=%2 elapsed=%3s computed=%4")
-                    .arg(idx).arg(h.value, 0, 'f', 3)
-                    .arg(elapsed_s, 0, 'f', 1).arg(heat, 0, 'f', 3));
-    }
-  }
-
   int max_text_width = 0;
   for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
     QPushButton* button = scan_list_channel_buttons_[idx];
@@ -3110,6 +3082,21 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
     }
   }
   const QString state = TokenValue(message, "state").trimmed().toLower();
+  if (state == "open") {
+    constexpr double kDecayTimeConstantS = 120.0;
+    constexpr double kBump = 0.4;
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    if (static_cast<size_t>(index) >= scan_channel_heat_.size()) {
+      scan_channel_heat_.resize(static_cast<size_t>(index) + 1);
+    }
+    auto& h = scan_channel_heat_[static_cast<size_t>(index)];
+    if (h.last_update_ms > 0) {
+      const double elapsed_s = (now_ms - h.last_update_ms) / 1000.0;
+      h.value *= std::exp(-elapsed_s / kDecayTimeConstantS);
+    }
+    h.value = std::min(1.0, h.value + kBump);
+    h.last_update_ms = now_ms;
+  }
   active_scan_list_channel_index_ = index;
   if (state == "open") {
     active_scan_list_channel_state_ = ScanListChannelState::kSquelchOpen;
