@@ -511,7 +511,9 @@ void ReceiverWorker::IngestLoop() {
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
     const uint32_t effective_sample_rate_hz =
-        std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
+        (mode == RadioMode::kScanRange)
+            ? requested_sample_rate_hz
+            : std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
 
     IQSampleBlock iq_block;
     bool have_iq = false;
@@ -1274,7 +1276,9 @@ void ReceiverWorker::RunLoop() {
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
     const uint32_t effective_sample_rate_hz =
-        std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
+        (mode == RadioMode::kScanRange)
+            ? requested_sample_rate_hz
+            : std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
     if (effective_sample_rate_hz != requested_sample_rate_hz &&
         (last_requested_sample_rate_hz != requested_sample_rate_hz ||
          last_effective_sample_rate_hz != effective_sample_rate_hz)) {
