@@ -173,6 +173,7 @@ class MainWindow : public QMainWindow {
   QScrollArea* scan_list_scroll_area_ = nullptr;
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+  int frozen_scan_channel_index_ = -1;
   bool auto_squelch_active_ = false;
   bool auto_squelch_restore_monitor_mode_ = false;
   uint32_t auto_squelch_receiver_id_ = 0;

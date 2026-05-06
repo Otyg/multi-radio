@@ -1376,6 +1376,20 @@ void ReceiverWorker::RunLoop() {
         }
       }
 
+      // Channel lock: override advance and jump to locked channel if needed.
+      if (config.scan_list_channel_locked && config.scan_list_locked_channel_index >= 0 &&
+          config.scan_list_locked_channel_index < n) {
+        const int locked_idx = config.scan_list_locked_channel_index;
+        should_advance = false;
+        scan_audio_muted = false;
+        if (cur_ingest_idx != locked_idx) {
+          std::lock_guard<std::mutex> lock(mu_);
+          scan_channel_idx_ = locked_idx;
+          scan_dwell_started_at = now;
+          scan_state = ScanState::kWaiting;
+        }
+      }
+
       if (should_advance) {
         if (n > 1) {
           const int next_idx = (cur_ingest_idx + 1) % n;

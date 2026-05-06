@@ -30,6 +30,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSettings>
+#include <QMenu>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTextStream>
@@ -1941,6 +1942,9 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
   config.set_scan_list_monitor_mode(
       scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
+  config.set_scan_list_channel_locked(frozen_scan_channel_index_ >= 0);
+  config.set_scan_list_locked_channel_index(
+      static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
   const double default_squelch_db =
       (scan_list_default_squelch_spin_ != nullptr) ? scan_list_default_squelch_spin_->value()
                                                    : kDefaultScanListSquelchDb;
@@ -2590,6 +2594,10 @@ QString MainWindow::ScanListChannelCardText(int index) const {
 QString MainWindow::ScanListChannelCardStyle(int index) const {
   constexpr auto kBase =
       "QPushButton { text-align: left; padding: 6px 10px; border-radius: 6px; ";
+  if (frozen_scan_channel_index_ == index) {
+    return QString(kBase) +
+           "border: 2px solid #00BCD4; background: #0B1018; color: #80DEEA; }";
+  }
   if (active_scan_list_channel_index_ == index &&
       active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen) {
     return QString(kBase) +
@@ -2620,6 +2628,7 @@ void MainWindow::RefreshScanListChannelCards() {
     auto* channel_button = new QPushButton(scan_list_grid_widget_);
     channel_button->setMinimumHeight(56);
     channel_button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    channel_button->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(channel_button, &QPushButton::clicked, this, [this, channel_button]() {
       const auto it = std::find(scan_list_channel_buttons_.begin(), scan_list_channel_buttons_.end(),
                                 channel_button);
@@ -2629,6 +2638,29 @@ void MainWindow::RefreshScanListChannelCards() {
       const int index = static_cast<int>(std::distance(scan_list_channel_buttons_.begin(), it));
       ConfigureScanListChannel(index);
     });
+    connect(channel_button, &QPushButton::customContextMenuRequested, this,
+            [this, channel_button](const QPoint& pos) {
+              const auto it = std::find(scan_list_channel_buttons_.begin(),
+                                        scan_list_channel_buttons_.end(), channel_button);
+              if (it == scan_list_channel_buttons_.end()) return;
+              const int index =
+                  static_cast<int>(std::distance(scan_list_channel_buttons_.begin(), it));
+              QMenu menu(this);
+              if (frozen_scan_channel_index_ == index) {
+                menu.addAction("Lås upp scanner", [this]() {
+                  frozen_scan_channel_index_ = -1;
+                  RefreshScanListChannelCards();
+                  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+                });
+              } else {
+                menu.addAction("Frys scanner på denna kanal", [this, index]() {
+                  frozen_scan_channel_index_ = index;
+                  RefreshScanListChannelCards();
+                  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+                });
+              }
+              menu.exec(channel_button->mapToGlobal(pos));
+            });
     scan_list_channel_buttons_.push_back(channel_button);
   }
 
@@ -2820,6 +2852,11 @@ void MainWindow::RemoveScanListChannel(int index) {
     active_scan_list_channel_state_ = ScanListChannelState::kIdle;
   } else if (active_scan_list_channel_index_ > index) {
     --active_scan_list_channel_index_;
+  }
+  if (frozen_scan_channel_index_ == index) {
+    frozen_scan_channel_index_ = -1;
+  } else if (frozen_scan_channel_index_ > index) {
+    --frozen_scan_channel_index_;
   }
   SaveScanListConfigToSettings();
   RefreshScanListChannelCards();

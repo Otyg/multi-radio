@@ -58,6 +58,8 @@ message ModeConfig {
   bool audio_lpf3k5_enabled = 23;
   bool audio_bpf_voice_enabled = 24;
   bool audio_lpf4k5_enabled = 25;
+  bool scan_list_channel_locked = 26;
+  uint32 scan_list_locked_channel_index = 27;
 }
 
 message ScanListChannel {

@@ -138,6 +138,8 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.audio_lpf3k5_enabled = config.audio_lpf3k5_enabled();
   out.audio_bpf_voice_enabled = config.audio_bpf_voice_enabled();
   out.audio_lpf4k5_enabled = config.audio_lpf4k5_enabled();
+  out.scan_list_channel_locked = config.scan_list_channel_locked();
+  out.scan_list_locked_channel_index = static_cast<int32_t>(config.scan_list_locked_channel_index());
   return out;
 }
 
@@ -163,6 +165,9 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_audio_lpf3k5_enabled(config.audio_lpf3k5_enabled);
   out->set_audio_bpf_voice_enabled(config.audio_bpf_voice_enabled);
   out->set_audio_lpf4k5_enabled(config.audio_lpf4k5_enabled);
+  out->set_scan_list_channel_locked(config.scan_list_channel_locked);
+  out->set_scan_list_locked_channel_index(
+      static_cast<uint32_t>(std::max(0, config.scan_list_locked_channel_index)));
   out->clear_frequency_list_hz();
   for (double frequency : config.frequency_list_hz) {
     out->add_frequency_list_hz(frequency);

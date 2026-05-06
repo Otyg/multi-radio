@@ -71,6 +71,8 @@ struct ModeConfig {
   bool audio_lpf3k5_enabled = false;
   bool audio_bpf_voice_enabled = false;
   bool audio_lpf4k5_enabled = false;
+  bool scan_list_channel_locked = false;
+  int32_t scan_list_locked_channel_index = -1;
 };
 
 struct ReceiverDescriptor {
