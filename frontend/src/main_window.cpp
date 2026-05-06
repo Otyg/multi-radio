@@ -605,7 +605,8 @@ void BuildDemodVisualizationFrame(const QByteArray& pcm_s16le, int spectrum_bins
     waveform->push_back(std::clamp(0.5 + (0.5 * normalized), 0.0, 1.0));
     complex_samples.emplace_back(normalized, 0.0);
   }
-  *spectrum = BuildNormalizedSpectrumFromComplex(complex_samples, spectrum_bins);
+  *spectrum = BuildFixedScaleSpectrumFromComplex(
+      complex_samples, spectrum_bins, kScanSpectrumFloorDb, kScanSpectrumCeilingDb);
 }
 
 bool ParseVisualizationFrameEvent(const QString& message, double* peak_hz, double* peak_strength,
