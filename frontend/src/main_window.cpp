@@ -2528,20 +2528,10 @@ QString MainWindow::ScanListChannelCardText(int index) const {
   const QString label = channel.label.trimmed().isEmpty()
                             ? QString("Kanal %1").arg(index + 1)
                             : channel.label.trimmed();
-  const bool configured = channel.frequency_mhz > 0.0;
-  const QString freq_text =
-      configured ? QString("%1 MHz").arg(channel.frequency_mhz, 0, 'f', 3)
-                 : QString("Frekvens ej satt");
-  const QString squelch_text =
-      channel.use_default_squelch ? "SQ: Default"
-                                  : QString("SQ: %1 dB").arg(channel.squelch_threshold_db, 0, 'f', 1);
-  QString status_text = configured ? "Vilar" : "Okonfigurerad";
-  if (active_scan_list_channel_index_ == index) {
-    status_text = (active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen)
-                      ? "Squelch oppen"
-                      : "Squelch stangd";
-  }
-  return QString("%1\n%2\n%3\n%4").arg(label).arg(freq_text).arg(squelch_text).arg(status_text);
+  const QString freq_text = channel.frequency_mhz > 0.0
+                                ? QString("%1 MHz").arg(channel.frequency_mhz, 0, 'f', 3)
+                                : QString("Frekvens ej satt");
+  return QString("%1\n%2").arg(label).arg(freq_text);
 }
 
 QString MainWindow::ScanListChannelCardStyle(int index) const {
@@ -2573,7 +2563,7 @@ void MainWindow::RefreshScanListChannelCards() {
 
   while (scan_list_channel_buttons_.size() < scan_list_channels_.size()) {
     auto* channel_button = new QPushButton(scan_list_grid_widget_);
-    channel_button->setMinimumHeight(84);
+    channel_button->setMinimumHeight(56);
     channel_button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     connect(channel_button, &QPushButton::clicked, this, [this, channel_button]() {
       const auto it = std::find(scan_list_channel_buttons_.begin(), scan_list_channel_buttons_.end(),
