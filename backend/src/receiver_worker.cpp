@@ -802,6 +802,7 @@ void ReceiverWorker::ProcessLoop() {
     }
   };
 
+#if defined(MR_HAS_RNNOISE) && MR_HAS_RNNOISE
   constexpr uint32_t kRnnoiseRate = 48000;
   constexpr unsigned int kRnnoiseFrameSize = 480;
   DenoiseState* rnnoise_st = nullptr;
