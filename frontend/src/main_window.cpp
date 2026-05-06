@@ -56,6 +56,8 @@ constexpr int kGlobalSettingsTabIndex = 4;
 constexpr double kDefaultScanListSquelchDb = -67.5;
 constexpr double kScanSpectrumFloorDb   = -90.0;
 constexpr double kScanSpectrumCeilingDb = -20.0;
+// Backend caps IQ sample rate to this for scan_range to stay real-time.
+constexpr double kScanRangeMaxEffectiveSrHz = 1024000.0;
 constexpr int kAudioPrefillMs = 180;
 constexpr int kAudioPrefillMaxWaitMs = 450;
 constexpr int kAudioMinStartupMs = 40;
@@ -1619,7 +1621,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     if (index == kScanRangeModeTabIndex && scan_range_viz_ != nullptr) {
       const double start = range_start_edit_->text().toDouble() * 1e6;
       const double end   = range_end_edit_->text().toDouble() * 1e6;
-      const double step = static_cast<double>(sample_rate_spin_ ? sample_rate_spin_->value() : 2048000);
+      const double effective_sr = std::min(static_cast<double>(sample_rate_spin_ ? sample_rate_spin_->value() : 2048000),
+                                           kScanRangeMaxEffectiveSrHz);
+      const double step = effective_sr * 0.9;
       bool fft_ok = false;
       const int fft_val = range_fft_size_combo_
                               ? range_fft_size_combo_->currentData().toInt(&fft_ok)
@@ -1948,7 +1952,11 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_fixed_modulation(fixed_modulation);
   config.set_range_start_hz(range_start_edit_->text().toDouble() * 1e6);
   config.set_range_end_hz(range_end_edit_->text().toDouble() * 1e6);
-  config.set_range_step_hz(static_cast<double>(sample_rate_spin_->value()));
+  {
+    const double effective_sr = std::min(static_cast<double>(sample_rate_spin_->value()),
+                                          kScanRangeMaxEffectiveSrHz);
+    config.set_range_step_hz(effective_sr * 0.9);
+  }
   config.set_dwell_ms(static_cast<uint32_t>(dwell_ms_spin_->value()));
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
   int channel_bandwidth_hz = channel_bandwidth_spin_->value();
