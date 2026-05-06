@@ -19,6 +19,9 @@
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
 #include <liquid/liquid.h>
 #endif
+#if defined(MR_HAS_RNNOISE) && MR_HAS_RNNOISE
+#include <rnnoise.h>
+#endif
 
 namespace multi_radio {
 
@@ -799,6 +802,101 @@ void ReceiverWorker::ProcessLoop() {
     }
   };
 
+  constexpr uint32_t kRnnoiseRate = 48000;
+  constexpr unsigned int kRnnoiseFrameSize = 480;
+  DenoiseState* rnnoise_st = nullptr;
+  msresamp_rrrf rnnoise_up = nullptr;
+  msresamp_rrrf rnnoise_dn = nullptr;
+  uint32_t rnnoise_native_sr = 0;
+  std::vector<float> rnnoise_pending;
+  std::vector<float> rnnoise_frame_in(kRnnoiseFrameSize);
+  std::vector<float> rnnoise_frame_out(kRnnoiseFrameSize);
+  std::vector<float> rnnoise_scratch;
+#endif
+
+  auto rebuild_rnnoise = [&](uint32_t sr_hz) {
+#if defined(MR_HAS_RNNOISE) && MR_HAS_RNNOISE
+    if (rnnoise_st) { rnnoise_destroy(rnnoise_st); rnnoise_st = nullptr; }
+    if (rnnoise_up) { msresamp_rrrf_destroy(rnnoise_up); rnnoise_up = nullptr; }
+    if (rnnoise_dn) { msresamp_rrrf_destroy(rnnoise_dn); rnnoise_dn = nullptr; }
+    rnnoise_pending.clear();
+    if (sr_hz > 0) {
+      rnnoise_st = rnnoise_create(nullptr);
+      if (sr_hz != kRnnoiseRate) {
+        const float rate_up = static_cast<float>(kRnnoiseRate) / static_cast<float>(sr_hz);
+        rnnoise_up = msresamp_rrrf_create(rate_up, 60.0f);
+        rnnoise_dn = msresamp_rrrf_create(1.0f / rate_up, 60.0f);
+      }
+    }
+    rnnoise_native_sr = sr_hz;
+#else
+    (void)sr_hz;
+#endif
+  };
+
+  auto apply_rnnoise = [&](std::vector<int16_t>* pcm) {
+#if defined(MR_HAS_RNNOISE) && MR_HAS_RNNOISE && defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
+    if (pcm == nullptr || pcm->empty() || rnnoise_st == nullptr) return;
+    bool enabled = false;
+    float strength = 1.0f;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      enabled = mode_config_.rnnoise_enabled;
+      strength = std::clamp(mode_config_.rnnoise_strength / 100.0f, 0.0f, 1.0f);
+    }
+    if (!enabled) return;
+    const size_t n = pcm->size();
+    // Convert int16 → float (rnnoise uses -32768..32767 range)
+    std::vector<float> native_f(n);
+    for (size_t i = 0; i < n; ++i) native_f[i] = static_cast<float>((*pcm)[i]);
+    // Upsample to 48kHz
+    if (rnnoise_up != nullptr) {
+      rnnoise_scratch.resize(n * 8 + 512);
+      unsigned int produced = 0;
+      msresamp_rrrf_execute(rnnoise_up, native_f.data(), static_cast<unsigned int>(n),
+                            rnnoise_scratch.data(), &produced);
+      rnnoise_pending.insert(rnnoise_pending.end(), rnnoise_scratch.begin(),
+                             rnnoise_scratch.begin() + produced);
+    } else {
+      rnnoise_pending.insert(rnnoise_pending.end(), native_f.begin(), native_f.end());
+    }
+    // Process full 480-sample frames at 48kHz
+    std::vector<float> denoised_48k;
+    while (rnnoise_pending.size() >= kRnnoiseFrameSize) {
+      std::copy(rnnoise_pending.begin(), rnnoise_pending.begin() + kRnnoiseFrameSize,
+                rnnoise_frame_in.begin());
+      rnnoise_pending.erase(rnnoise_pending.begin(),
+                            rnnoise_pending.begin() + kRnnoiseFrameSize);
+      rnnoise_process_frame(rnnoise_st, rnnoise_frame_out.data(), rnnoise_frame_in.data());
+      for (unsigned int i = 0; i < kRnnoiseFrameSize; ++i) {
+        denoised_48k.push_back(strength * rnnoise_frame_out[i] +
+                               (1.0f - strength) * rnnoise_frame_in[i]);
+      }
+    }
+    if (denoised_48k.empty()) return;
+    // Downsample back to native rate
+    std::vector<float> out_native;
+    if (rnnoise_dn != nullptr) {
+      rnnoise_scratch.resize(denoised_48k.size() + 256);
+      unsigned int produced = 0;
+      msresamp_rrrf_execute(rnnoise_dn, denoised_48k.data(),
+                            static_cast<unsigned int>(denoised_48k.size()),
+                            rnnoise_scratch.data(), &produced);
+      out_native.assign(rnnoise_scratch.begin(), rnnoise_scratch.begin() + produced);
+    } else {
+      out_native = std::move(denoised_48k);
+    }
+    const size_t out_n = std::min(n, out_native.size());
+    for (size_t i = 0; i < out_n; ++i) {
+      (*pcm)[i] = static_cast<int16_t>(std::clamp(std::lrint(out_native[i]),
+                                                    static_cast<long>(-32768),
+                                                    static_cast<long>(32767)));
+    }
+#else
+    (void)pcm;
+#endif
+  };
+
   int last_processed_channel_idx = -1;
 
   while (running_.load()) {
@@ -827,6 +925,7 @@ void ReceiverWorker::ProcessLoop() {
       am_demod.Reset();
       am_demod_configured = false;
       rebuild_audio_filters(0);
+      rebuild_rnnoise(0);
       audio_filter_sr_hz = 0;
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -924,6 +1023,7 @@ void ReceiverWorker::ProcessLoop() {
     // Rebuild post-demod audio filters if sample rate changed
     if (entry.audio_sample_rate_hz != audio_filter_sr_hz) {
       rebuild_audio_filters(entry.audio_sample_rate_hz);
+      rebuild_rnnoise(entry.audio_sample_rate_hz);
     }
 
     // FM demodulation
@@ -987,6 +1087,7 @@ void ReceiverWorker::ProcessLoop() {
             }
             apply_audio_filters(&demod_pcm);
             apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
+            apply_rnnoise(&demod_pcm);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();
@@ -1080,6 +1181,7 @@ void ReceiverWorker::ProcessLoop() {
             }
             apply_audio_filters(&demod_pcm);
             apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
+            apply_rnnoise(&demod_pcm);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();
@@ -1111,7 +1213,8 @@ void ReceiverWorker::ProcessLoop() {
     }
   }
 
-  rebuild_audio_filters(0);  // destroy filter objects on exit
+  rebuild_audio_filters(0);
+  rebuild_rnnoise(0);
 }
 
 void ReceiverWorker::RunLoop() {

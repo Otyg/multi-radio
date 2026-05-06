@@ -73,6 +73,8 @@ struct ModeConfig {
   bool audio_lpf4k5_enabled = false;
   bool scan_list_channel_locked = false;
   int32_t scan_list_locked_channel_index = -1;
+  bool rnnoise_enabled = false;
+  float rnnoise_strength = 100.0f;
 };
 
 struct ReceiverDescriptor {

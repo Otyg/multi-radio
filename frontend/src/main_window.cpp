@@ -1204,9 +1204,22 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_filter_row->addWidget(fixed_audio_bpf_voice_checkbox_);
   fixed_filter_row->addStretch(1);
 
+  fixed_audio_rnnoise_checkbox_ = new QCheckBox("RNNoise", fixed_tab);
+  fixed_audio_rnnoise_checkbox_->setToolTip("RNNoise neural network noise reduction");
+  fixed_audio_rnnoise_strength_spin_ = new QSpinBox(fixed_tab);
+  fixed_audio_rnnoise_strength_spin_->setRange(0, 100);
+  fixed_audio_rnnoise_strength_spin_->setValue(100);
+  fixed_audio_rnnoise_strength_spin_->setSuffix("%");
+  fixed_audio_rnnoise_strength_spin_->setToolTip("Blend between original (0%) and fully denoised (100%)");
+  auto* fixed_rnnoise_row = new QHBoxLayout();
+  fixed_rnnoise_row->addWidget(fixed_audio_rnnoise_checkbox_);
+  fixed_rnnoise_row->addWidget(fixed_audio_rnnoise_strength_spin_);
+  fixed_rnnoise_row->addStretch(1);
+
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
+  fixed_layout->addRow("Brusreducering", fixed_rnnoise_row);
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   // Create scan_range_viz_ here so it can live inside the SCAN_RANGE tab.
@@ -1289,6 +1302,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_row->addWidget(audio_lpf3k5_checkbox_);
   controls_row->addWidget(audio_lpf4k5_checkbox_);
   controls_row->addWidget(audio_bpf_voice_checkbox_);
+  controls_row->addSpacing(12);
+  audio_rnnoise_checkbox_ = new QCheckBox("RNNoise", list_tab);
+  audio_rnnoise_checkbox_->setToolTip("RNNoise neural network noise reduction");
+  audio_rnnoise_strength_spin_ = new QSpinBox(list_tab);
+  audio_rnnoise_strength_spin_->setRange(0, 100);
+  audio_rnnoise_strength_spin_->setValue(100);
+  audio_rnnoise_strength_spin_->setSuffix("%");
+  audio_rnnoise_strength_spin_->setToolTip("Blend between original (0%) and fully denoised (100%)");
+  controls_row->addWidget(audio_rnnoise_checkbox_);
+  controls_row->addWidget(audio_rnnoise_strength_spin_);
   controls_row->addStretch(1);
   list_layout->addLayout(controls_row);
 
@@ -1360,6 +1383,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_rnnoise_checkbox_,         &QCheckBox::toggled, this, apply_on_toggle);
+  connect(fixed_audio_rnnoise_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
+  connect(audio_rnnoise_strength_spin_,
+          QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
+  connect(fixed_audio_rnnoise_strength_spin_,
+          QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
   connect(clear_channels_button, &QPushButton::clicked, this, [this]() {
     if (QMessageBox::question(this, "Clear channels",
                               "Remove all scan-list channels?") != QMessageBox::Yes) {
@@ -1961,6 +1992,19 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_audio_bpf_voice_enabled(
       (audio_bpf_voice_checkbox_ != nullptr && audio_bpf_voice_checkbox_->isChecked()) ||
       (fixed_audio_bpf_voice_checkbox_ != nullptr && fixed_audio_bpf_voice_checkbox_->isChecked()));
+  {
+    const bool rn_list = audio_rnnoise_checkbox_ != nullptr && audio_rnnoise_checkbox_->isChecked();
+    const bool rn_fixed = fixed_audio_rnnoise_checkbox_ != nullptr && fixed_audio_rnnoise_checkbox_->isChecked();
+    config.set_rnnoise_enabled(rn_list || rn_fixed);
+    // Strength: use the active mode's spinner, fall back to the other.
+    const bool use_fixed = (mode == v1::RADIO_MODE_FIXED);
+    const float strength = use_fixed
+        ? (fixed_audio_rnnoise_strength_spin_ != nullptr
+               ? static_cast<float>(fixed_audio_rnnoise_strength_spin_->value()) : 100.0f)
+        : (audio_rnnoise_strength_spin_ != nullptr
+               ? static_cast<float>(audio_rnnoise_strength_spin_->value()) : 100.0f);
+    config.set_rnnoise_strength(strength);
+  }
 
   config.clear_scan_list_channels();
   config.clear_frequency_list_hz();
