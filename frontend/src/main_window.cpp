@@ -2758,6 +2758,18 @@ void MainWindow::RefreshScanListChannelCards() {
     scan_list_channel_buttons_.push_back(channel_button);
   }
 
+  // DEBUG: log heat values for all channels
+  for (size_t idx = 0; idx < scan_channel_heat_.size(); ++idx) {
+    const auto& h = scan_channel_heat_[idx];
+    if (h.last_update_ms > 0) {
+      const double elapsed_s = (QDateTime::currentMSecsSinceEpoch() - h.last_update_ms) / 1000.0;
+      const double heat = h.value * std::exp(-elapsed_s / 120.0);
+      AppendLog(QString("DEBUG heat ch%1 raw=%2 elapsed=%3s computed=%4")
+                    .arg(idx).arg(h.value, 0, 'f', 3)
+                    .arg(elapsed_s, 0, 'f', 1).arg(heat, 0, 'f', 3));
+    }
+  }
+
   int max_text_width = 0;
   for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
     QPushButton* button = scan_list_channel_buttons_[idx];
