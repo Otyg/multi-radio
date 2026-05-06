@@ -2991,9 +2991,10 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
   bool signal_ok = false;
   const double signal_db = TokenValue(message, "signal_db").toDouble(&signal_ok);
   const QString state_early = TokenValue(message, "state").trimmed().toLower();
-  if (signal_ok) {
-    const double display_db = (state_early == "open") ? signal_db : -120.0;
-    signal_visualization_->SetReceiverSignalLevelDb(receiver_id, display_db);
+  if (state_early == "open") {
+    if (signal_ok) signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_db);
+  } else {
+    signal_visualization_->ClearReceiverSignalLevelDb(receiver_id);
   }
 
   bool threshold_ok = false;

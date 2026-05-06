@@ -32,6 +32,7 @@ class SignalVisualizationWidget : public QWidget {
   void SetChannelLabel(const QString& label);
   void SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db);
   void SetReceiverSignalLevelDb(uint32_t receiver_id, double signal_level_db);
+  void ClearReceiverSignalLevelDb(uint32_t receiver_id);
   void SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db, double psd_floor_db, double snr_db,
                            double psd_peak_offset_hz, bool has_quality_score,
                            double quality_score_pct, bool has_signal_ok, bool signal_ok);

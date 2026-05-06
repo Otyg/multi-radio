@@ -186,6 +186,13 @@ void SignalVisualizationWidget::SetReceiverSignalLevelDb(uint32_t receiver_id, d
   update();
 }
 
+void SignalVisualizationWidget::ClearReceiverSignalLevelDb(uint32_t receiver_id) {
+  ReceiverState& state = states_[receiver_id];
+  if (!state.has_signal_level_db) return;
+  state.has_signal_level_db = false;
+  update();
+}
+
 void SignalVisualizationWidget::SetReceiverIqHealth(uint32_t receiver_id, double psd_peak_db,
                                                     double psd_floor_db, double snr_db,
                                                     double psd_peak_offset_hz, bool has_quality_score,
