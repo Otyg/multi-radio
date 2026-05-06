@@ -282,16 +282,15 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
 
   const QRect content = rect().adjusted(10, 10, -10, -10);
   const int gap = 10;
-  const int left_width = (content.width() - gap) * 55 / 100;
+  const int panel_w = (content.width() - 2 * gap) / 3;
+  const int remaining_w = content.width() - 2 * panel_w - 2 * gap;
 
-  const QRect waveform_rect(content.left(), content.top(), left_width, content.height());
-  const QRect right_rect(content.left() + left_width + gap, content.top(),
-                         content.width() - left_width - gap, content.height());
-  const int right_gap = 8;
-  const int right_top_height = (right_rect.height() - right_gap) / 2;
-  const QRect spectrogram_rect(right_rect.left(), right_rect.top(), right_rect.width(), right_top_height);
-  const QRect waterfall_rect(right_rect.left(), right_rect.top() + right_top_height + right_gap,
-                             right_rect.width(), right_rect.height() - right_top_height - right_gap);
+  const QRect waveform_rect(content.left(), content.top(),
+                             panel_w, content.height());
+  const QRect spectrogram_rect(content.left() + panel_w + gap, content.top(),
+                                panel_w, content.height());
+  const QRect waterfall_rect(content.left() + 2 * (panel_w + gap), content.top(),
+                              panel_w + remaining_w, content.height());
 
   auto draw_panel = [&painter](const QRect& panel_rect, const QString& title) {
     painter.setPen(QPen(QColor(66, 79, 102), 1));
