@@ -2536,7 +2536,7 @@ QString MainWindow::ScanListChannelCardText(int index) const {
 
 QString MainWindow::ScanListChannelCardStyle(int index) const {
   constexpr auto kBase =
-      "QPushButton { text-align: left; padding: 10px; border-radius: 6px; ";
+      "QPushButton { text-align: left; padding: 6px 10px; border-radius: 6px; ";
   if (active_scan_list_channel_index_ == index &&
       active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen) {
     return QString(kBase) +
@@ -2598,7 +2598,7 @@ void MainWindow::RefreshScanListChannelCards() {
     max_text_width = std::max(max_text_width, button_text_width);
   }
 
-  const int button_width = std::max(220, max_text_width + 38);
+  const int button_width = std::max(140, max_text_width + 24);
   int columns = 1;
   if (scan_list_scroll_area_ != nullptr && scan_list_scroll_area_->viewport() != nullptr) {
     int left = 0;
