@@ -2535,18 +2535,20 @@ QString MainWindow::ScanListChannelCardText(int index) const {
 }
 
 QString MainWindow::ScanListChannelCardStyle(int index) const {
+  constexpr auto kBase =
+      "QPushButton { text-align: left; padding: 10px; border-radius: 6px; ";
   if (active_scan_list_channel_index_ == index &&
       active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen) {
-    return "QPushButton { text-align: left; padding: 10px; border: 2px solid #2E7D32; "
-           "background: #E8F5E9; color: #1B5E20; }";
+    return QString(kBase) +
+           "border: 2px solid #2E7D32; background: #0B1018; color: #5CDB95; }";
   }
   if (active_scan_list_channel_index_ == index &&
       active_scan_list_channel_state_ == ScanListChannelState::kSquelchClosed) {
-    return "QPushButton { text-align: left; padding: 10px; border: 2px solid #EF6C00; "
-           "background: #FFF3E0; color: #BF360C; }";
+    return QString(kBase) +
+           "border: 2px solid #EF6C00; background: #0B1018; color: #FFB85D; }";
   }
-  return "QPushButton { text-align: left; padding: 10px; border: 1px solid #B0BEC5; "
-         "background: #FAFAFA; color: #212121; }";
+  return QString(kBase) +
+         "border: 1px solid #1E2A38; background: #0B1018; color: #1B4503; }";
 }
 
 void MainWindow::RefreshScanListChannelCards() {
