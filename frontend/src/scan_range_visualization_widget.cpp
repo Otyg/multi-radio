@@ -42,6 +42,50 @@ void ScanRangeVisualizationWidget::SetNoiseGate(bool enabled, double threshold) 
   update();
 }
 
+void ScanRangeVisualizationWidget::SetDbCeiling(double ceiling_db) {
+  db_ceiling_ = std::clamp(ceiling_db, -90.0, -20.0);
+  update();
+}
+
+QRect ScanRangeVisualizationWidget::SpectrumPlotRect() const {
+  const QRect content = rect().adjusted(8, 8, -8, -8);
+  const int spec_h = content.height() * 35 / 100;
+  const QRect spec_rect(content.left(), content.top(), content.width(), spec_h);
+  const QRect spec_content = spec_rect.adjusted(8, 28, -8, -8);
+  return QRect(spec_content.left() + kLabelW, spec_content.top(),
+               spec_content.width() - kLabelW, spec_content.height() - kFreqAxisH);
+}
+
+void ScanRangeVisualizationWidget::mousePressEvent(QMouseEvent* event) {
+  if (event->button() != Qt::RightButton || scan_step_hz_ <= 0.0 ||
+      scan_end_hz_ <= scan_start_hz_) {
+    QWidget::mousePressEvent(event);
+    return;
+  }
+  const QRect plot = SpectrumPlotRect();
+  if (!plot.contains(event->pos())) {
+    QWidget::mousePressEvent(event);
+    return;
+  }
+  const double show_start = scan_start_hz_ - scan_step_hz_ * 0.5;
+  const double show_end   = scan_end_hz_   + scan_step_hz_ * 0.5;
+  const double t = static_cast<double>(event->pos().x() - plot.left()) /
+                   std::max(1, plot.width() - 1);
+  const double clicked_hz = show_start + t * (show_end - show_start);
+  const double steps = std::round((clicked_hz - scan_start_hz_) / scan_step_hz_);
+  const double snapped_hz = std::clamp(scan_start_hz_ + steps * scan_step_hz_,
+                                       scan_start_hz_, scan_end_hz_);
+  if (pending_range_start_hz_ < 0.0) {
+    pending_range_start_hz_ = snapped_hz;
+  } else {
+    const double a = std::min(pending_range_start_hz_, snapped_hz);
+    const double b = std::max(pending_range_start_hz_, snapped_hz);
+    pending_range_start_hz_ = -1.0;
+    emit RangeSelected(a, b);
+  }
+  update();
+}
+
 void ScanRangeVisualizationWidget::PushSpectrum(const std::vector<double>& spectrum,
                                                  double frame_start_hz,
                                                  double frame_end_hz,
@@ -175,11 +219,13 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
                                                  const QVector<double>& spectrum) {
   if (rect.isEmpty() || spectrum.isEmpty()) return;
 
-  constexpr double kFloorDb   = -90.0;
-  constexpr double kCeilDb    = -20.0;
-  constexpr double kDbSpan    = kCeilDb - kFloorDb;
-  constexpr int    kLabelW    = 38;
-  constexpr int    kFreqAxisH = 14;
+  // Data is normalized with kDataFloor=-90 → 0.0, kDataCeil=-20 → 1.0.
+  // db_ceiling_ lets the user zoom the Y axis; values above it are clamped.
+  constexpr double kDataFloor = -90.0;
+  constexpr double kDataCeil  = -20.0;
+  constexpr double kDataSpan  = kDataCeil - kDataFloor;  // 70 dB
+  const double display_span = db_ceiling_ - kDataFloor;  // shrinks as ceiling lowers
+  const double ceil_norm = display_span / kDataSpan;     // normalized ceiling in [0,1]
 
   const QRect plot(rect.left() + kLabelW, rect.top(),
                    rect.width() - kLabelW, rect.height() - kFreqAxisH);
@@ -189,6 +235,11 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
   const int H = plot.height();
   const int n = spectrum.size();
 
+  // Map a normalized [0,1] data value to a y pixel, respecting the ceiling zoom.
+  auto val_to_y = [&](double v) -> double {
+    return plot.bottom() - Clamp01(v / ceil_norm) * (H - 1);
+  };
+
   auto sample_at = [&](double t) -> double {
     const double pos = t * (n - 1);
     const int lo = std::clamp(static_cast<int>(pos), 0, n - 1);
@@ -196,11 +247,11 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
     return spectrum[lo] + (pos - lo) * (spectrum[hi] - spectrum[lo]);
   };
 
-  // dBFS grid lines at every 10 dB.
+  // dBFS grid lines at every 10 dB, from floor up to the current ceiling.
   const QFontMetrics fm(p->font());
-  for (int db = static_cast<int>(kFloorDb); db <= static_cast<int>(kCeilDb); db += 10) {
-    const double t = (static_cast<double>(db) - kFloorDb) / kDbSpan;
-    const int y = plot.bottom() - static_cast<int>(t * (H - 1));
+  for (int db = static_cast<int>(kDataFloor); db <= static_cast<int>(db_ceiling_); db += 10) {
+    const double norm = (static_cast<double>(db) - kDataFloor) / kDataSpan;
+    const int y = static_cast<int>(val_to_y(norm));
     p->setPen(QPen(QColor(50, 62, 84), 1));
     p->drawLine(plot.left(), y, plot.right(), y);
     const QString lbl = QString::number(db);
@@ -214,7 +265,7 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
   fill_path.moveTo(plot.left(), plot.bottom());
   for (int px = 0; px < W; ++px) {
     const double t = (W <= 1) ? 0.0 : static_cast<double>(px) / (W - 1);
-    const double y = plot.bottom() - Clamp01(sample_at(t)) * H;
+    const double y = val_to_y(sample_at(t));
     if (px == 0) fill_path.lineTo(plot.left(), y);
     fill_path.lineTo(plot.left() + px, y);
   }
@@ -230,12 +281,28 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
   QPainterPath line_path;
   for (int px = 0; px < W; ++px) {
     const double t = (W <= 1) ? 0.0 : static_cast<double>(px) / (W - 1);
-    const double y = plot.bottom() - Clamp01(sample_at(t)) * H;
+    const double y = val_to_y(sample_at(t));
     if (px == 0) line_path.moveTo(plot.left(), y);
     else line_path.lineTo(plot.left() + px, y);
   }
   p->setPen(QPen(QColor(0, 210, 190), 1.5));
   p->drawPath(line_path);
+
+  // Pending range-start marker.
+  if (pending_range_start_hz_ >= 0.0 && scan_step_hz_ > 0.0) {
+    const double show_start = scan_start_hz_ - scan_step_hz_ * 0.5;
+    const double show_end   = scan_end_hz_   + scan_step_hz_ * 0.5;
+    const double span_show  = std::max(1.0, show_end - show_start);
+    const double t = (pending_range_start_hz_ - show_start) / span_show;
+    const int mx = plot.left() + static_cast<int>(t * (W - 1));
+    if (mx >= plot.left() && mx <= plot.right()) {
+      p->setPen(QPen(QColor(255, 220, 80), 1, Qt::DashLine));
+      p->drawLine(mx, plot.top(), mx, plot.bottom());
+      const QString lbl = FormatFreq(pending_range_start_hz_);
+      p->setPen(QColor(255, 220, 80));
+      p->drawText(mx + 3, plot.top() + fm.ascent() + 2, lbl);
+    }
+  }
 
   // Frequency axis ticks below the plot.
   p->setPen(QColor(100, 120, 155));

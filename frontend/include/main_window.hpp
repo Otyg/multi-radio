@@ -146,6 +146,7 @@ class MainWindow : public QMainWindow {
   QComboBox* range_fft_size_combo_ = nullptr;
   QCheckBox* range_noise_gate_checkbox_ = nullptr;
   QDoubleSpinBox* range_noise_gate_spin_ = nullptr;
+  QDoubleSpinBox* range_db_ceiling_spin_ = nullptr;
   QSpinBox* dwell_ms_spin_ = nullptr;
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;

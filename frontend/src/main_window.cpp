@@ -1234,9 +1234,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_noise_gate_spin_->setValue(-30.0);
   range_noise_gate_spin_->setSuffix(" dBFS");
   range_noise_gate_spin_->setEnabled(false);
+  range_db_ceiling_spin_ = new QDoubleSpinBox(range_tab);
+  range_db_ceiling_spin_->setRange(kScanSpectrumFloorDb, kScanSpectrumCeilingDb);
+  range_db_ceiling_spin_->setSingleStep(1.0);
+  range_db_ceiling_spin_->setDecimals(0);
+  range_db_ceiling_spin_->setValue(kScanSpectrumCeilingDb);
+  range_db_ceiling_spin_->setSuffix(" dBFS");
+  range_db_ceiling_spin_->setToolTip("Max-värde på dB-skalan i spektrogrammet");
   auto* threshold_row = new QHBoxLayout();
   threshold_row->addWidget(range_noise_gate_checkbox_);
   threshold_row->addWidget(range_noise_gate_spin_);
+  threshold_row->addSpacing(16);
+  threshold_row->addWidget(new QLabel("Tak:", range_tab));
+  threshold_row->addWidget(range_db_ceiling_spin_);
   threshold_row->addStretch(1);
   range_outer->addLayout(threshold_row);
 
@@ -1624,6 +1634,15 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   });
   connect(range_noise_gate_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [update_scan_noise_gate](double) { update_scan_noise_gate(); });
+  connect(range_db_ceiling_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double val) {
+            if (scan_range_viz_ != nullptr) scan_range_viz_->SetDbCeiling(val);
+          });
+  connect(scan_range_viz_, &ScanRangeVisualizationWidget::RangeSelected, this,
+          [this](double start_hz, double end_hz) {
+            range_start_edit_->setText(QString::number(start_hz / 1e6, 'f', 3));
+            range_end_edit_->setText(QString::number(end_hz / 1e6, 'f', 3));
+          });
 
   connect(client_.get(), &GrpcClient::ReceiverEventReceived, this, &MainWindow::OnReceiverEvent,
           Qt::QueuedConnection);
