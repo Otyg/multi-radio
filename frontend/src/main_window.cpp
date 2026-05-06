@@ -2743,51 +2743,53 @@ void MainWindow::RefreshScanListChannelCards() {
   }
 
   int max_text_width = 0;
+  // Phase 1: update text + style (always); font metrics only when layout needs rebuilding.
   for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
     QPushButton* button = scan_list_channel_buttons_[idx];
-    if (button == nullptr) {
-      continue;
-    }
+    if (button == nullptr) continue;
     const int index = static_cast<int>(idx);
     const QString text = ScanListChannelCardText(index);
     button->setText(text);
     button->setStyleSheet(ScanListChannelCardStyle(index));
-    const QFontMetrics metrics(button->font());
-    const QStringList lines = text.split('\n');
-    int button_text_width = 0;
-    for (const QString& line : lines) {
-      button_text_width = std::max(button_text_width, metrics.horizontalAdvance(line));
+    // Font metrics are expensive; use cached button width on normal refreshes.
+    if (scan_list_last_button_width_ == 0) {
+      const QFontMetrics metrics(button->font());
+      for (const QString& line : text.split('\n')) {
+        max_text_width = std::max(max_text_width, metrics.horizontalAdvance(line));
+      }
     }
-    max_text_width = std::max(max_text_width, button_text_width);
   }
 
+  // Phase 2: compute layout geometry.
   const int button_width = std::max(140, max_text_width + 24);
   int columns = 1;
   if (scan_list_scroll_area_ != nullptr && scan_list_scroll_area_->viewport() != nullptr) {
-    int left = 0;
-    int top = 0;
-    int right = 0;
-    int bottom = 0;
+    int left = 0, top = 0, right = 0, bottom = 0;
     scan_list_grid_layout_->getContentsMargins(&left, &top, &right, &bottom);
     int spacing = scan_list_grid_layout_->horizontalSpacing();
-    if (spacing < 0) {
-      spacing = 8;
-    }
+    if (spacing < 0) spacing = 8;
     const int available_width =
         std::max(0, scan_list_scroll_area_->viewport()->width() - left - right);
     columns = std::max(1, (available_width + spacing) / (button_width + spacing));
   }
 
+  // Phase 3: rebuild grid layout only when structure changed.
+  const bool layout_changed = (columns != scan_list_last_columns_) ||
+                              (button_width != scan_list_last_button_width_);
+  if (layout_changed) {
+    scan_list_last_columns_ = columns;
+    scan_list_last_button_width_ = button_width;
+  }
+  if (layout_changed) {
   for (size_t idx = 0; idx < scan_list_channel_buttons_.size(); ++idx) {
     QPushButton* button = scan_list_channel_buttons_[idx];
-    if (button == nullptr) {
-      continue;
-    }
+    if (button == nullptr) continue;
     button->setFixedWidth(button_width);
     const int index = static_cast<int>(idx);
     scan_list_grid_layout_->addWidget(button, index / columns, index % columns,
                                       Qt::AlignLeft | Qt::AlignTop);
   }
+  } // end if (layout_changed)
 }
 
 void MainWindow::ConfigureScanListChannel(int index) {
@@ -3112,14 +3114,7 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
     if (name.isEmpty()) {
       name = QString("Kanal %1").arg(index + 1);
     }
-    const QString freq_str =
-        (ch.frequency_mhz > 0.0) ? QString("%1 MHz").arg(ch.frequency_mhz, 0, 'f', 3) : QString();
-    const QString mod_str = ModulationLabel(ch.modulation);
-    QString label = name;
-    if (!freq_str.isEmpty()) {
-      label += QString("\n%1  %2").arg(freq_str).arg(mod_str);
-    }
-    signal_visualization_->SetChannelLabel(label);
+    Q_UNUSED(name);
   }
 }
 

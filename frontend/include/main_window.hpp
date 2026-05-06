@@ -173,6 +173,8 @@ class MainWindow : public QMainWindow {
   std::vector<ScanListChannelConfig> scan_list_channels_;
   std::vector<QPushButton*> scan_list_channel_buttons_;
   QGridLayout* scan_list_grid_layout_ = nullptr;
+  int scan_list_last_columns_ = 0;
+  int scan_list_last_button_width_ = 0;
   QWidget* scan_list_grid_widget_ = nullptr;
   QScrollArea* scan_list_scroll_area_ = nullptr;
   int active_scan_list_channel_index_ = -1;
