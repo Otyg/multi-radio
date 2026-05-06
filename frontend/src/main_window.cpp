@@ -1248,7 +1248,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   audio_lpf8k_checkbox_ = new QCheckBox("LP 8 kHz", list_tab);
   audio_bpf_voice_checkbox_ = new QCheckBox("BP 300–3k Hz", list_tab);
   audio_hpf300_checkbox_->setToolTip("High-pass filter at 300 Hz — removes low-frequency hum and rumble");
-  audio_lpf8k_checkbox_->setToolTip("Low-pass filter at 8 kHz — removes high-frequency noise (only effective for WFM at 32 kHz audio)");
+  audio_lpf8k_checkbox_->setToolTip("Low-pass filter at 8 kHz — removes high-frequency noise above speech range");
   audio_bpf_voice_checkbox_->setToolTip("Band-pass filter 300 Hz – 3 kHz — pass-band optimised for voice communications");
   controls_row->addWidget(scan_list_monitor_checkbox_);
   controls_row->addSpacing(12);
