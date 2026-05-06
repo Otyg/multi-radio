@@ -732,14 +732,7 @@ void ReceiverWorker::ProcessLoop() {
     }
     audio_filter_last_active = now_active;
     if (!now_active) return;
-    if (audio_filter_log_pending) {
-      audio_filter_log_pending = false;
-      std::ostringstream filter_msg;
-      filter_msg << "audio filters active: hpf300=" << do_hpf
-                 << " lpf3k5=" << do_lpf3k5 << " lpf4k5=" << do_lpf4k5 << " bpf=" << do_bpf
-                 << " samples=" << pcm->size();
-      PublishEvent(EventKind::kInfo, filter_msg.str());
-    }
+    audio_filter_log_pending = false;
     const size_t n = pcm->size();
     audio_filter_scratch.resize(n);
     for (size_t i = 0; i < n; ++i) {
@@ -1065,12 +1058,6 @@ void ReceiverWorker::ProcessLoop() {
             if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
               adaptive_rate_applied = true;  // freeze EMA once first adapted config is applied
             }
-            std::ostringstream demod_msg;
-            demod_msg << "FM demod configured (process) mod=" << ModulationToken(entry.modulation)
-                      << " iq_sr=" << fm_demod_input_sr_hz << " audio_sr=" << fm_demod_audio_sr_hz
-                      << " bw=" << fm_demod_channel_bw_hz
-                      << (adapted_iq_sr_hz != 0 ? " (adapted)" : " (nominal)");
-            PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
           }
         }
 
@@ -1145,13 +1132,6 @@ void ReceiverWorker::ProcessLoop() {
             if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
               adaptive_rate_applied = true;  // freeze EMA
             }
-            std::ostringstream demod_msg;
-            demod_msg << "AM demod configured (process)"
-                      << " iq_sr=" << am_demod_input_sr_hz
-                      << " audio_sr=" << am_demod_audio_sr_hz
-                      << " bw=" << am_demod_channel_bw_hz
-                      << (adapted_iq_sr_hz != 0 ? " (adapted)" : " (nominal)");
-            PublishEvent(EventKind::kInfo, demod_msg.str(), entry.tuned_frequency_hz);
           }
         }
 
@@ -1167,19 +1147,7 @@ void ReceiverWorker::ProcessLoop() {
               std::lock_guard<std::mutex> lock(mu_);
               iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
             }
-            // Periodic diagnostic: log peak PCM amplitude every ~2 seconds (~16 blocks at 128ms/block).
-            // Helps diagnose silence: if peak=0, the AM signal has no modulation (unmodulated carrier).
-            if ((++am_block_log_counter % 16U) == 0U) {
-              int16_t peak_pcm = 0;
-              for (int16_t s : demod_pcm) {
-                peak_pcm = std::max(peak_pcm, static_cast<int16_t>(std::abs(s)));
-              }
-              std::ostringstream am_diag;
-              am_diag << "AM_DIAG samples=" << demod_pcm.size()
-                      << " peak_pcm=" << peak_pcm
-                      << " rssi_db=" << FormatDouble(static_cast<double>(demod_stats.channel_rssi_db), 1);
-              PublishEvent(EventKind::kInfo, am_diag.str(), entry.tuned_frequency_hz, false);
-            }
+            ++am_block_log_counter;
             apply_audio_filters(&demod_pcm);
             apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
             apply_rnnoise(&demod_pcm);

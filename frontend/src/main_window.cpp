@@ -2172,33 +2172,6 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
         snr_ok ? snr_db : 0.0, psd_peak_hz_ok ? psd_peak_offset_hz : 0.0, quality_ok,
         quality_ok ? quality_score : 0.0, signal_ok_ok, signal_ok_ok && signal_ok_flag != 0);
 
-    AppendLog(QString("[%1] RX%2 IQ_STATS cfg_sr=%3 meas_sr=%4 block_sr=%5 tuned=%6 center=%7 "
-                      "level=%8 dBFS clip=%9%% flag=%10 psd=%11/%12 dB snr=%13 dB peak_offset=%14 Hz "
-                      "q=%15 raw_ok=%16 ok=%17 sr=%18 lvl=%19 clip_ok=%20 snr_ok=%21 stable=%22 raw=%23 status=%24")
-                  .arg(ToLocalTime(unix_ms))
-                  .arg(receiver_id)
-                  .arg(cfg_sr_ok ? configured_sample_rate_hz : -1)
-                  .arg(meas_sr_ok ? QString::number(measured_sample_rate_hz, 'f', 0) : "?")
-                  .arg(block_sr_ok ? block_sample_rate_hz : -1)
-                  .arg(tuned_hz_ok ? QString::number(tuned_hz, 'f', 0) : "?")
-                  .arg(center_hz_ok ? QString::number(center_hz, 'f', 0) : "?")
-                  .arg(level_ok ? QString::number(level_dbfs, 'f', 1) : "?")
-                  .arg(clip_pct_ok ? QString::number(clip_pct, 'f', 2) : "?")
-                  .arg(clip_ok ? clip_flag : -1)
-                  .arg(psd_peak_db_ok ? QString::number(psd_peak_db, 'f', 1) : "?")
-                  .arg(psd_floor_db_ok ? QString::number(psd_floor_db, 'f', 1) : "?")
-                  .arg(snr_ok ? QString::number(snr_db, 'f', 1) : "?")
-                  .arg(psd_peak_hz_ok ? QString::number(psd_peak_offset_hz, 'f', 0) : "?")
-                  .arg(quality_ok ? QString::number(quality_score, 'f', 1) : "?")
-                  .arg(raw_signal_ok_ok ? raw_signal_ok_flag : -1)
-                  .arg(signal_ok_ok ? signal_ok_flag : -1)
-                  .arg(status_sr_ok ? status_sr : -1)
-                  .arg(status_level_ok ? status_level : -1)
-                  .arg(status_clip_ok ? status_clip : -1)
-                  .arg(status_snr_ok ? status_snr : -1)
-                  .arg(status_stable_ok ? status_stable : -1)
-                  .arg(raw_status.isEmpty() ? "?" : raw_status)
-                  .arg(signal_status.isEmpty() ? "?" : signal_status));
     return;
   }
   if (message.startsWith("AUDIO_STATS ")) {
@@ -2266,37 +2239,6 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     bool flush_samples_ok = false;
     const qint64 flush_samples = TokenValue(message, "flush_samples").toLongLong(&flush_samples_ok);
 
-    AppendLog(QString("[%1] RX%2 AUDIO_STATS ch=%3 idx=%4 mod=%5 sr=%6 cfg_sr=%7 iq_sr=%8 iq_est=%9 "
-                      "win_ms=%10 gen_hz=%11 pub_hz=%12 gate=%13 sq=%14 sig=%15 dB "
-                      "blk=%16 open_blk=%17 demod_ok=%18 demod_empty=%19 gen=%20 pub_f=%21 pub_s=%22 "
-                      "pend=%23 conceal=%24 clr=%25 flush_f=%26 flush_s=%27")
-                  .arg(ToLocalTime(unix_ms))
-                  .arg(receiver_id)
-                  .arg(channel_label)
-                  .arg(idx_ok ? channel_index : -1)
-                  .arg(modulation.isEmpty() ? "?" : modulation)
-                  .arg(sr_ok ? sample_rate_hz : -1)
-                  .arg(cfg_sr_ok ? configured_sample_rate_hz : -1)
-                  .arg(iq_sr_ok ? iq_sample_rate_hz : -1)
-                  .arg(iq_est_sr_ok ? QString::number(iq_estimated_sample_rate_hz, 'f', 0) : "?")
-                  .arg(win_ms_ok ? window_ms : -1)
-                  .arg(gen_hz_ok ? QString::number(generated_hz, 'f', 1) : "?")
-                  .arg(pub_hz_ok ? QString::number(published_hz, 'f', 1) : "?")
-                  .arg(gate_ok ? gate : -1)
-                  .arg(squelch_ok ? squelch : -1)
-                  .arg(signal_ok ? QString::number(signal_db, 'f', 1) : "?")
-                  .arg(blocks_ok ? blocks : -1)
-                  .arg(open_blocks_ok ? open_blocks : -1)
-                  .arg(demod_ok_blocks_ok ? demod_ok_blocks : -1)
-                  .arg(demod_empty_ok ? demod_empty_blocks : -1)
-                  .arg(gen_ok ? generated_samples : -1)
-                  .arg(pub_frames_ok ? published_frames : -1)
-                  .arg(pub_samples_ok ? published_samples : -1)
-                  .arg(pending_ok ? pending_samples : -1)
-                  .arg(conceal_ok ? conceal_samples : -1)
-                  .arg(clears_ok ? clears : -1)
-                  .arg(flush_frames_ok ? flush_frames : -1)
-                  .arg(flush_samples_ok ? flush_samples : -1));
     return;
   }
 
