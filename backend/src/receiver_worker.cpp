@@ -458,7 +458,10 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
   msg << "mode config updated freq_list=" << mode_config_.frequency_list_hz.size()
       << " range=" << FormatDouble(mode_config_.range_start_hz / 1e6, 3)
       << "-" << FormatDouble(mode_config_.range_end_hz / 1e6, 3)
-      << " MHz step=" << FormatDouble(mode_config_.range_step_hz / 1e3, 1) << " kHz";
+      << " MHz step=" << FormatDouble(mode_config_.range_step_hz / 1e3, 1) << " kHz"
+      << " audio_filters=hpf300:" << mode_config_.audio_hpf300_enabled
+      << " lpf8k:" << mode_config_.audio_lpf8k_enabled
+      << " bpf:" << mode_config_.audio_bpf_voice_enabled;
   PublishEvent(EventKind::kInfo, msg.str());
   return true;
 }
@@ -697,6 +700,8 @@ void ReceiverWorker::ProcessLoop() {
     audio_filter_sr_hz = sr_hz;
   };
 
+  bool audio_filter_log_pending = true;  // log on first active call after stream start
+  bool audio_filter_last_active = false;
   auto apply_audio_filters = [&](std::vector<int16_t>* pcm) {
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
     if (pcm == nullptr || pcm->empty()) return;
@@ -707,7 +712,24 @@ void ReceiverWorker::ProcessLoop() {
       do_lpf = mode_config_.audio_lpf8k_enabled;
       do_bpf = mode_config_.audio_bpf_voice_enabled;
     }
-    if (!do_hpf && !do_lpf && !do_bpf) return;
+    const bool now_active = do_hpf || do_lpf || do_bpf;
+    if (!audio_filter_last_active && now_active) {
+      audio_filter_log_pending = true;
+    }
+    audio_filter_last_active = now_active;
+    if (!now_active) return;
+    if (audio_filter_log_pending) {
+      audio_filter_log_pending = false;
+      std::ostringstream filter_msg;
+      filter_msg << "audio filters active: hpf300=" << do_hpf
+                 << " lpf8k=" << do_lpf << " bpf=" << do_bpf
+                 << " samples=" << pcm->size()
+                 << " hpf_obj=" << (audio_hpf300 != nullptr ? "ok" : "NULL")
+                 << " lpf_obj=" << (audio_lpf8k != nullptr ? "ok" : "NULL")
+                 << " bpf_hpf_obj=" << (audio_bpf_hpf != nullptr ? "ok" : "NULL")
+                 << " bpf_lpf_obj=" << (audio_bpf_lpf != nullptr ? "ok" : "NULL");
+      PublishEvent(EventKind::kInfo, filter_msg.str());
+    }
     const size_t n = pcm->size();
     audio_filter_scratch.resize(n);
     for (size_t i = 0; i < n; ++i) {
