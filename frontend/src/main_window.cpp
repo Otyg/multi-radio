@@ -133,7 +133,8 @@ v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
     return v1::MODULATION_WFM;
   }
   const auto modulation = static_cast<v1::Modulation>(modulation_value);
-  if (modulation == v1::MODULATION_NFM || modulation == v1::MODULATION_WFM) {
+  if (modulation == v1::MODULATION_NFM || modulation == v1::MODULATION_WFM ||
+      modulation == v1::MODULATION_AM) {
     return modulation;
   }
   return v1::MODULATION_WFM;
@@ -1505,7 +1506,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     fixed_bandwidth_last_auto_hz_ = suggested_bandwidth_hz;
     if (!can_auto_apply) {
       AppendLog(QString("Fixed demod %1 selected; keeping manual bandwidth %2 Hz")
-                    .arg(modulation == v1::MODULATION_NFM ? "NFM" : "WFM")
+                    .arg(ModulationLabel(modulation))
                     .arg(current_bandwidth_hz));
       return;
     }
@@ -1515,7 +1516,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     fixed_bandwidth_sync_in_progress_ = false;
     fixed_bandwidth_manual_override_ = false;
     AppendLog(QString("Fixed demod %1 selected; bandwidth auto-set to %2 Hz")
-                  .arg(modulation == v1::MODULATION_NFM ? "NFM" : "WFM")
+                  .arg(ModulationLabel(modulation))
                   .arg(suggested_bandwidth_hz));
   });
   connect(receiver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
@@ -1694,7 +1695,8 @@ void MainWindow::RefreshReceivers() {
         if (fixed_modulation == v1::MODULATION_UNSPECIFIED) {
           fixed_modulation = v1::MODULATION_WFM;
         }
-        if (fixed_modulation != v1::MODULATION_NFM && fixed_modulation != v1::MODULATION_WFM) {
+        if (fixed_modulation != v1::MODULATION_NFM && fixed_modulation != v1::MODULATION_WFM &&
+            fixed_modulation != v1::MODULATION_AM) {
           fixed_modulation = v1::MODULATION_NFM;
         }
         const QSignalBlocker blocker(fixed_modulation_combo_);
@@ -1859,7 +1861,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     const int modulation_value = fixed_modulation_combo_->currentData().toInt(&value_ok);
     if (value_ok) {
       const auto parsed = static_cast<v1::Modulation>(modulation_value);
-      if (parsed == v1::MODULATION_NFM || parsed == v1::MODULATION_WFM) {
+      if (parsed == v1::MODULATION_NFM || parsed == v1::MODULATION_WFM ||
+          parsed == v1::MODULATION_AM) {
         fixed_modulation = parsed;
       }
     }
