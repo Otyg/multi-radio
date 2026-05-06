@@ -183,7 +183,6 @@ class MainWindow : public QMainWindow {
 
   struct ChannelHeat {
     double value = 0.0;
-    qint64 last_update_ms = 0;
   };
   std::vector<ChannelHeat> scan_channel_heat_;
   bool auto_squelch_active_ = false;

@@ -188,8 +188,9 @@ void SignalVisualizationWidget::SetReceiverSignalLevelDb(uint32_t receiver_id, d
 
 void SignalVisualizationWidget::ClearReceiverSignalLevelDb(uint32_t receiver_id) {
   ReceiverState& state = states_[receiver_id];
-  if (!state.has_signal_level_db) return;
   state.has_signal_level_db = false;
+  state.signal_level = 0.0;
+  state.signal_peak_hold = 0.0;
   update();
 }
 

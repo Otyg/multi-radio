@@ -2591,16 +2591,10 @@ QString MainWindow::ScanListChannelCardStyle(int index) const {
            "border: 2px solid #2E7D32; background: #0B1018; color: #5CDB95; }";
   }
 
-  // Compute heat for all non-squelch-open states.
-  // Use sqrt mapping so even a single squelch-open gives a clearly visible color change.
-  constexpr double kDecayTimeConstantS = 120.0;
+  // Compute heat for all non-squelch-open states (permanent — no time decay).
   double heat = 0.0;
   if (index >= 0 && static_cast<size_t>(index) < scan_channel_heat_.size()) {
-    const auto& h = scan_channel_heat_[static_cast<size_t>(index)];
-    if (h.last_update_ms > 0) {
-      const double elapsed_s = (QDateTime::currentMSecsSinceEpoch() - h.last_update_ms) / 1000.0;
-      heat = h.value * std::exp(-elapsed_s / kDecayTimeConstantS);
-    }
+    heat = scan_channel_heat_[static_cast<size_t>(index)].value;
   }
   const double t = std::sqrt(std::clamp(heat, 0.0, 1.0));  // sqrt for fast initial response
 
@@ -3030,19 +3024,12 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
   }
   const QString state = TokenValue(message, "state").trimmed().toLower();
   if (state == "open") {
-    constexpr double kDecayTimeConstantS = 120.0;
     constexpr double kBump = 0.125;
-    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
     if (static_cast<size_t>(index) >= scan_channel_heat_.size()) {
       scan_channel_heat_.resize(static_cast<size_t>(index) + 1);
     }
     auto& h = scan_channel_heat_[static_cast<size_t>(index)];
-    if (h.last_update_ms > 0) {
-      const double elapsed_s = (now_ms - h.last_update_ms) / 1000.0;
-      h.value *= std::exp(-elapsed_s / kDecayTimeConstantS);
-    }
     h.value = std::min(1.0, h.value + kBump);
-    h.last_update_ms = now_ms;
   }
   active_scan_list_channel_index_ = index;
   if (state == "open") {
