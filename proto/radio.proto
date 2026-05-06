@@ -67,6 +67,7 @@ message ScanListChannel {
   double squelch_threshold_db = 5;
   uint32 dwell_ms = 6;
   bool use_default_squelch = 7;
+  float audio_gain_db = 8;
 }
 
 message ReceiverInfo {

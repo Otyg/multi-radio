@@ -45,6 +45,7 @@ struct ModeConfig {
     double squelch_threshold_db = -67.5;
     uint32_t dwell_ms = 0;
     bool use_default_squelch = true;
+    float audio_gain_db = 0.0f;
   };
 
   double fixed_frequency_hz = 0.0;

@@ -1744,6 +1744,7 @@ void MainWindow::RefreshReceivers() {
             updated.squelch_threshold_db = receiver_default_squelch_db;
           }
           updated.dwell_ms = static_cast<int>(channel.dwell_ms());
+          updated.audio_gain_db = static_cast<double>(channel.audio_gain_db());
           updated_channels.push_back(std::move(updated));
         }
         scan_list_channels_ = std::move(updated_channels);
@@ -1917,6 +1918,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     out->set_squelch_threshold_db(channel.use_default_squelch ? default_squelch_db
                                                                : channel.squelch_threshold_db);
     out->set_dwell_ms(static_cast<uint32_t>(std::max(0, channel.dwell_ms)));
+    out->set_audio_gain_db(static_cast<float>(channel.audio_gain_db));
     if (channel.frequency_mhz > 0.0 && mode != v1::RADIO_MODE_SCAN_RANGE) {
       config.add_frequency_list_hz(channel.frequency_mhz * 1000000.0);
     }
@@ -2678,6 +2680,14 @@ void MainWindow::ConfigureScanListChannel(int index) {
   dwell_spin->setSuffix(" ms");
   dwell_spin->setValue(channel.dwell_ms);
 
+  auto* gain_spin = new QDoubleSpinBox(&dialog);
+  gain_spin->setDecimals(1);
+  gain_spin->setRange(-20.0, 40.0);
+  gain_spin->setSingleStep(1.0);
+  gain_spin->setSuffix(" dB");
+  gain_spin->setValue(channel.audio_gain_db);
+  gain_spin->setToolTip("Audio gain applied after squelch and filters. 0 dB = no change.");
+
   connect(modulation_combo, &QComboBox::currentTextChanged, this, [bandwidth_spin](const QString& text) {
     bandwidth_spin->setValue(DefaultBandwidthHzForModulation(ModulationFromText(text)));
   });
@@ -2695,6 +2705,7 @@ void MainWindow::ConfigureScanListChannel(int index) {
   layout->addRow(use_default_squelch_checkbox);
   layout->addRow("Squelch threshold", squelch_spin);
   layout->addRow("Kanal dwell", dwell_spin);
+  layout->addRow("Ljud gain", gain_spin);
 
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
   auto* delete_button = buttons->addButton("Delete", QDialogButtonBox::DestructiveRole);
@@ -2723,6 +2734,7 @@ void MainWindow::ConfigureScanListChannel(int index) {
     channel.squelch_threshold_db = squelch_spin->value();
   }
   channel.dwell_ms = dwell_spin->value();
+  channel.audio_gain_db = gain_spin->value();
   scan_list_channels_[static_cast<size_t>(index)] = channel;
   SaveScanListConfigToSettings();
   RefreshScanListChannelCards();
@@ -3354,6 +3366,7 @@ void MainWindow::LoadScanListConfigFromSettings() {
       channel.squelch_threshold_db = default_squelch_db;
     }
     channel.dwell_ms = settings.value("dwell_ms", channel.dwell_ms).toInt();
+    channel.audio_gain_db = settings.value("audio_gain_db", 0.0).toDouble();
 
     const int modulation = settings.value("modulation", static_cast<int>(channel.modulation)).toInt();
     switch (modulation) {
@@ -3403,6 +3416,7 @@ void MainWindow::SaveScanListConfigToSettings() const {
       settings.setValue("squelch_threshold_db", channel.squelch_threshold_db);
     }
     settings.setValue("dwell_ms", channel.dwell_ms);
+    settings.setValue("audio_gain_db", channel.audio_gain_db);
     settings.endGroup();
   }
   settings.endGroup();

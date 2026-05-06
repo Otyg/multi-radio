@@ -686,13 +686,13 @@ void ReceiverWorker::ProcessLoop() {
       const float fc_lpf3k = std::min(3000.0f, sr * 0.45f) / sr;
       const float fc_lpf8k = std::min(8000.0f, sr * 0.45f) / sr;
       audio_hpf300 = iirfilt_rrrf_create_prototype(
-          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 2, fc_hpf, 0.0f, 1.0f, 60.0f);
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 4, fc_hpf, 0.0f, 1.0f, 60.0f);
       audio_lpf8k = iirfilt_rrrf_create_prototype(
-          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 2, fc_lpf8k, 0.0f, 1.0f, 60.0f);
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 4, fc_lpf8k, 0.0f, 1.0f, 60.0f);
       audio_bpf_hpf = iirfilt_rrrf_create_prototype(
-          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 2, fc_hpf, 0.0f, 1.0f, 60.0f);
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_HIGHPASS, LIQUID_IIRDES_SOS, 4, fc_hpf, 0.0f, 1.0f, 60.0f);
       audio_bpf_lpf = iirfilt_rrrf_create_prototype(
-          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 2, fc_lpf3k, 0.0f, 1.0f, 60.0f);
+          LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS, 4, fc_lpf3k, 0.0f, 1.0f, 60.0f);
     }
 #else
     (void)sr_hz;
@@ -760,6 +760,25 @@ void ReceiverWorker::ProcessLoop() {
 #else
     (void)pcm;
 #endif
+  };
+
+  auto apply_channel_gain = [&](std::vector<int16_t>* pcm, int channel_idx) {
+    if (pcm == nullptr || pcm->empty() || channel_idx < 0) return;
+    float gain_db = 0.0f;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      const auto& channels = mode_config_.scan_list_channels;
+      if (static_cast<size_t>(channel_idx) < channels.size()) {
+        gain_db = channels[static_cast<size_t>(channel_idx)].audio_gain_db;
+      }
+    }
+    if (gain_db == 0.0f) return;
+    const float gain_linear = std::pow(10.0f, gain_db / 20.0f);
+    for (int16_t& s : *pcm) {
+      s = static_cast<int16_t>(
+          std::clamp(std::lrint(static_cast<float>(s) * gain_linear),
+                     static_cast<long>(-32768), static_cast<long>(32767)));
+    }
   };
 
   int last_processed_channel_idx = -1;
@@ -949,6 +968,7 @@ void ReceiverWorker::ProcessLoop() {
               iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
             }
             apply_audio_filters(&demod_pcm);
+            apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();
@@ -1041,6 +1061,7 @@ void ReceiverWorker::ProcessLoop() {
               PublishEvent(EventKind::kInfo, am_diag.str(), entry.tuned_frequency_hz, false);
             }
             apply_audio_filters(&demod_pcm);
+            apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
             if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
               size_t samples_written = 0;
               const size_t to_write = demod_pcm.size();

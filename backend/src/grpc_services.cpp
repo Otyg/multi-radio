@@ -119,6 +119,7 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
     parsed.squelch_threshold_db = channel.squelch_threshold_db();
     parsed.dwell_ms = channel.dwell_ms();
     parsed.use_default_squelch = channel.use_default_squelch();
+    parsed.audio_gain_db = channel.audio_gain_db();
     out.scan_list_channels.push_back(std::move(parsed));
   }
   out.dwell_ms = config.dwell_ms();
@@ -174,6 +175,7 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
     added->set_squelch_threshold_db(channel.squelch_threshold_db);
     added->set_dwell_ms(channel.dwell_ms);
     added->set_use_default_squelch(channel.use_default_squelch);
+    added->set_audio_gain_db(channel.audio_gain_db);
   }
 }
 

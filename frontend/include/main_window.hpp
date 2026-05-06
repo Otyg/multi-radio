@@ -112,6 +112,7 @@ class MainWindow : public QMainWindow {
     double squelch_threshold_db = -67.5;
     int dwell_ms = 0;
     bool use_default_squelch = true;
+    double audio_gain_db = 0.0;
   };
 
   enum class ScanListChannelState {
