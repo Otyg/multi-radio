@@ -1124,7 +1124,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_frequency_edit_ = new QLineEdit("162.025", control_group);
   range_start_edit_ = new QLineEdit("156", control_group);
   range_end_edit_ = new QLineEdit("163", control_group);
-  range_step_edit_ = new QLineEdit("0.025", control_group);
   range_fft_size_combo_ = new QComboBox(control_group);
   for (int s : {64, 128, 256, 512, 1024, 2048, 4096}) {
     range_fft_size_combo_->addItem(QString::number(s), QVariant(s));
@@ -1234,8 +1233,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_row->addWidget(range_start_edit_);
   range_row->addWidget(new QLabel("End MHz", range_tab));
   range_row->addWidget(range_end_edit_);
-  range_row->addWidget(new QLabel("Step MHz", range_tab));
-  range_row->addWidget(range_step_edit_);
   range_row->addWidget(new QLabel("FFT", range_tab));
   range_row->addWidget(range_fft_size_combo_);
   range_row->addStretch(1);
@@ -1622,7 +1619,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     if (index == kScanRangeModeTabIndex && scan_range_viz_ != nullptr) {
       const double start = range_start_edit_->text().toDouble() * 1e6;
       const double end   = range_end_edit_->text().toDouble() * 1e6;
-      const double step  = range_step_edit_->text().toDouble() * 1e6;
+      const double step = static_cast<double>(sample_rate_spin_ ? sample_rate_spin_->value() : 2048000);
       bool fft_ok = false;
       const int fft_val = range_fft_size_combo_
                               ? range_fft_size_combo_->currentData().toInt(&fft_ok)
@@ -1951,7 +1948,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_fixed_modulation(fixed_modulation);
   config.set_range_start_hz(range_start_edit_->text().toDouble() * 1e6);
   config.set_range_end_hz(range_end_edit_->text().toDouble() * 1e6);
-  config.set_range_step_hz(range_step_edit_->text().toDouble() * 1e6);
+  config.set_range_step_hz(static_cast<double>(sample_rate_spin_->value()));
   config.set_dwell_ms(static_cast<uint32_t>(dwell_ms_spin_->value()));
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
   int channel_bandwidth_hz = channel_bandwidth_spin_->value();
