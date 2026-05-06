@@ -137,6 +137,7 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.audio_hpf300_enabled = config.audio_hpf300_enabled();
   out.audio_lpf8k_enabled = config.audio_lpf8k_enabled();
   out.audio_bpf_voice_enabled = config.audio_bpf_voice_enabled();
+  out.audio_lpf15k_enabled = config.audio_lpf15k_enabled();
   return out;
 }
 
@@ -161,6 +162,7 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_audio_hpf300_enabled(config.audio_hpf300_enabled);
   out->set_audio_lpf8k_enabled(config.audio_lpf8k_enabled);
   out->set_audio_bpf_voice_enabled(config.audio_bpf_voice_enabled);
+  out->set_audio_lpf15k_enabled(config.audio_lpf15k_enabled);
   out->clear_frequency_list_hz();
   for (double frequency : config.frequency_list_hz) {
     out->add_frequency_list_hz(frequency);

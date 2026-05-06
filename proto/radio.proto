@@ -57,6 +57,7 @@ message ModeConfig {
   bool audio_hpf300_enabled = 22;
   bool audio_lpf8k_enabled = 23;
   bool audio_bpf_voice_enabled = 24;
+  bool audio_lpf15k_enabled = 25;
 }
 
 message ScanListChannel {

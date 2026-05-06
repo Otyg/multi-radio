@@ -95,6 +95,7 @@ class SignalVisualizationWidget : public QWidget {
     double receiver_frequency_start_hz = 0.0;
     double receiver_frequency_end_hz = 20000.0;
     bool receiver_frequency_range_valid = false;
+    double demod_frequency_end_hz = 20000.0;
     bool has_signal_level_db = false;
     double signal_level_db = -120.0;
     bool has_squelch_threshold_db = false;
@@ -140,7 +141,7 @@ class SignalVisualizationWidget : public QWidget {
   void BlendSampleIntoState(ReceiverState* state, double frequency_hz, double intensity);
   void BlendFrameIntoState(ReceiverState* state, const std::vector<double>& waveform,
                            const std::vector<double>& spectrum, double peak_frequency_hz,
-                           double peak_intensity);
+                           double peak_intensity, double frame_frequency_end_hz);
   void BlendReceiverSpectrumIntoState(ReceiverState* state, const std::vector<double>& spectrum,
                                       double peak_frequency_hz, double peak_intensity,
                                       double frame_frequency_start_hz, double frame_frequency_end_hz);

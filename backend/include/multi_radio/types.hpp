@@ -70,6 +70,7 @@ struct ModeConfig {
   bool audio_hpf300_enabled = false;
   bool audio_lpf8k_enabled = false;
   bool audio_bpf_voice_enabled = false;
+  bool audio_lpf15k_enabled = false;
 };
 
 struct ReceiverDescriptor {

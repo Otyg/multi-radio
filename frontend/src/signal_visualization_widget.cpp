@@ -254,7 +254,8 @@ void SignalVisualizationWidget::PushVisualizationFrame(uint32_t receiver_id, con
     BlendReceiverSpectrumIntoState(&state, spectrum, peak_frequency_hz, peak_intensity,
                                    frame_frequency_start_hz, frame_frequency_end_hz);
   } else {
-    BlendFrameIntoState(&state, waveform, spectrum, peak_frequency_hz, peak_intensity);
+    BlendFrameIntoState(&state, waveform, spectrum, peak_frequency_hz, peak_intensity,
+                        frame_frequency_end_hz);
   }
   update();
 }
@@ -952,6 +953,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
         display.spectrum = selected.spectrum;
         display.spectrogram_rows = selected.spectrogram_rows;
         display.waterfall_rows = selected.waterfall_rows;
+        display.frequency_start_hz = 0.0;
+        display.frequency_end_hz = selected.demod_frequency_end_hz;
       }
       display.has_signal_level_db = selected.has_signal_level_db;
       display.signal_level_db = selected.signal_level_db;
@@ -994,6 +997,8 @@ SignalVisualizationWidget::DisplayState SignalVisualizationWidget::BuildDisplayS
       display.spectrum = selected.spectrum;
       display.spectrogram_rows = selected.spectrogram_rows;
       display.waterfall_rows = selected.waterfall_rows;
+      display.frequency_start_hz = 0.0;
+      display.frequency_end_hz = selected.demod_frequency_end_hz;
     }
     display.has_signal_level_db = selected.has_signal_level_db;
     display.signal_level_db = selected.signal_level_db;
@@ -1175,11 +1180,15 @@ void SignalVisualizationWidget::BlendSampleIntoState(ReceiverState* state, doubl
 
 void SignalVisualizationWidget::BlendFrameIntoState(ReceiverState* state, const std::vector<double>& waveform,
                                                     const std::vector<double>& spectrum,
-                                                    double peak_frequency_hz, double peak_intensity) {
+                                                    double peak_frequency_hz, double peak_intensity,
+                                                    double frame_frequency_end_hz) {
   if (state == nullptr) {
     return;
   }
   EnsureState(state);
+  if (frame_frequency_end_hz > 1.0) {
+    state->demod_frequency_end_hz = frame_frequency_end_hz;
+  }
 
   const double waveform_point = ComputeWaveformSamplePoint(waveform);
   state->waveform.removeFirst();
