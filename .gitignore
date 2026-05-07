@@ -2,7 +2,16 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=cmake,c++,visualstudiocode
 .codex
 **/build
-
+**/.vscode
+**/.claude
+**/.agents
+**/logs
+**/build
+**/build*
+**/cmake
+**/vcpkg-overlays
+client.ini
+*.log
 ### C++ ###
 # Prerequisites
 *.d
