@@ -80,6 +80,7 @@ struct ModeConfig {
   float gmsk_modulation_index = 0.5f;
   std::string gmsk_decoder;
   std::string gmsk_postprocessor;
+  bool gmsk_nrzi_invert = false;
   bool rnnoise_enabled = false;
   float rnnoise_strength = 100.0f;
 };
