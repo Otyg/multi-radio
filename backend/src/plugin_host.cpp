@@ -1,8 +1,10 @@
 #include "multi_radio/plugin_host.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <vector>
 
 // dlopen/dlsym are POSIX; guard for non-Linux hosts if ever needed.
 #if defined(__linux__) || defined(__APPLE__)
@@ -27,6 +29,9 @@ namespace {
 struct EmitCallbackState {
   const PluginHost::MessageCallback* callback = nullptr;
   double frequency_hz = 0.0;
+  // Set when a decoder plugin should be chained.
+  PluginHost::FnProcessBits decoder_fn  = nullptr;
+  MrPluginCtx*              decoder_ctx = nullptr;
 };
 
 // Tiny JSON key=value parser: extract value for `key` from a flat object like
@@ -186,13 +191,15 @@ bool PluginHost::LoadAll(std::string* error) {
     lp.info.enabled        = true;
     lp.info.path           = path_str;
     lp.dl_handle           = handle;
-    lp.fn_create     = fn_create;
-    lp.fn_destroy    = fn_destroy;
-    lp.fn_get_meta   = fn_get_meta;
-    lp.fn_process_iq = fn_process_iq;
-    // mr_plugin_set_param is optional — absence is not an error.
-    lp.fn_set_param  = reinterpret_cast<FnSetParam>(dlsym(handle, "mr_plugin_set_param"));
-    lp.ctx           = ctx;
+    lp.fn_create      = fn_create;
+    lp.fn_destroy     = fn_destroy;
+    lp.fn_get_meta    = fn_get_meta;
+    lp.fn_process_iq  = fn_process_iq;
+    lp.fn_process_bits = reinterpret_cast<FnProcessBits>(
+        dlsym(handle, "mr_plugin_process_bits"));
+    lp.fn_set_param   = reinterpret_cast<FnSetParam>(dlsym(handle, "mr_plugin_set_param"));
+    lp.role           = static_cast<int>(meta->role);
+    lp.ctx            = ctx;
 
     plugins_.push_back(std::move(lp));
   }
@@ -261,13 +268,31 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
           std::chrono::system_clock::now().time_since_epoch())
           .count());
 
+  // Find the active decoder plugin (if any).
+  FnProcessBits decoder_fn  = nullptr;
+  MrPluginCtx*  decoder_ctx = nullptr;
+  if (!active_decoder_name_.empty()) {
+    for (auto& p : plugins_) {
+      if (p.info.enabled && p.info.plugin_name == active_decoder_name_ &&
+          p.fn_process_bits && p.ctx) {
+        decoder_fn  = p.fn_process_bits;
+        decoder_ctx = p.ctx;
+        break;
+      }
+    }
+  }
+
   for (auto& plugin : plugins_) {
     if (!plugin.info.enabled) continue;
     if (plugin.fn_process_iq == nullptr || plugin.ctx == nullptr) continue;
+    // Decoder-only plugins are invoked via EmitFromPlugin chaining, not directly.
+    if (plugin.role == static_cast<int>(MR_PLUGIN_ROLE_DECODER)) continue;
 
     EmitCallbackState state;
     state.callback     = &callback;
     state.frequency_hz = center_freq_hz;
+    state.decoder_fn   = decoder_fn;
+    state.decoder_ctx  = decoder_ctx;
 
     plugin.fn_process_iq(
         plugin.ctx,
@@ -329,7 +354,44 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
     msg.normalized_fields["signal_type"] = signal_type;
   }
 
+  // Chain decoder if one is active and this is raw bit data from a demodulator.
+  if (state->decoder_fn && state->decoder_ctx && signal_type && payload && payload[0]) {
+    const std::string sig(signal_type);
+    if (sig == "FSK_DATA" || sig == "GMSK_DATA") {
+      // Convert hex payload → bytes, then call decoder.
+      const size_t hex_len = std::strlen(payload);
+      const size_t byte_count = hex_len / 2;
+      if (byte_count > 0) {
+        std::vector<uint8_t> raw_bytes(byte_count);
+        bool hex_ok = true;
+        for (size_t i = 0; i < byte_count && hex_ok; ++i) {
+          unsigned val = 0;
+          if (std::sscanf(payload + i * 2, "%02X", &val) != 1) hex_ok = false;
+          else raw_bytes[i] = static_cast<uint8_t>(val);
+        }
+        if (hex_ok) {
+          const uint32_t bit_count = static_cast<uint32_t>(byte_count * 8);
+          // Use a nested EmitCallbackState without decoder to avoid infinite chain.
+          EmitCallbackState nested_state;
+          nested_state.callback     = state->callback;
+          nested_state.frequency_hz = frequency_hz;
+          state->decoder_fn(state->decoder_ctx,
+                            raw_bytes.data(), bit_count,
+                            frequency_hz, unix_ms,
+                            signal_type,
+                            &PluginHost::EmitFromPlugin, &nested_state);
+          return;  // Decoder output replaces the raw demod output.
+        }
+      }
+    }
+  }
+
   (*state->callback)(msg);
+}
+
+void PluginHost::SetActiveDecoder(const std::string& plugin_name) {
+  std::lock_guard<std::mutex> lock(mu_);
+  active_decoder_name_ = plugin_name;
 }
 
 void PluginHost::SetParam(const std::string& key, const std::string& value) {

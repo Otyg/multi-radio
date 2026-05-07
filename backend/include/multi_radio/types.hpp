@@ -78,6 +78,7 @@ struct ModeConfig {
   uint32_t gmsk_baud_rate = 9600;
   float gmsk_bt = 0.4f;
   float gmsk_modulation_index = 0.5f;
+  std::string gmsk_decoder;
   bool rnnoise_enabled = false;
   float rnnoise_strength = 100.0f;
 };

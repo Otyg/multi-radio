@@ -1022,11 +1022,18 @@ void ReceiverWorker::ProcessLoop() {
         cur_bt   = mode_config_.gmsk_bt;
         cur_mi   = mode_config_.gmsk_modulation_index;
       }
+      std::string cur_dec;
+      { std::lock_guard<std::mutex> lock(mu_); cur_dec = mode_config_.gmsk_decoder; }
       if (cur_baud != last_gmsk_baud || cur_bt != last_gmsk_bt || cur_mi != last_gmsk_mi) {
         last_gmsk_baud = cur_baud; last_gmsk_bt = cur_bt; last_gmsk_mi = cur_mi;
         plugin_host_->SetParam("baud_rate",        std::to_string(cur_baud));
         plugin_host_->SetParam("bt",               std::to_string(cur_bt));
         plugin_host_->SetParam("modulation_index", std::to_string(cur_mi));
+      }
+      static std::string last_decoder;
+      if (cur_dec != last_decoder) {
+        last_decoder = cur_dec;
+        plugin_host_->SetActiveDecoder(cur_dec);
       }
     }
 

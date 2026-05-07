@@ -21,6 +21,16 @@ extern "C" {
 #define MR_PLUGIN_API_VERSION 1
 
 /* ------------------------------------------------------------------ */
+/* Plugin roles                                                         */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+  MR_PLUGIN_ROLE_DEMODULATOR    = 1,  /* IQ → raw bits / symbols       */
+  MR_PLUGIN_ROLE_DECODER        = 2,  /* raw bits → protocol data       */
+  MR_PLUGIN_ROLE_POSTPROCESSING = 3,  /* transforms decoded messages     */
+} MrPluginRole;
+
+/* ------------------------------------------------------------------ */
 /* Emit callback                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -50,10 +60,11 @@ typedef void (*MrEmitFn)(const char* signal_type,
 /* ------------------------------------------------------------------ */
 
 typedef struct MrPluginMeta {
-  const char* name;         /**< Short identifier, e.g. "fsk_demod"    */
-  const char* version;      /**< SemVer string, e.g. "1.0.0"           */
-  uint32_t    api_version;  /**< Must equal MR_PLUGIN_API_VERSION       */
-  const char* description;  /**< Human-readable one-liner               */
+  const char*  name;         /**< Short identifier, e.g. "fsk_demod"   */
+  const char*  version;      /**< SemVer string, e.g. "1.0.0"          */
+  uint32_t     api_version;  /**< Must equal MR_PLUGIN_API_VERSION      */
+  const char*  description;  /**< Human-readable one-liner              */
+  MrPluginRole role;         /**< Functional role of this plugin        */
 } MrPluginMeta;
 
 /* ------------------------------------------------------------------ */
@@ -82,6 +93,29 @@ void mr_plugin_destroy(MrPluginCtx* ctx);
  * The returned pointer must remain valid for the lifetime of the .so.
  */
 const MrPluginMeta* mr_plugin_get_meta(void);
+
+/**
+ * mr_plugin_process_bits — decode a packed bit stream (OPTIONAL export).
+ *
+ * Called by the host on DECODER plugins after a demodulator has emitted bits.
+ *
+ * @param ctx               Opaque context.
+ * @param bit_bytes         Packed bits, MSB first (bit 7 of byte 0 = first bit).
+ * @param bit_count         Total number of valid bits in bit_bytes.
+ * @param freq_hz           Centre frequency (Hz).
+ * @param unix_ms           Timestamp (ms since Unix epoch).
+ * @param source_type       Signal type string from the upstream demodulator,
+ *                          e.g. "GMSK_DATA".
+ * @param emit_fn / user_data  Same emit convention as mr_plugin_process_iq.
+ */
+void mr_plugin_process_bits(MrPluginCtx* ctx,
+                            const uint8_t* bit_bytes,
+                            uint32_t       bit_count,
+                            double         freq_hz,
+                            uint64_t       unix_ms,
+                            const char*    source_type,
+                            MrEmitFn       emit_fn,
+                            void*          user_data);
 
 /**
  * mr_plugin_set_param — update a runtime parameter (OPTIONAL export).

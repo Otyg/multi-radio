@@ -156,6 +156,7 @@ void mr_plugin_destroy(MrPluginCtx* raw) {
 static const MrPluginMeta kMeta = {
   "fsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,
   "2-FSK demodulator (libliquid fskdem + msresamp_crcf)"
+, MR_PLUGIN_ROLE_DEMODULATOR
 };
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
@@ -283,6 +284,7 @@ void mr_plugin_destroy(MrPluginCtx* raw) {
 static const MrPluginMeta kMeta = {
   "fsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,
   "2-FSK demodulator (FM discriminator fallback)"
+, MR_PLUGIN_ROLE_DEMODULATOR
 };
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 

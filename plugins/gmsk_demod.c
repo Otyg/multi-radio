@@ -169,6 +169,7 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
 static const MrPluginMeta kMeta = {
   "gmsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,
   "GMSK demodulator (libliquid gmskdem + msresamp_crcf)"
+, MR_PLUGIN_ROLE_DEMODULATOR
 };
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
@@ -325,6 +326,7 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
 static const MrPluginMeta kMeta = {
   "gmsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,
   "GMSK demodulator (Gaussian FIR fallback)"
+, MR_PLUGIN_ROLE_DEMODULATOR
 };
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 

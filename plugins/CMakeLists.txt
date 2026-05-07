@@ -56,5 +56,6 @@ file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/plugin_exports.ld"
 # Plugin targets
 # ---------------------------------------------------------------------------
 
-mr_add_plugin(fsk_demod  fsk_demod.c)
-mr_add_plugin(gmsk_demod gmsk_demod.c)
+mr_add_plugin(fsk_demod     fsk_demod.c)
+mr_add_plugin(gmsk_demod    gmsk_demod.c)
+mr_add_plugin(nrzi_decoder  nrzi_decoder.c)

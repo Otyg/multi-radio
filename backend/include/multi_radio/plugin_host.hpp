@@ -39,8 +39,9 @@ class PluginHost {
   bool DisablePlugin(const std::string& plugin_name, std::string* error);
 
   void ProcessIq(const IQSampleBlock& iq, const MessageCallback& callback);
-  // Call set_param on every loaded plugin that exports mr_plugin_set_param.
   void SetParam(const std::string& key, const std::string& value);
+  // Select which decoder plugin to chain after demodulators (empty = none).
+  void SetActiveDecoder(const std::string& plugin_name);
 
  private:
   // Function-pointer typedefs matching the C API signatures.
@@ -49,6 +50,8 @@ class PluginHost {
   using FnGetMeta     = const MrPluginMeta* (*)(void);
   using FnProcessIq   = void (*)(MrPluginCtx*, const int16_t*, uint32_t, uint32_t,
                                   double, uint64_t, MrEmitFn, void*);
+  using FnProcessBits = void (*)(MrPluginCtx*, const uint8_t*, uint32_t,
+                                  double, uint64_t, const char*, MrEmitFn, void*);
   using FnSetParam    = int  (*)(MrPluginCtx*, const char*, const char*);
 
   struct LoadedPlugin {
@@ -57,9 +60,11 @@ class PluginHost {
     FnCreate     fn_create  = nullptr;
     FnDestroy    fn_destroy = nullptr;
     FnGetMeta    fn_get_meta = nullptr;
-    FnProcessIq  fn_process_iq = nullptr;
-    FnSetParam   fn_set_param  = nullptr;  // optional
-    MrPluginCtx* ctx        = nullptr;  // live instance
+    FnProcessIq   fn_process_iq  = nullptr;
+    FnProcessBits fn_process_bits = nullptr;  // optional, decoder role
+    FnSetParam    fn_set_param    = nullptr;  // optional
+    MrPluginCtx*  ctx             = nullptr;
+    int           role             = 0;
   };
 
   // Emit callback forwarded from the C plugin back into C++ land.
@@ -74,6 +79,7 @@ class PluginHost {
   std::filesystem::path state_dir_;
   mutable std::mutex mu_;
   std::vector<LoadedPlugin> plugins_;
+  std::string active_decoder_name_;
 };
 
 }  // namespace multi_radio

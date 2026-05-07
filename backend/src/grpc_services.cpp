@@ -141,6 +141,7 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   if (config.gmsk_baud_rate() > 0) out.gmsk_baud_rate = config.gmsk_baud_rate();
   if (config.gmsk_bt() > 0.0f)     out.gmsk_bt = config.gmsk_bt();
   if (config.gmsk_modulation_index() > 0.0f) out.gmsk_modulation_index = config.gmsk_modulation_index();
+  out.gmsk_decoder = config.gmsk_decoder();
   out.rnnoise_enabled = config.rnnoise_enabled();
   out.rnnoise_strength = config.rnnoise_strength();
   return out;
@@ -174,6 +175,7 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_gmsk_baud_rate(config.gmsk_baud_rate);
   out->set_gmsk_bt(config.gmsk_bt);
   out->set_gmsk_modulation_index(config.gmsk_modulation_index);
+  out->set_gmsk_decoder(config.gmsk_decoder);
   out->set_rnnoise_enabled(config.rnnoise_enabled);
   out->set_rnnoise_strength(config.rnnoise_strength);
   out->clear_frequency_list_hz();
