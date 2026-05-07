@@ -529,8 +529,12 @@ void ReceiverWorker::IngestLoop() {
     const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
+    // GMSK and FSK processing is entirely in the plugin (libliquid gmskdem/fskdem).
+    // The WFM cap is irrelevant for these modes and would halve the available bandwidth.
+    const bool is_digital_plugin_mode =
+        (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk);
     const uint32_t effective_sample_rate_hz =
-        (mode == RadioMode::kScanRange)
+        (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz
             : std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
 
@@ -1318,8 +1322,10 @@ void ReceiverWorker::RunLoop() {
     const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
+    const bool is_digital_plugin_mode =
+        (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk);
     const uint32_t effective_sample_rate_hz =
-        (mode == RadioMode::kScanRange)
+        (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz
             : std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
     if (effective_sample_rate_hz != requested_sample_rate_hz &&
