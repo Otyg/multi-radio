@@ -2500,19 +2500,27 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     row.decoded_summary = BuildDscDecodedSummary(fields);
   }
 
-  // Log plugin-decoded digital frames (FSK, GMSK, etc.)
+  // Log plugin-decoded digital frames (FSK, GMSK, NRZI, etc.)
   const QString plugin_type = fields.value("signal_type").toString();
-  if (plugin_type == "FSK_DATA" || plugin_type == "GMSK_DATA") {
-    const QString baud  = fields.value("baud_rate").toString();
-    const QString bits  = fields.value("bit_count").toString();
-    const QString extra = (plugin_type == "GMSK_DATA")
-                              ? QString(" BT=%1").arg(fields.value("bt").toString())
-                              : QString(" dev=%1Hz").arg(fields.value("deviation_hz").toString());
-    AppendLog(QString("[%1] %2 f=%3Hz baud=%4%5 bits=%6: %7")
+  if (plugin_type == "FSK_DATA" || plugin_type == "GMSK_DATA" || plugin_type == "NRZI_DATA") {
+    QString extra;
+    if (plugin_type == "GMSK_DATA") {
+      extra = QString(" BT=%1").arg(fields.value("bt").toString());
+    } else if (plugin_type == "FSK_DATA") {
+      extra = QString(" dev=%1Hz").arg(fields.value("deviation_hz").toString());
+    } else if (plugin_type == "NRZI_DATA") {
+      const QString src = fields.value("source_type").toString();
+      extra = src.isEmpty() ? QString() : QString(" src=%1").arg(src);
+    }
+    const QString baud = fields.value("baud_rate").toString();
+    const QString bits = fields.value("bit_count").toString();
+    const QString baud_part = baud.isEmpty() ? QString() : QString(" baud=%1").arg(baud);
+    AppendLog(QString("[%1] RX%2 %3 f=%4Hz%5%6 bits=%7: %8")
                   .arg(row.timestamp.toString("HH:mm:ss"))
+                  .arg(receiver_id)
                   .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
-                  .arg(baud)
+                  .arg(baud_part)
                   .arg(extra)
                   .arg(bits)
                   .arg(payload));
