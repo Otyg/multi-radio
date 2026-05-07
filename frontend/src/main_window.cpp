@@ -69,27 +69,25 @@ constexpr double kAudioGapFillMaxMs = 40.0;
 
 int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
   switch (modulation) {
-    case v1::MODULATION_AM:
-      return 10000;
-    case v1::MODULATION_WFM:
-      return 180000;
+    case v1::MODULATION_AM:   return 10000;
+    case v1::MODULATION_WFM:  return 180000;
+    case v1::MODULATION_FSK:  return 12500;
+    case v1::MODULATION_GMSK: return 12500;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
-    default:
-      return 12500;
+    default:                  return 12500;
   }
 }
 
 QString ModulationLabel(v1::Modulation modulation) {
   switch (modulation) {
-    case v1::MODULATION_AM:
-      return "AM";
-    case v1::MODULATION_WFM:
-      return "WFM";
+    case v1::MODULATION_AM:   return "AM";
+    case v1::MODULATION_WFM:  return "WFM";
+    case v1::MODULATION_FSK:  return "FSK";
+    case v1::MODULATION_GMSK: return "GMSK";
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
-    default:
-      return "NFM";
+    default:                  return "NFM";
   }
 }
 
@@ -134,8 +132,9 @@ v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
     return v1::MODULATION_WFM;
   }
   const auto modulation = static_cast<v1::Modulation>(modulation_value);
-  if (modulation == v1::MODULATION_NFM || modulation == v1::MODULATION_WFM ||
-      modulation == v1::MODULATION_AM) {
+  if (modulation == v1::MODULATION_NFM  || modulation == v1::MODULATION_WFM  ||
+      modulation == v1::MODULATION_AM   || modulation == v1::MODULATION_FSK  ||
+      modulation == v1::MODULATION_GMSK) {
     return modulation;
   }
   return v1::MODULATION_WFM;
@@ -1184,9 +1183,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* fixed_tab = new QWidget(mode_tabs_);
   auto* fixed_layout = new QFormLayout(fixed_tab);
   fixed_modulation_combo_ = new QComboBox(fixed_tab);
-  fixed_modulation_combo_->addItem("NFM", QVariant::fromValue<int>(v1::MODULATION_NFM));
-  fixed_modulation_combo_->addItem("WFM", QVariant::fromValue<int>(v1::MODULATION_WFM));
-  fixed_modulation_combo_->addItem("AM", QVariant::fromValue<int>(v1::MODULATION_AM));
+  fixed_modulation_combo_->addItem("NFM",  QVariant::fromValue<int>(v1::MODULATION_NFM));
+  fixed_modulation_combo_->addItem("WFM",  QVariant::fromValue<int>(v1::MODULATION_WFM));
+  fixed_modulation_combo_->addItem("AM",   QVariant::fromValue<int>(v1::MODULATION_AM));
+  fixed_modulation_combo_->addItem("FSK",  QVariant::fromValue<int>(v1::MODULATION_FSK));
+  fixed_modulation_combo_->addItem("GMSK", QVariant::fromValue<int>(v1::MODULATION_GMSK));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
   fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
@@ -1768,8 +1769,9 @@ void MainWindow::RefreshReceivers() {
         if (fixed_modulation == v1::MODULATION_UNSPECIFIED) {
           fixed_modulation = v1::MODULATION_WFM;
         }
-        if (fixed_modulation != v1::MODULATION_NFM && fixed_modulation != v1::MODULATION_WFM &&
-            fixed_modulation != v1::MODULATION_AM) {
+        if (fixed_modulation != v1::MODULATION_NFM  && fixed_modulation != v1::MODULATION_WFM  &&
+            fixed_modulation != v1::MODULATION_AM   && fixed_modulation != v1::MODULATION_FSK  &&
+            fixed_modulation != v1::MODULATION_GMSK) {
           fixed_modulation = v1::MODULATION_NFM;
         }
         const QSignalBlocker blocker(fixed_modulation_combo_);
@@ -1939,8 +1941,9 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     const int modulation_value = fixed_modulation_combo_->currentData().toInt(&value_ok);
     if (value_ok) {
       const auto parsed = static_cast<v1::Modulation>(modulation_value);
-      if (parsed == v1::MODULATION_NFM || parsed == v1::MODULATION_WFM ||
-          parsed == v1::MODULATION_AM) {
+      if (parsed == v1::MODULATION_NFM  || parsed == v1::MODULATION_WFM  ||
+          parsed == v1::MODULATION_AM   || parsed == v1::MODULATION_FSK  ||
+          parsed == v1::MODULATION_GMSK) {
         fixed_modulation = parsed;
       }
     }
@@ -2441,6 +2444,25 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     row.decoded_summary = BuildAisDecodedSummary(payload, fields);
   } else if (signal_type == "SIGNAL_TYPE_DSC") {
     row.decoded_summary = BuildDscDecodedSummary(fields);
+  }
+
+  // Log plugin-decoded digital frames (FSK, GMSK, etc.)
+  const QString plugin_type = fields.value("signal_type").toString();
+  if (plugin_type == "FSK_DATA" || plugin_type == "GMSK_DATA") {
+    const QString baud  = fields.value("baud_rate").toString();
+    const QString bits  = fields.value("bit_count").toString();
+    const QString extra = (plugin_type == "GMSK_DATA")
+                              ? QString(" BT=%1").arg(fields.value("bt").toString())
+                              : QString(" dev=%1Hz").arg(fields.value("deviation_hz").toString());
+    AppendLog(QString("[%1] %2 f=%3Hz baud=%4%5 bits=%6: %7")
+                  .arg(row.timestamp.toString("HH:mm:ss"))
+                  .arg(plugin_type)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(baud)
+                  .arg(extra)
+                  .arg(bits)
+                  .arg(payload));
+    return;
   }
 
   auto field_text = [&fields](const QString& key) -> QString {

@@ -68,11 +68,15 @@ add_library(multi_radio_core
 target_include_directories(multi_radio_core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/plugins/include
 )
 
 target_link_libraries(multi_radio_core
   PUBLIC
     Threads::Threads
+  PRIVATE
+    ${CMAKE_DL_LIBS}
 )
 
 if(MR_RTLSDR_LINK_TARGET)

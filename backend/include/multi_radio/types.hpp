@@ -26,6 +26,8 @@ enum class Modulation {
   kNfm,
   kWfm,
   kAm,
+  kFsk,
+  kGmsk,
 };
 
 enum class EventKind {

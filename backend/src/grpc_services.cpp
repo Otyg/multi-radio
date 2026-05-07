@@ -59,26 +59,24 @@ v1::SignalType ToProto(SignalType type) {
 
 Modulation FromProto(v1::Modulation modulation) {
   switch (modulation) {
-    case v1::MODULATION_AM:
-      return Modulation::kAm;
-    case v1::MODULATION_WFM:
-      return Modulation::kWfm;
+    case v1::MODULATION_AM:   return Modulation::kAm;
+    case v1::MODULATION_WFM:  return Modulation::kWfm;
+    case v1::MODULATION_FSK:  return Modulation::kFsk;
+    case v1::MODULATION_GMSK: return Modulation::kGmsk;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
-    default:
-      return Modulation::kNfm;
+    default:                  return Modulation::kNfm;
   }
 }
 
 v1::Modulation ToProto(Modulation modulation) {
   switch (modulation) {
-    case Modulation::kAm:
-      return v1::MODULATION_AM;
-    case Modulation::kWfm:
-      return v1::MODULATION_WFM;
+    case Modulation::kAm:   return v1::MODULATION_AM;
+    case Modulation::kWfm:  return v1::MODULATION_WFM;
+    case Modulation::kFsk:  return v1::MODULATION_FSK;
+    case Modulation::kGmsk: return v1::MODULATION_GMSK;
     case Modulation::kNfm:
-    default:
-      return v1::MODULATION_NFM;
+    default:                return v1::MODULATION_NFM;
   }
 }
 

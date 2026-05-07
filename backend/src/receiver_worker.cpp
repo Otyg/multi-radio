@@ -130,7 +130,9 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
     out.channel_bandwidth_hz = kDefaultChannelBandwidthHz;
   }
   if (out.fixed_modulation != Modulation::kNfm && out.fixed_modulation != Modulation::kWfm &&
-      out.fixed_modulation != Modulation::kAm) {
+      out.fixed_modulation != Modulation::kAm  &&
+      out.fixed_modulation != Modulation::kFsk &&
+      out.fixed_modulation != Modulation::kGmsk) {
     out.fixed_modulation = Modulation::kWfm;
   }
   return out;
@@ -1006,6 +1008,29 @@ void ReceiverWorker::ProcessLoop() {
         next_iq_visualization_at = iq_now + std::chrono::milliseconds(kIqVisualizationIntervalMs);
       }
       iq_sample_index += block_samples;
+    }
+
+    // Plugin IQ processing — runs on every block regardless of mode.
+    if (plugin_host_ != nullptr && !entry.block.interleaved_iq.empty()) {
+      // Stamp the block with center frequency so plugins can use it.
+      IQSampleBlock plugin_block = entry.block;
+      if (plugin_block.center_frequency_hz == 0) {
+        plugin_block.center_frequency_hz =
+            static_cast<uint32_t>(entry.tuned_frequency_hz);
+      }
+      plugin_host_->ProcessIq(
+          plugin_block,
+          [this, &entry](const multi_radio::PluginMessage& msg) {
+            DecodedMessage dm;
+            dm.unix_ms          = msg.unix_ms;
+            dm.receiver_id      = receiver_id_;
+            dm.signal_type      = msg.signal_type;
+            dm.frequency_hz     = msg.frequency_hz != 0.0 ? msg.frequency_hz
+                                                          : entry.tuned_frequency_hz;
+            dm.payload          = msg.payload;
+            dm.normalized_fields = msg.normalized_fields;
+            event_bus_->PublishDecodedMessage(dm);
+          });
     }
 
     // Scan range: IQ frames published above; skip all demodulation and audio.
