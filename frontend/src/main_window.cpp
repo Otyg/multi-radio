@@ -1253,6 +1253,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_decoder_combo_->addItem("NRZI",          QVariant(QString("nrzi_decoder")));
   gmsk_decoder_combo_->setToolTip("Post-demodulationsavkodare att kedja efter GMSK");
   gmsk_row->addWidget(gmsk_decoder_combo_);
+  gmsk_row->addSpacing(12);
+  gmsk_row->addWidget(new QLabel("Postprocessing:", gmsk_params_widget_));
+  gmsk_postproc_combo_ = new QComboBox(gmsk_params_widget_);
+  gmsk_postproc_combo_->addItem("Ingen postprocessing", QVariant(QString("")));
+  gmsk_postproc_combo_->addItem("HDLC",                 QVariant(QString("hdlc_postproc")));
+  gmsk_postproc_combo_->setToolTip("Postprocessing att kedja efter avkodaren");
+  gmsk_row->addWidget(gmsk_postproc_combo_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
 
@@ -1424,6 +1431,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(gmsk_bt_spin_,         QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
   connect(gmsk_mod_index_spin_,  QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
   connect(gmsk_decoder_combo_,   QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
+  connect(gmsk_postproc_combo_,  QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
   connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
@@ -2030,6 +2039,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_gmsk_modulation_index(gmsk_mod_index_spin_ ? static_cast<float>(gmsk_mod_index_spin_->value()) : 0.5f);
   config.set_gmsk_decoder(gmsk_decoder_combo_
       ? gmsk_decoder_combo_->currentData().toString().toStdString() : "");
+  config.set_gmsk_postprocessor(gmsk_postproc_combo_
+      ? gmsk_postproc_combo_->currentData().toString().toStdString() : "");
   config.set_scan_list_locked_channel_index(
       static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
   const double default_squelch_db =
@@ -2523,6 +2534,22 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(baud_part)
                   .arg(extra)
                   .arg(bits)
+                  .arg(payload));
+    return;
+  }
+
+  // Log HDLC frames (postprocessed)
+  if (plugin_type == "HDLC_FRAME" || plugin_type == "HDLC_FRAME_BAD_CRC") {
+    const QString byte_count = fields.value("byte_count").toString();
+    const QString crc_ok_str = fields.value("crc_ok").toString();
+    const QString crc_label = (crc_ok_str == "1") ? "OK" : "FAIL";
+    AppendLog(QString("[%1] RX%2 %3 f=%4Hz bytes=%5 crc=%6: %7")
+                  .arg(row.timestamp.toString("HH:mm:ss"))
+                  .arg(receiver_id)
+                  .arg(plugin_type)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(byte_count)
+                  .arg(crc_label)
                   .arg(payload));
     return;
   }

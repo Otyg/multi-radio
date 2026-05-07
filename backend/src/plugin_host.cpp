@@ -29,10 +29,14 @@ namespace {
 struct EmitCallbackState {
   const PluginHost::MessageCallback* callback = nullptr;
   double frequency_hz = 0.0;
-  // Set when a decoder plugin should be chained.
+  // Set when a decoder plugin should be chained (stage 1 → 2).
   void (*decoder_fn)(MrPluginCtx*, const uint8_t*, uint32_t,
                      double, uint64_t, const char*, MrEmitFn, void*) = nullptr;
   MrPluginCtx* decoder_ctx = nullptr;
+  // Set when a postprocessor plugin should be chained (stage 2 → 3).
+  void (*postproc_fn)(MrPluginCtx*, const uint8_t*, uint32_t,
+                      double, uint64_t, const char*, MrEmitFn, void*) = nullptr;
+  MrPluginCtx* postproc_ctx = nullptr;
 };
 
 // Tiny JSON key=value parser: extract value for `key` from a flat object like
@@ -283,20 +287,37 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
     }
   }
 
+  // Find the active postprocessor plugin (if any).
+  FnProcessBits postproc_fn  = nullptr;
+  MrPluginCtx*  postproc_ctx = nullptr;
+  if (!active_postprocessor_name_.empty()) {
+    for (auto& p : plugins_) {
+      if (p.info.enabled && p.info.plugin_name == active_postprocessor_name_ &&
+          p.fn_process_bits && p.ctx) {
+        postproc_fn  = p.fn_process_bits;
+        postproc_ctx = p.ctx;
+        break;
+      }
+    }
+  }
+
   for (auto& plugin : plugins_) {
     if (!plugin.info.enabled) continue;
     if (plugin.fn_process_iq == nullptr || plugin.ctx == nullptr) continue;
-    // Decoder-only plugins are invoked via EmitFromPlugin chaining, not directly.
+    // Decoder and postprocessor plugins are invoked via EmitFromPlugin chaining, not directly.
     if (plugin.role == static_cast<int>(MR_PLUGIN_ROLE_DECODER)) continue;
+    if (plugin.role == static_cast<int>(MR_PLUGIN_ROLE_POSTPROCESSING)) continue;
     // Skip if a specific demodulator is selected and this isn't it.
     if (!active_demodulator_name_.empty() &&
         plugin.info.plugin_name != active_demodulator_name_) continue;
 
     EmitCallbackState state;
-    state.callback     = &callback;
-    state.frequency_hz = center_freq_hz;
-    state.decoder_fn   = decoder_fn;
-    state.decoder_ctx  = decoder_ctx;
+    state.callback      = &callback;
+    state.frequency_hz  = center_freq_hz;
+    state.decoder_fn    = decoder_fn;
+    state.decoder_ctx   = decoder_ctx;
+    state.postproc_fn   = postproc_fn;
+    state.postproc_ctx  = postproc_ctx;
 
     plugin.fn_process_iq(
         plugin.ctx,
@@ -358,7 +379,7 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
     msg.normalized_fields["signal_type"] = signal_type;
   }
 
-  // Chain decoder if one is active and this is raw bit data from a demodulator.
+  // Stage 1 → 2: chain decoder if set and this is raw bit data from a demodulator.
   if (state->decoder_fn && state->decoder_ctx && signal_type && payload && payload[0]) {
     const std::string sig(signal_type);
     if (sig == "FSK_DATA" || sig == "GMSK_DATA") {
@@ -375,10 +396,14 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
         }
         if (hex_ok) {
           const uint32_t bit_count = static_cast<uint32_t>(byte_count * 8);
-          // Use a nested EmitCallbackState without decoder to avoid infinite chain.
+          // Nested state carries postproc but clears decoder to avoid infinite chain.
           EmitCallbackState nested_state;
           nested_state.callback     = state->callback;
           nested_state.frequency_hz = frequency_hz;
+          nested_state.decoder_fn   = nullptr;
+          nested_state.decoder_ctx  = nullptr;
+          nested_state.postproc_fn  = state->postproc_fn;
+          nested_state.postproc_ctx = state->postproc_ctx;
           state->decoder_fn(state->decoder_ctx,
                             raw_bytes.data(), bit_count,
                             frequency_hz, unix_ms,
@@ -386,6 +411,40 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
                             &PluginHost::EmitFromPlugin, &nested_state);
           return;  // Decoder output replaces the raw demod output.
         }
+      }
+    }
+  }
+
+  // Stage 2 → 3: chain postprocessor if set and no decoder is in play.
+  // Applies to any signal type when decoder_fn is null and postproc_fn is set.
+  if (!state->decoder_fn && state->postproc_fn && state->postproc_ctx &&
+      payload && payload[0]) {
+    const size_t hex_len = std::strlen(payload);
+    const size_t byte_count = hex_len / 2;
+    if (byte_count > 0) {
+      std::vector<uint8_t> raw_bytes(byte_count);
+      bool hex_ok = true;
+      for (size_t i = 0; i < byte_count && hex_ok; ++i) {
+        unsigned val = 0;
+        if (std::sscanf(payload + i * 2, "%02X", &val) != 1) hex_ok = false;
+        else raw_bytes[i] = static_cast<uint8_t>(val);
+      }
+      if (hex_ok) {
+        const uint32_t bit_count = static_cast<uint32_t>(byte_count * 8);
+        // Final nested state: no decoder, no postproc — deliver to callback only.
+        EmitCallbackState nested2_state;
+        nested2_state.callback     = state->callback;
+        nested2_state.frequency_hz = frequency_hz;
+        nested2_state.decoder_fn   = nullptr;
+        nested2_state.decoder_ctx  = nullptr;
+        nested2_state.postproc_fn  = nullptr;
+        nested2_state.postproc_ctx = nullptr;
+        state->postproc_fn(state->postproc_ctx,
+                           raw_bytes.data(), bit_count,
+                           frequency_hz, unix_ms,
+                           signal_type,
+                           &PluginHost::EmitFromPlugin, &nested2_state);
+        return;  // Postprocessor output replaces the decoder output.
       }
     }
   }
@@ -401,6 +460,11 @@ void PluginHost::SetActiveDecoder(const std::string& plugin_name) {
 void PluginHost::SetActiveDemodulator(const std::string& plugin_name) {
   std::lock_guard<std::mutex> lock(mu_);
   active_demodulator_name_ = plugin_name;
+}
+
+void PluginHost::SetActivePostprocessor(const std::string& plugin_name) {
+  std::lock_guard<std::mutex> lock(mu_);
+  active_postprocessor_name_ = plugin_name;
 }
 
 void PluginHost::SetParam(const std::string& key, const std::string& value) {

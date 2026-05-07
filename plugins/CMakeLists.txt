@@ -49,13 +49,14 @@ endfunction()
 # Write a linker version script that exports only the four mandatory symbols.
 # ---------------------------------------------------------------------------
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/plugin_exports.ld"
-"{ global: mr_plugin_create; mr_plugin_destroy; mr_plugin_get_meta; mr_plugin_process_iq; local: *; };\n"
+"{ global: mr_plugin_create; mr_plugin_destroy; mr_plugin_get_meta; mr_plugin_process_iq; mr_plugin_process_bits; mr_plugin_set_param; local: *; };\n"
 )
 
 # ---------------------------------------------------------------------------
 # Plugin targets
 # ---------------------------------------------------------------------------
 
-mr_add_plugin(fsk_demod     fsk_demod.c)
-mr_add_plugin(gmsk_demod    gmsk_demod.c)
-mr_add_plugin(nrzi_decoder  nrzi_decoder.c)
+mr_add_plugin(fsk_demod      fsk_demod.c)
+mr_add_plugin(gmsk_demod     gmsk_demod.c)
+mr_add_plugin(nrzi_decoder   nrzi_decoder.c)
+mr_add_plugin(hdlc_postproc  hdlc_postproc.c)

@@ -66,6 +66,7 @@ message ModeConfig {
   float  gmsk_bt = 31;
   float  gmsk_modulation_index = 32;
   string gmsk_decoder = 33;
+  string gmsk_postprocessor = 34;
   bool rnnoise_enabled = 28;
   float rnnoise_strength = 29;
 }
