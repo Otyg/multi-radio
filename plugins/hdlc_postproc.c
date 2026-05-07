@@ -135,16 +135,13 @@ static void maybe_emit_stats(HdlcCtx* ctx, double freq_hz, uint64_t unix_ms,
     }
     char kv[256];
     snprintf(kv, sizeof(kv),
-             "{\"total\":\"%llu\",\"ok\":\"%llu\",\"fail\":\"%llu\",\"interval_s\":\"%llu\"}",
+             "{\"total\":\"%llu\",\"ok\":\"%llu\",\"fail\":\"%llu\"}",
              (unsigned long long)ctx->stats_total,
              (unsigned long long)ctx->stats_ok,
-             (unsigned long long)ctx->stats_fail,
-             (unsigned long long)(ctx->stats_interval_ms / 1000u));
+             (unsigned long long)ctx->stats_fail);
     if (emit_fn)
         emit_fn("HDLC_STATS", "", freq_hz, unix_ms, kv, user_data);
-    ctx->stats_total = 0;
-    ctx->stats_ok    = 0;
-    ctx->stats_fail  = 0;
+    /* Stats are cumulative — do NOT reset totals between emissions */
     ctx->stats_last_emit_ms = unix_ms;
 }
 

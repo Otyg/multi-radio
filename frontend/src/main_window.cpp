@@ -2457,13 +2457,18 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   // Log HDLC periodic statistics
   if (plugin_type == "HDLC_STATS") {
-    AppendLog(QString("[%1] RX%2 HDLC_STATS f=%3Hz: %4 frames, %5 OK, %6 FAIL")
+    const quint64 total = fields.value("total").toULongLong();
+    const quint64 ok    = fields.value("ok").toULongLong();
+    const quint64 fail  = fields.value("fail").toULongLong();
+    const int pct = (total > 0) ? static_cast<int>(ok * 100u / total) : 0;
+    AppendLog(QString("[%1] RX%2 HDLC f=%3Hz: %4 tot, %5 ok, %6 fail (%7% ok)")
                   .arg(row.timestamp.toString("HH:mm:ss"))
                   .arg(receiver_id)
                   .arg(frequency_hz, 0, 'f', 0)
-                  .arg(fields.value("total").toString())
-                  .arg(fields.value("ok").toString())
-                  .arg(fields.value("fail").toString()));
+                  .arg(total)
+                  .arg(ok)
+                  .arg(fail)
+                  .arg(pct));
     return;
   }
 

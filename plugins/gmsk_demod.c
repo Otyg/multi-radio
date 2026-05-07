@@ -89,7 +89,7 @@ typedef struct {
   uint32_t sample_rate_hz;
 
   msresamp_crcf resampler;
-  symsync_crcf  timing_sync;  /* polyphase timing recovery, replaces gmskdem */
+  gmskdem       demodulator;
   iirfilt_cccf  pre_filter;   /* channel-select IIR LP before resampling */
 
   liquid_float_complex* sym_buf;
@@ -112,14 +112,19 @@ typedef struct {
   float    nco_freq;       /* current frequency correction, rad/sample (resampled) */
   float    freq_est;       /* slow EMA of frequency error estimate */
 
+  /* Timing offset search: tries GMSK_K sample offsets, picks highest |FM disc| */
+  liquid_float_complex timing_align_buf[2 * GMSK_K];
+  uint32_t timing_align_fill;
+  int      timing_calibrated;  /* 0 = collecting, 1 = offset found */
+
   uint8_t  bit_buf[GMSK_MAX_BITS / 8 + 1];
   uint32_t bit_count;
 } GmskCtx;
 
 static void gmsk_teardown(GmskCtx* ctx) {
-  if (ctx->resampler)    { msresamp_crcf_destroy(ctx->resampler);    ctx->resampler    = NULL; }
-  if (ctx->timing_sync)  { symsync_crcf_destroy(ctx->timing_sync);  ctx->timing_sync  = NULL; }
-  if (ctx->pre_filter)   { iirfilt_cccf_destroy(ctx->pre_filter);   ctx->pre_filter   = NULL; }
+  if (ctx->resampler)    { msresamp_crcf_destroy(ctx->resampler);  ctx->resampler   = NULL; }
+  if (ctx->demodulator)  { gmskdem_destroy(ctx->demodulator);       ctx->demodulator = NULL; }
+  if (ctx->pre_filter)   { iirfilt_cccf_destroy(ctx->pre_filter);  ctx->pre_filter  = NULL; }
   free(ctx->sym_buf);    ctx->sym_buf     = NULL;
   free(ctx->resamp_out); ctx->resamp_out  = NULL;
   ctx->resamp_out_cap = 0;
@@ -139,9 +144,11 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->noise_floor    = GMSK_NOISE_INIT;
   ctx->hold_syms      = 0;
   ctx->gate_open      = 0;
-  ctx->nco_phase      = 0.0f;
-  ctx->nco_freq       = 0.0f;
-  ctx->freq_est       = 0.0f;
+  ctx->nco_phase         = 0.0f;
+  ctx->nco_freq          = 0.0f;
+  ctx->freq_est          = 0.0f;
+  ctx->timing_calibrated = 0;
+  ctx->timing_align_fill = 0;
 
   /* Channel-select pre-filter: 4th-order Butterworth LP at 2×baud_rate.
      Reduces noise bandwidth and adjacent-channel interference before resampling.
@@ -157,12 +164,8 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->resampler = msresamp_crcf_create(rate, 60.0f);
   if (!ctx->resampler) return 0;
 
-  /* Polyphase timing-recovery synchronizer with GMSK matched receive filter.
-     npfb=32 polyphase banks give 1/32-symbol timing resolution. */
-  ctx->timing_sync = symsync_crcf_create_rnyquist(
-      LIQUID_FIRFILT_GMSKRX, GMSK_K, GMSK_M, ctx->bt, 32);
-  if (!ctx->timing_sync) return 0;
-  symsync_crcf_set_lf_bw(ctx->timing_sync, 0.02f); /* loop filter bandwidth */
+  ctx->demodulator = gmskdem_create(GMSK_K, GMSK_M, ctx->bt);
+  if (!ctx->demodulator) return 0;
 
   ctx->sym_buf = (liquid_float_complex*)calloc(GMSK_K, sizeof(liquid_float_complex));
   if (!ctx->sym_buf) return 0;
@@ -226,10 +229,95 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
 
 static const MrPluginMeta kMeta = {
   "gmsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,
-  "GMSK demodulator (libliquid symsync_crcf + msresamp_crcf)"
+  "GMSK demodulator (libliquid gmskdem + msresamp_crcf)"
 , MR_PLUGIN_ROLE_DEMODULATOR
 };
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
+
+/* ------------------------------------------------------------------ */
+/* Per-symbol processing: energy gate, AFC update, demodulation        */
+/* Also resets timing_calibrated when gate closes.                     */
+/* ------------------------------------------------------------------ */
+
+static void process_symbol(GmskCtx* ctx, liquid_float_complex* sym,
+                            double freq_hz, uint64_t unix_ms,
+                            MrEmitFn emit_fn, void* user_data) {
+  float energy = 0.0f;
+  for (int s = 0; s < GMSK_K; ++s) {
+    const float re = __real__ sym[s];
+    const float im = __imag__ sym[s];
+    energy += re * re + im * im;
+  }
+  const float per_sample_energy = energy / (float)GMSK_K;
+
+  if (per_sample_energy < ctx->noise_floor * ctx->squelch_ratio) {
+    ctx->noise_floor = ctx->noise_floor * (1.0f - GMSK_NOISE_ALPHA)
+                     + per_sample_energy * GMSK_NOISE_ALPHA;
+  }
+  if (ctx->noise_floor < 1e-12f) ctx->noise_floor = 1e-12f;
+  ctx->signal_energy = ctx->signal_energy * (1.0f - GMSK_ENERGY_ALPHA)
+                     + per_sample_energy * GMSK_ENERGY_ALPHA;
+
+  const int above = (ctx->squelch_ratio > 0.0f)
+                  && (ctx->signal_energy > ctx->noise_floor * ctx->squelch_ratio);
+  if (above) {
+    ctx->hold_syms = GMSK_HOLD_SYMS;
+  } else if (ctx->hold_syms > 0) {
+    ctx->hold_syms--;
+  }
+  const int prev_gate = ctx->gate_open;
+  ctx->gate_open = above | (ctx->hold_syms > 0);
+
+  if (!ctx->gate_open) {
+    if (prev_gate && ctx->bit_count >= GMSK_MIN_BITS)
+      emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
+                freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+    ctx->bit_count = 0;
+    memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
+    /* Reset timing search so next burst calibrates from fresh samples */
+    ctx->timing_calibrated = 0;
+    ctx->timing_align_fill = 0;
+    return;
+  }
+
+  /* AFC update */
+  float fm_sum = 0.0f;
+  for (int s = 1; s < GMSK_K; ++s) {
+    const float re0 = __real__ sym[s - 1], im0 = __imag__ sym[s - 1];
+    const float re1 = __real__ sym[s],     im1 = __imag__ sym[s];
+    const float cross = im1 * re0 - re1 * im0;
+    const float dot   = re1 * re0 + im1 * im0;
+    const float mag2  = cross * cross + dot * dot;
+    fm_sum += (mag2 > 1e-12f) ? (cross / sqrtf(mag2)) : 0.0f;
+  }
+  const float fm_mean = fm_sum / (float)(GMSK_K - 1);
+  ctx->freq_est = ctx->freq_est * (1.0f - GMSK_AFC_ALPHA) + fm_mean * GMSK_AFC_ALPHA;
+  ctx->nco_freq = -ctx->freq_est;
+  if (ctx->nco_freq >  GMSK_AFC_MAX_RAD) ctx->nco_freq =  GMSK_AFC_MAX_RAD;
+  if (ctx->nco_freq < -GMSK_AFC_MAX_RAD) ctx->nco_freq = -GMSK_AFC_MAX_RAD;
+
+  unsigned int bit = 0;
+  gmskdem_demodulate(ctx->demodulator, sym, &bit);
+  push_bit(ctx->bit_buf, &ctx->bit_count, bit & 1u);
+  if (ctx->bit_count >= GMSK_MAX_BITS)
+    emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
+              freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+}
+
+/* Compute sum of |FM discriminator| for k samples starting at buf[offset].
+   Used to score each candidate timing offset. */
+static float timing_score(const liquid_float_complex* buf, uint32_t offset) {
+  float score = 0.0f;
+  for (int s = 1; s < GMSK_K; ++s) {
+    const float re0 = __real__ buf[offset + s - 1], im0 = __imag__ buf[offset + s - 1];
+    const float re1 = __real__ buf[offset + s],     im1 = __imag__ buf[offset + s];
+    const float cross = im1 * re0 - re1 * im0;
+    const float dot   = re1 * re0 + im1 * im0;
+    const float mag2  = cross * cross + dot * dot;
+    score += (mag2 > 1e-12f) ? fabsf(cross / sqrtf(mag2)) : 0.0f;
+  }
+  return score;
+}
 
 void mr_plugin_process_iq(MrPluginCtx* raw,
                           const int16_t* iq, uint32_t num_pairs,
@@ -255,7 +343,6 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   if (!in_buf) return;
   const float norm = 1.0f / 32768.0f;
   if (ctx->pre_filter) {
-    /* Apply channel-select filter before resampling */
     for (uint32_t n = 0; n < num_pairs; ++n) {
       liquid_float_complex s;
       __real__ s = (float)iq[n * 2]     * norm;
@@ -274,101 +361,51 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   free(in_buf);
 
   for (unsigned int i = 0; i < n_out; ++i) {
-    /* Apply NCO frequency correction before storing sample */
+    /* NCO frequency correction */
+    liquid_float_complex corrected;
     {
       const float cp = cosf(ctx->nco_phase);
       const float sp = sinf(ctx->nco_phase);
       const float re = __real__ ctx->resamp_out[i];
       const float im = __imag__ ctx->resamp_out[i];
-      __real__ ctx->sym_buf[ctx->sym_buf_fill] = re * cp + im * sp;
-      __imag__ ctx->sym_buf[ctx->sym_buf_fill] = im * cp - re * sp;
+      __real__ corrected = re * cp + im * sp;
+      __imag__ corrected = im * cp - re * sp;
       ctx->nco_phase += ctx->nco_freq;
       if (ctx->nco_phase >  3.14159265f) ctx->nco_phase -= 6.28318530f;
       if (ctx->nco_phase < -3.14159265f) ctx->nco_phase += 6.28318530f;
     }
-    ctx->sym_buf_fill++;
-    if (ctx->sym_buf_fill < (uint32_t)GMSK_K) continue;
-    ctx->sym_buf_fill = 0;
 
-    float energy = 0.0f;
-    for (int s = 0; s < GMSK_K; ++s) {
-      const float re = __real__ ctx->sym_buf[s];
-      const float im = __imag__ ctx->sym_buf[s];
-      energy += re * re + im * im;
-    }
-    const float per_sample_energy = energy / (float)GMSK_K;
+    /* ---- Timing calibration: collect 2k samples, find best offset ---- */
+    if (!ctx->timing_calibrated) {
+      ctx->timing_align_buf[ctx->timing_align_fill++] = corrected;
+      if (ctx->timing_align_fill < 2u * (uint32_t)GMSK_K) continue;
 
-    /* Noise floor EMA: only update during quiet periods to avoid signal inflating it */
-    if (per_sample_energy < ctx->noise_floor * ctx->squelch_ratio) {
-      ctx->noise_floor = ctx->noise_floor * (1.0f - GMSK_NOISE_ALPHA)
-                       + per_sample_energy * GMSK_NOISE_ALPHA;
-    }
-    if (ctx->noise_floor < 1e-12f) ctx->noise_floor = 1e-12f;
-
-    /* Fast signal energy EMA */
-    ctx->signal_energy = ctx->signal_energy * (1.0f - GMSK_ENERGY_ALPHA)
-                       + per_sample_energy * GMSK_ENERGY_ALPHA;
-
-    /* Gate: open when signal energy exceeds noise floor by squelch_ratio */
-    const int above = (ctx->squelch_ratio > 0.0f)
-                    && (ctx->signal_energy > ctx->noise_floor * ctx->squelch_ratio);
-    if (above) {
-      ctx->hold_syms = GMSK_HOLD_SYMS;
-    } else if (ctx->hold_syms > 0) {
-      ctx->hold_syms--;
-    }
-    const int prev_gate = ctx->gate_open;
-    ctx->gate_open = above | (ctx->hold_syms > 0);
-
-    if (!ctx->gate_open) {
-      /* Gate closed: flush on falling edge, reset timing sync, then discard */
-      if (prev_gate) {
-        if (ctx->bit_count >= GMSK_MIN_BITS)
-          emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                    freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
-        /* Re-acquire timing from scratch for the next frame */
-        if (ctx->timing_sync) symsync_crcf_reset(ctx->timing_sync);
+      /* Score each of the k candidate offsets */
+      uint32_t best_offset = 0;
+      float    best_score  = -1.0f;
+      for (uint32_t o = 0; o < (uint32_t)GMSK_K; ++o) {
+        const float sc = timing_score(ctx->timing_align_buf, o);
+        if (sc > best_score) { best_score = sc; best_offset = o; }
       }
-      ctx->bit_count = 0;
-      memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
+
+      /* Process the first timed symbol at best_offset */
+      process_symbol(ctx, ctx->timing_align_buf + best_offset,
+                     freq_hz, unix_ms, emit_fn, user_data);
+
+      /* Pre-load remaining tail into sym_buf for the next symbol period */
+      const uint32_t remaining = (uint32_t)GMSK_K - best_offset;
+      for (uint32_t r = 0; r < remaining; ++r)
+        ctx->sym_buf[r] = ctx->timing_align_buf[best_offset + (uint32_t)GMSK_K + r];
+      ctx->sym_buf_fill  = remaining;
+      ctx->timing_calibrated = 1;
       continue;
     }
 
-    /* Gate open: update AFC from FM discriminator mean over this symbol */
-    {
-      float fm_sum = 0.0f;
-      for (int s = 1; s < GMSK_K; ++s) {
-        const float re0 = __real__ ctx->sym_buf[s - 1];
-        const float im0 = __imag__ ctx->sym_buf[s - 1];
-        const float re1 = __real__ ctx->sym_buf[s];
-        const float im1 = __imag__ ctx->sym_buf[s];
-        const float cross = im1 * re0 - re1 * im0;
-        const float dot   = re1 * re0 + im1 * im0;
-        const float mag2  = cross * cross + dot * dot;
-        fm_sum += (mag2 > 1e-12f) ? (cross / sqrtf(mag2)) : 0.0f;
-      }
-      const float fm_mean = fm_sum / (float)(GMSK_K - 1);
-      ctx->freq_est = ctx->freq_est * (1.0f - GMSK_AFC_ALPHA) + fm_mean * GMSK_AFC_ALPHA;
-      ctx->nco_freq = -ctx->freq_est;
-      if (ctx->nco_freq >  GMSK_AFC_MAX_RAD) ctx->nco_freq =  GMSK_AFC_MAX_RAD;
-      if (ctx->nco_freq < -GMSK_AFC_MAX_RAD) ctx->nco_freq = -GMSK_AFC_MAX_RAD;
-    }
-
-    /* Timing-recovered demodulation via polyphase synchronizer.
-       symsync_crcf applies the GMSK matched receive filter and tracks the
-       optimal sampling point; it outputs 0 or 1 symbols per k input samples.
-       Bit decision: sign of real part (positive = '1', negative = '0'). */
-    if (ctx->timing_sync) {
-      liquid_float_complex ts_out[GMSK_K];
-      unsigned int n_ts = 0;
-      symsync_crcf_execute(ctx->timing_sync, ctx->sym_buf, GMSK_K, ts_out, &n_ts);
-      for (unsigned int j = 0; j < n_ts; ++j)
-        push_bit(ctx->bit_buf, &ctx->bit_count, __real__ ts_out[j] > 0.0f ? 1u : 0u);
-    }
-
-    if (ctx->bit_count >= GMSK_MAX_BITS)
-      emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+    /* ---- Normal mode ---- */
+    ctx->sym_buf[ctx->sym_buf_fill++] = corrected;
+    if (ctx->sym_buf_fill < (uint32_t)GMSK_K) continue;
+    ctx->sym_buf_fill = 0;
+    process_symbol(ctx, ctx->sym_buf, freq_hz, unix_ms, emit_fn, user_data);
   }
 }
 
