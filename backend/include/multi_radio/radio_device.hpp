@@ -21,6 +21,7 @@ class IRadioDevice {
   virtual bool SetSampleRateHz(uint32_t sample_rate_hz, std::string* error) = 0;
   virtual bool SetHardwareBandwidthHz(uint32_t bandwidth_hz, std::string* error) = 0;
   virtual bool SetGainTenthdB(int gain_tenth_db, std::string* error) = 0;
+  virtual bool SetPpmCorrection(int ppm, std::string* error) = 0;
   virtual bool ReadIq(IQSampleBlock* out, std::string* error) = 0;
 };
 

@@ -162,6 +162,21 @@ class RtlSdrDevice final : public IRadioDevice {
     return true;
   }
 
+  bool SetPpmCorrection(int ppm, std::string* error) override {
+    if (device_ == nullptr) {
+      if (error != nullptr) *error = "device not opened";
+      return false;
+    }
+    const int rc = rtlsdr_set_freq_correction(device_, ppm);
+    if (rc != 0 && rc != -2) {  /* -2 = same value, not an error */
+      if (error != nullptr)
+        *error = "rtlsdr_set_freq_correction failed rc=" + std::to_string(rc);
+      return false;
+    }
+    if (error != nullptr) error->clear();
+    return true;
+  }
+
   bool ReadIq(IQSampleBlock* out, std::string* error) override {
     if (device_ == nullptr) {
       if (error != nullptr) {

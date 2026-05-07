@@ -112,11 +112,6 @@ typedef struct {
   float    nco_freq;       /* current frequency correction, rad/sample (resampled) */
   float    freq_est;       /* slow EMA of frequency error estimate */
 
-  /* Timing offset search: tries GMSK_K sample offsets, picks highest |FM disc| */
-  liquid_float_complex timing_align_buf[2 * GMSK_K];
-  uint32_t timing_align_fill;
-  int      timing_calibrated;  /* 0 = collecting, 1 = offset found */
-
   uint8_t  bit_buf[GMSK_MAX_BITS / 8 + 1];
   uint32_t bit_count;
 } GmskCtx;
@@ -144,11 +139,9 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->noise_floor    = GMSK_NOISE_INIT;
   ctx->hold_syms      = 0;
   ctx->gate_open      = 0;
-  ctx->nco_phase         = 0.0f;
-  ctx->nco_freq          = 0.0f;
-  ctx->freq_est          = 0.0f;
-  ctx->timing_calibrated = 0;
-  ctx->timing_align_fill = 0;
+  ctx->nco_phase = 0.0f;
+  ctx->nco_freq  = 0.0f;
+  ctx->freq_est  = 0.0f;
 
   /* Channel-select pre-filter: 4th-order Butterworth LP at 2×baud_rate.
      Reduces noise bandwidth and adjacent-channel interference before resampling.
@@ -236,7 +229,7 @@ const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
 /* ------------------------------------------------------------------ */
 /* Per-symbol processing: energy gate, AFC update, demodulation        */
-/* Also resets timing_calibrated when gate closes.                     */
+/* Resets bit_buf when gate closes.                                    */
 /* ------------------------------------------------------------------ */
 
 static void process_symbol(GmskCtx* ctx, liquid_float_complex* sym,
@@ -274,9 +267,6 @@ static void process_symbol(GmskCtx* ctx, liquid_float_complex* sym,
                 freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
     ctx->bit_count = 0;
     memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
-    /* Reset timing search so next burst calibrates from fresh samples */
-    ctx->timing_calibrated = 0;
-    ctx->timing_align_fill = 0;
     return;
   }
 
@@ -302,21 +292,6 @@ static void process_symbol(GmskCtx* ctx, liquid_float_complex* sym,
   if (ctx->bit_count >= GMSK_MAX_BITS)
     emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
               freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
-}
-
-/* Compute sum of |FM discriminator| for k samples starting at buf[offset].
-   Used to score each candidate timing offset. */
-static float timing_score(const liquid_float_complex* buf, uint32_t offset) {
-  float score = 0.0f;
-  for (int s = 1; s < GMSK_K; ++s) {
-    const float re0 = __real__ buf[offset + s - 1], im0 = __imag__ buf[offset + s - 1];
-    const float re1 = __real__ buf[offset + s],     im1 = __imag__ buf[offset + s];
-    const float cross = im1 * re0 - re1 * im0;
-    const float dot   = re1 * re0 + im1 * im0;
-    const float mag2  = cross * cross + dot * dot;
-    score += (mag2 > 1e-12f) ? fabsf(cross / sqrtf(mag2)) : 0.0f;
-  }
-  return score;
 }
 
 void mr_plugin_process_iq(MrPluginCtx* raw,
@@ -362,47 +337,18 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
   for (unsigned int i = 0; i < n_out; ++i) {
     /* NCO frequency correction */
-    liquid_float_complex corrected;
     {
       const float cp = cosf(ctx->nco_phase);
       const float sp = sinf(ctx->nco_phase);
       const float re = __real__ ctx->resamp_out[i];
       const float im = __imag__ ctx->resamp_out[i];
-      __real__ corrected = re * cp + im * sp;
-      __imag__ corrected = im * cp - re * sp;
+      __real__ ctx->sym_buf[ctx->sym_buf_fill] = re * cp + im * sp;
+      __imag__ ctx->sym_buf[ctx->sym_buf_fill] = im * cp - re * sp;
       ctx->nco_phase += ctx->nco_freq;
       if (ctx->nco_phase >  3.14159265f) ctx->nco_phase -= 6.28318530f;
       if (ctx->nco_phase < -3.14159265f) ctx->nco_phase += 6.28318530f;
     }
-
-    /* ---- Timing calibration: collect 2k samples, find best offset ---- */
-    if (!ctx->timing_calibrated) {
-      ctx->timing_align_buf[ctx->timing_align_fill++] = corrected;
-      if (ctx->timing_align_fill < 2u * (uint32_t)GMSK_K) continue;
-
-      /* Score each of the k candidate offsets */
-      uint32_t best_offset = 0;
-      float    best_score  = -1.0f;
-      for (uint32_t o = 0; o < (uint32_t)GMSK_K; ++o) {
-        const float sc = timing_score(ctx->timing_align_buf, o);
-        if (sc > best_score) { best_score = sc; best_offset = o; }
-      }
-
-      /* Process the first timed symbol at best_offset */
-      process_symbol(ctx, ctx->timing_align_buf + best_offset,
-                     freq_hz, unix_ms, emit_fn, user_data);
-
-      /* Pre-load remaining tail into sym_buf for the next symbol period */
-      const uint32_t remaining = (uint32_t)GMSK_K - best_offset;
-      for (uint32_t r = 0; r < remaining; ++r)
-        ctx->sym_buf[r] = ctx->timing_align_buf[best_offset + (uint32_t)GMSK_K + r];
-      ctx->sym_buf_fill  = remaining;
-      ctx->timing_calibrated = 1;
-      continue;
-    }
-
-    /* ---- Normal mode ---- */
-    ctx->sym_buf[ctx->sym_buf_fill++] = corrected;
+    ctx->sym_buf_fill++;
     if (ctx->sym_buf_fill < (uint32_t)GMSK_K) continue;
     ctx->sym_buf_fill = 0;
     process_symbol(ctx, ctx->sym_buf, freq_hz, unix_ms, emit_fn, user_data);

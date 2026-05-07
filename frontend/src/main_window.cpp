@@ -1416,6 +1416,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   global_layout->addRow("Notch width", center_notch_width_spin_);
   global_layout->addRow("LO offset", lo_offset_checkbox_);
   global_layout->addRow("LO offset Hz", lo_offset_spin_);
+  ppm_correction_spin_ = new QSpinBox(global_tab);
+  ppm_correction_spin_->setRange(-200, 200);
+  ppm_correction_spin_->setSingleStep(1);
+  ppm_correction_spin_->setValue(0);
+  ppm_correction_spin_->setSuffix(" ppm");
+  ppm_correction_spin_->setToolTip(
+      "Frekvenskorrigering för RTL-SDR-kristallen.\n"
+      "Positiva värden höjer mottagarfrekvensen; negativa sänker.\n"
+      "Justera tills AIS-signalens bärfrekvens stämmer.");
+  global_layout->addRow("PPM-korrigering", ppm_correction_spin_);
   spectrum_source_combo_ = new QComboBox(global_tab);
   spectrum_source_combo_->addItem("Demodulated", QVariant::fromValue(0));
   spectrum_source_combo_->addItem("Receiver spectrum", QVariant::fromValue(1));
@@ -1624,6 +1634,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(lo_offset_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
     lo_offset_spin_->setEnabled(enabled);
   });
+  connect(ppm_correction_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, apply_on_spin);
 
   auto update_scan_noise_gate = [this]() {
     if (scan_range_viz_ == nullptr) return;
@@ -1958,6 +1969,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_gmsk_postprocessor(gmsk_postproc_combo_
       ? gmsk_postproc_combo_->currentData().toString().toStdString() : "");
   config.set_gmsk_nrzi_invert(gmsk_nrzi_invert_checkbox_ && gmsk_nrzi_invert_checkbox_->isChecked());
+  config.set_ppm_correction(ppm_correction_spin_ ? ppm_correction_spin_->value() : 0);
   config.set_scan_list_locked_channel_index(
       static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
   const double default_squelch_db =

@@ -170,6 +170,7 @@ class MainWindow : public QMainWindow {
   QSpinBox* center_notch_width_spin_ = nullptr;
   QCheckBox* lo_offset_checkbox_ = nullptr;
   QSpinBox* lo_offset_spin_ = nullptr;
+  QSpinBox* ppm_correction_spin_ = nullptr;
 
   QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* spectrum_source_combo_ = nullptr;

@@ -505,6 +505,7 @@ void ReceiverWorker::IngestLoop() {
   uint32_t configured_sample_rate_hz = 0;
   uint32_t configured_hardware_bandwidth_hz = 0;
   int configured_gain_tenth_db = std::numeric_limits<int>::min();
+  int configured_ppm_correction = std::numeric_limits<int>::min();
   bool device_opened = false;
 
   while (running_.load()) {
@@ -582,6 +583,14 @@ void ReceiverWorker::IngestLoop() {
           continue;
         }
         configured_hardware_bandwidth_hz = config.hardware_bandwidth_hz;
+      }
+
+      if (configured_ppm_correction != config.ppm_correction) {
+        if (!device_->SetPpmCorrection(config.ppm_correction, &error)) {
+          PublishEvent(EventKind::kError, FormatRuntimeError("set ppm correction (ingest)", error),
+                       ch.frequency_hz);
+        }
+        configured_ppm_correction = config.ppm_correction;
       }
 
       const int desired_gain_tenth_db = (ch.modulation == Modulation::kWfm) ? 0 : -1;

@@ -144,6 +144,7 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.gmsk_decoder        = config.gmsk_decoder();
   out.gmsk_postprocessor  = config.gmsk_postprocessor();
   out.gmsk_nrzi_invert    = config.gmsk_nrzi_invert();
+  out.ppm_correction      = config.ppm_correction();
   out.rnnoise_enabled = config.rnnoise_enabled();
   out.rnnoise_strength = config.rnnoise_strength();
   return out;
@@ -180,6 +181,7 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_gmsk_decoder(config.gmsk_decoder);
   out->set_gmsk_postprocessor(config.gmsk_postprocessor);
   out->set_gmsk_nrzi_invert(config.gmsk_nrzi_invert);
+  out->set_ppm_correction(config.ppm_correction);
   out->set_rnnoise_enabled(config.rnnoise_enabled);
   out->set_rnnoise_strength(config.rnnoise_strength);
   out->clear_frequency_list_hz();
