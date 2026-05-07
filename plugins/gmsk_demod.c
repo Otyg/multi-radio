@@ -89,7 +89,7 @@ typedef struct {
   uint32_t sample_rate_hz;
 
   msresamp_crcf resampler;
-  gmskdem       demodulator;
+  symsync_crcf  timing_sync;  /* polyphase timing recovery, replaces gmskdem */
   iirfilt_cccf  pre_filter;   /* channel-select IIR LP before resampling */
 
   liquid_float_complex* sym_buf;
@@ -117,9 +117,9 @@ typedef struct {
 } GmskCtx;
 
 static void gmsk_teardown(GmskCtx* ctx) {
-  if (ctx->resampler)    { msresamp_crcf_destroy(ctx->resampler);  ctx->resampler   = NULL; }
-  if (ctx->demodulator)  { gmskdem_destroy(ctx->demodulator);       ctx->demodulator = NULL; }
-  if (ctx->pre_filter)   { iirfilt_cccf_destroy(ctx->pre_filter);   ctx->pre_filter  = NULL; }
+  if (ctx->resampler)    { msresamp_crcf_destroy(ctx->resampler);    ctx->resampler    = NULL; }
+  if (ctx->timing_sync)  { symsync_crcf_destroy(ctx->timing_sync);  ctx->timing_sync  = NULL; }
+  if (ctx->pre_filter)   { iirfilt_cccf_destroy(ctx->pre_filter);   ctx->pre_filter   = NULL; }
   free(ctx->sym_buf);    ctx->sym_buf     = NULL;
   free(ctx->resamp_out); ctx->resamp_out  = NULL;
   ctx->resamp_out_cap = 0;
@@ -157,8 +157,12 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->resampler = msresamp_crcf_create(rate, 60.0f);
   if (!ctx->resampler) return 0;
 
-  ctx->demodulator = gmskdem_create(GMSK_K, GMSK_M, ctx->bt);
-  if (!ctx->demodulator) return 0;
+  /* Polyphase timing-recovery synchronizer with GMSK matched receive filter.
+     npfb=32 polyphase banks give 1/32-symbol timing resolution. */
+  ctx->timing_sync = symsync_crcf_create_rnyquist(
+      LIQUID_FIRFILT_GMSKRX, GMSK_K, GMSK_M, ctx->bt, 32);
+  if (!ctx->timing_sync) return 0;
+  symsync_crcf_set_lf_bw(ctx->timing_sync, 0.02f); /* loop filter bandwidth */
 
   ctx->sym_buf = (liquid_float_complex*)calloc(GMSK_K, sizeof(liquid_float_complex));
   if (!ctx->sym_buf) return 0;
@@ -222,7 +226,7 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
 
 static const MrPluginMeta kMeta = {
   "gmsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,
-  "GMSK demodulator (libliquid gmskdem + msresamp_crcf)"
+  "GMSK demodulator (libliquid symsync_crcf + msresamp_crcf)"
 , MR_PLUGIN_ROLE_DEMODULATOR
 };
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
@@ -317,10 +321,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->gate_open = above | (ctx->hold_syms > 0);
 
     if (!ctx->gate_open) {
-      /* Gate closed: flush on falling edge, then discard */
-      if (prev_gate && ctx->bit_count >= GMSK_MIN_BITS) {
-        emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                  freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+      /* Gate closed: flush on falling edge, reset timing sync, then discard */
+      if (prev_gate) {
+        if (ctx->bit_count >= GMSK_MIN_BITS)
+          emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
+                    freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+        /* Re-acquire timing from scratch for the next frame */
+        if (ctx->timing_sync) symsync_crcf_reset(ctx->timing_sync);
       }
       ctx->bit_count = 0;
       memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
@@ -335,24 +342,29 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         const float im0 = __imag__ ctx->sym_buf[s - 1];
         const float re1 = __real__ ctx->sym_buf[s];
         const float im1 = __imag__ ctx->sym_buf[s];
-        /* cross / |z1||z0| = sin(Δphase) ≈ Δphase (instantaneous frequency) */
         const float cross = im1 * re0 - re1 * im0;
         const float dot   = re1 * re0 + im1 * im0;
         const float mag2  = cross * cross + dot * dot;
         fm_sum += (mag2 > 1e-12f) ? (cross / sqrtf(mag2)) : 0.0f;
       }
       const float fm_mean = fm_sum / (float)(GMSK_K - 1);
-      /* Integrate: mean FM output = carrier frequency offset */
       ctx->freq_est = ctx->freq_est * (1.0f - GMSK_AFC_ALPHA) + fm_mean * GMSK_AFC_ALPHA;
       ctx->nco_freq = -ctx->freq_est;
       if (ctx->nco_freq >  GMSK_AFC_MAX_RAD) ctx->nco_freq =  GMSK_AFC_MAX_RAD;
       if (ctx->nco_freq < -GMSK_AFC_MAX_RAD) ctx->nco_freq = -GMSK_AFC_MAX_RAD;
     }
 
-    /* Demodulate */
-    unsigned int bit = 0;
-    gmskdem_demodulate(ctx->demodulator, ctx->sym_buf, &bit);
-    push_bit(ctx->bit_buf, &ctx->bit_count, bit & 1u);
+    /* Timing-recovered demodulation via polyphase synchronizer.
+       symsync_crcf applies the GMSK matched receive filter and tracks the
+       optimal sampling point; it outputs 0 or 1 symbols per k input samples.
+       Bit decision: sign of real part (positive = '1', negative = '0'). */
+    if (ctx->timing_sync) {
+      liquid_float_complex ts_out[GMSK_K];
+      unsigned int n_ts = 0;
+      symsync_crcf_execute(ctx->timing_sync, ctx->sym_buf, GMSK_K, ts_out, &n_ts);
+      for (unsigned int j = 0; j < n_ts; ++j)
+        push_bit(ctx->bit_buf, &ctx->bit_count, __real__ ts_out[j] > 0.0f ? 1u : 0u);
+    }
 
     if (ctx->bit_count >= GMSK_MAX_BITS)
       emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
