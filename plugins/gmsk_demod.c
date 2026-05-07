@@ -36,6 +36,10 @@
 #define GMSK_ENERGY_ALPHA   0.10f  /* signal energy EMA alpha (~10 sym time constant) */
 #define GMSK_NOISE_INIT     1e-4f  /* initial noise floor estimate */
 
+/* AFC (Automatic Frequency Correction) */
+#define GMSK_AFC_ALPHA      0.005f /* frequency error EMA alpha (~200 sym time constant) */
+#define GMSK_AFC_MAX_RAD    0.30f  /* max correction in rad/sample of resampled signal */
+
 /* ------------------------------------------------------------------ */
 /* Shared bit-buffer helpers                                            */
 /* ------------------------------------------------------------------ */
@@ -102,6 +106,11 @@ typedef struct {
   uint32_t hold_syms;      /* symbols remaining in hold-off after energy drops */
   int      gate_open;      /* 1 = demodulating, 0 = gated off */
 
+  /* AFC: carrier frequency offset correction */
+  float    nco_phase;      /* current NCO phase accumulator, radians */
+  float    nco_freq;       /* current frequency correction, rad/sample (resampled) */
+  float    freq_est;       /* slow EMA of frequency error estimate */
+
   uint8_t  bit_buf[GMSK_MAX_BITS / 8 + 1];
   uint32_t bit_count;
 } GmskCtx;
@@ -128,6 +137,9 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->noise_floor    = GMSK_NOISE_INIT;
   ctx->hold_syms      = 0;
   ctx->gate_open      = 0;
+  ctx->nco_phase      = 0.0f;
+  ctx->nco_freq       = 0.0f;
+  ctx->freq_est       = 0.0f;
 
   const float rate = (float)ctx->baud_rate * GMSK_K / (float)sr;
   ctx->resampler = msresamp_crcf_create(rate, 60.0f);
@@ -236,7 +248,19 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   free(in_buf);
 
   for (unsigned int i = 0; i < n_out; ++i) {
-    ctx->sym_buf[ctx->sym_buf_fill++] = ctx->resamp_out[i];
+    /* Apply NCO frequency correction before storing sample */
+    {
+      const float cp = cosf(ctx->nco_phase);
+      const float sp = sinf(ctx->nco_phase);
+      const float re = __real__ ctx->resamp_out[i];
+      const float im = __imag__ ctx->resamp_out[i];
+      __real__ ctx->sym_buf[ctx->sym_buf_fill] = re * cp + im * sp;
+      __imag__ ctx->sym_buf[ctx->sym_buf_fill] = im * cp - re * sp;
+      ctx->nco_phase += ctx->nco_freq;
+      if (ctx->nco_phase >  3.14159265f) ctx->nco_phase -= 6.28318530f;
+      if (ctx->nco_phase < -3.14159265f) ctx->nco_phase += 6.28318530f;
+    }
+    ctx->sym_buf_fill++;
     if (ctx->sym_buf_fill < (uint32_t)GMSK_K) continue;
     ctx->sym_buf_fill = 0;
 
@@ -281,7 +305,29 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       continue;
     }
 
-    /* Gate open: demodulate */
+    /* Gate open: update AFC from FM discriminator mean over this symbol */
+    {
+      float fm_sum = 0.0f;
+      for (int s = 1; s < GMSK_K; ++s) {
+        const float re0 = __real__ ctx->sym_buf[s - 1];
+        const float im0 = __imag__ ctx->sym_buf[s - 1];
+        const float re1 = __real__ ctx->sym_buf[s];
+        const float im1 = __imag__ ctx->sym_buf[s];
+        /* cross / |z1||z0| = sin(Δphase) ≈ Δphase (instantaneous frequency) */
+        const float cross = im1 * re0 - re1 * im0;
+        const float dot   = re1 * re0 + im1 * im0;
+        const float mag2  = cross * cross + dot * dot;
+        fm_sum += (mag2 > 1e-12f) ? (cross / sqrtf(mag2)) : 0.0f;
+      }
+      const float fm_mean = fm_sum / (float)(GMSK_K - 1);
+      /* Integrate: mean FM output = carrier frequency offset */
+      ctx->freq_est = ctx->freq_est * (1.0f - GMSK_AFC_ALPHA) + fm_mean * GMSK_AFC_ALPHA;
+      ctx->nco_freq = -ctx->freq_est;
+      if (ctx->nco_freq >  GMSK_AFC_MAX_RAD) ctx->nco_freq =  GMSK_AFC_MAX_RAD;
+      if (ctx->nco_freq < -GMSK_AFC_MAX_RAD) ctx->nco_freq = -GMSK_AFC_MAX_RAD;
+    }
+
+    /* Demodulate */
     unsigned int bit = 0;
     gmskdem_demodulate(ctx->demodulator, ctx->sym_buf, &bit);
     push_bit(ctx->bit_buf, &ctx->bit_count, bit & 1u);

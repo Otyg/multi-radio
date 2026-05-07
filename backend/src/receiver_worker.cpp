@@ -491,6 +491,7 @@ void ReceiverWorker::PushPluginConfig() {
   plugin_host_->SetParam("baud_rate",        std::to_string(cfg.gmsk_baud_rate));
   plugin_host_->SetParam("bt",               std::to_string(cfg.gmsk_bt));
   plugin_host_->SetParam("modulation_index", std::to_string(cfg.gmsk_modulation_index));
+  plugin_host_->SetParam("invert",           cfg.gmsk_nrzi_invert ? "1" : "0");
   plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
   plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
   std::string demod_name;

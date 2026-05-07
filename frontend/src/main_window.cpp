@@ -1170,6 +1170,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_postproc_combo_->addItem("HDLC",                 QVariant(QString("hdlc_postproc")));
   gmsk_postproc_combo_->setToolTip("Postprocessing att kedja efter avkodaren");
   gmsk_row->addWidget(gmsk_postproc_combo_);
+  gmsk_nrzi_invert_checkbox_ = new QCheckBox("NRZI invert", gmsk_params_widget_);
+  gmsk_nrzi_invert_checkbox_->setToolTip(
+      "Invertera NRZI-konventionen: transition='0', no-transition='1'.\n"
+      "Aktivera för AIS (ITU-R M.1371) och liknande protokoll.");
+  gmsk_row->addWidget(gmsk_nrzi_invert_checkbox_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
 
@@ -1344,6 +1349,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
   connect(gmsk_postproc_combo_,  QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
+  connect(gmsk_nrzi_invert_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
@@ -1951,6 +1957,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       ? gmsk_decoder_combo_->currentData().toString().toStdString() : "");
   config.set_gmsk_postprocessor(gmsk_postproc_combo_
       ? gmsk_postproc_combo_->currentData().toString().toStdString() : "");
+  config.set_gmsk_nrzi_invert(gmsk_nrzi_invert_checkbox_ && gmsk_nrzi_invert_checkbox_->isChecked());
   config.set_scan_list_locked_channel_index(
       static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
   const double default_squelch_db =
