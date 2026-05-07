@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QEvent>
+#include <QFontDatabase>
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -1169,7 +1170,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_postproc_combo_ = new QComboBox(gmsk_params_widget_);
   gmsk_postproc_combo_->addItem("Ingen postprocessing", QVariant(QString("")));
   gmsk_postproc_combo_->addItem("HDLC",                 QVariant(QString("hdlc_postproc")));
-  gmsk_postproc_combo_->setToolTip("Postprocessing att kedja efter avkodaren");
+  gmsk_postproc_combo_->addItem("AIS (HDLC+M.1371)",    QVariant(QString("ais_decoder")));
+  gmsk_postproc_combo_->setToolTip(
+      "Postprocessing att kedja efter avkodaren.\n"
+      "AIS: avkodar HDLC-ramar som AIS-meddelanden (ITU-R M.1371-5).");
   gmsk_row->addWidget(gmsk_postproc_combo_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
@@ -1178,6 +1182,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
   fixed_layout->addRow("GMSK", gmsk_params_widget_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
+
+  fixed_hdlc_log_ = new QPlainTextEdit(fixed_tab);
+  fixed_hdlc_log_->setReadOnly(true);
+  fixed_hdlc_log_->setMaximumBlockCount(1000);
+  fixed_hdlc_log_->setMinimumHeight(90);
+  {
+    QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    f.setPointSizeF(f.pointSizeF() * 0.85);
+    fixed_hdlc_log_->setFont(f);
+  }
+  fixed_hdlc_log_->setPlaceholderText("HDLC-ramar (CRC OK) visas här");
+  fixed_layout->addRow("HDLC", fixed_hdlc_log_);
+
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   // Create scan_range_viz_ here so it can live inside the SCAN_RANGE tab.
@@ -2462,6 +2479,37 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(extra)
                   .arg(bits)
                   .arg(payload));
+    return;
+  }
+
+  // AIS decoded message — append to the fixed-channel HDLC log and main log
+  if (plugin_type == "AIS_POS" || plugin_type == "AIS_STAT" ||
+      plugin_type == "AIS_STAT24" || plugin_type == "AIS_OTHER") {
+    const QString ts    = row.timestamp.toString("HH:mm:ss");
+    const QString mmsi  = fields.value("mmsi").toString();
+    const QString mtype = fields.value("msg_type").toString();
+    if (fixed_hdlc_log_ != nullptr)
+      fixed_hdlc_log_->appendPlainText(
+          QString("[%1] T%2 %3").arg(ts).arg(mtype).arg(payload));
+    AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
+                  .arg(ts)
+                  .arg(receiver_id)
+                  .arg(plugin_type)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(payload));
+    return;
+  }
+
+  // HDLC frame with CRC OK — append to the fixed-channel HDLC log
+  if (plugin_type == "HDLC_FRAME") {
+    if (fixed_hdlc_log_ != nullptr) {
+      const QString bc = fields.value("byte_count").toString();
+      fixed_hdlc_log_->appendPlainText(
+          QString("[%1] %2 B: %3")
+              .arg(row.timestamp.toString("HH:mm:ss"))
+              .arg(bc)
+              .arg(payload));
+    }
     return;
   }
 

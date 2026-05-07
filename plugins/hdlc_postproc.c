@@ -208,8 +208,27 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                     const int crc_ok = check_frame(ctx);
                     if (crc_ok >= 0) {
                         ctx->stats_total++;
-                        if (crc_ok) ctx->stats_ok++;
-                        else        ctx->stats_fail++;
+                        if (crc_ok) {
+                            ctx->stats_ok++;
+                            /* Emit valid frame — payload is frame bytes minus 2-byte FCS */
+                            const uint32_t data_len = ctx->frame_len - 2;
+                            char* hex = (char*)malloc(data_len * 2 + 1);
+                            if (hex) {
+                                uint32_t hi;
+                                for (hi = 0; hi < data_len; ++hi)
+                                    snprintf(hex + hi * 2, 3, "%02X",
+                                             (unsigned)ctx->frame_buf[hi]);
+                                char kv[64];
+                                snprintf(kv, sizeof(kv),
+                                         "{\"byte_count\":\"%u\"}", (unsigned)data_len);
+                                if (emit_fn)
+                                    emit_fn("HDLC_FRAME", hex, freq_hz, unix_ms,
+                                            kv, user_data);
+                                free(hex);
+                            }
+                        } else {
+                            ctx->stats_fail++;
+                        }
                     }
                 }
 

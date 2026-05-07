@@ -140,6 +140,7 @@ class MainWindow : public QMainWindow {
   QWidget*        gmsk_params_widget_    = nullptr;
   QComboBox*      gmsk_decoder_combo_    = nullptr;
   QComboBox*      gmsk_postproc_combo_   = nullptr;
+  QPlainTextEdit* fixed_hdlc_log_        = nullptr;
   QCheckBox* fixed_audio_hpf300_checkbox_ = nullptr;
   QCheckBox* fixed_audio_lpf3k5_checkbox_ = nullptr;
   QCheckBox* fixed_audio_lpf4k5_checkbox_ = nullptr;
