@@ -106,6 +106,10 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->needs_reconfigure = 0;
   gmsk_teardown(ctx);
   ctx->sample_rate_hz = sr;
+  /* Discard stale bits accumulated with old parameters. */
+  ctx->bit_count = 0;
+  memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
+  ctx->idle_sym_count = 0;
 
   const float rate = (float)ctx->baud_rate * GMSK_K / (float)sr;
   ctx->resampler = msresamp_crcf_create(rate, 60.0f);
@@ -278,6 +282,9 @@ static uint32_t build_gauss(float* c, uint32_t max, uint32_t sps, float bt) {
 static void gmsk_reconfigure(GmskCtx* ctx, uint32_t sr) {
   if (sr == ctx->sample_rate_hz && !ctx->needs_reconfigure) return;
   ctx->needs_reconfigure = 0;
+  ctx->bit_count = 0;
+  memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
+  ctx->idle_samples = 0;
   ctx->sample_rate_hz     = sr;
   ctx->samples_per_symbol = sr / ctx->baud_rate;
   if (!ctx->samples_per_symbol) ctx->samples_per_symbol = 1;

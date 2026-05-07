@@ -42,6 +42,7 @@ class PluginHost {
   void SetParam(const std::string& key, const std::string& value);
   // Select which decoder plugin to chain after demodulators (empty = none).
   void SetActiveDecoder(const std::string& plugin_name);
+  void SetActiveDemodulator(const std::string& plugin_name);
 
  private:
   // Function-pointer typedefs matching the C API signatures.
@@ -80,6 +81,7 @@ class PluginHost {
   mutable std::mutex mu_;
   std::vector<LoadedPlugin> plugins_;
   std::string active_decoder_name_;
+  std::string active_demodulator_name_;
 };
 
 }  // namespace multi_radio

@@ -1035,6 +1035,17 @@ void ReceiverWorker::ProcessLoop() {
         last_decoder = cur_dec;
         plugin_host_->SetActiveDecoder(cur_dec);
       }
+      // Only run the demodulator plugin matching the current modulation.
+      Modulation cur_mod;
+      { std::lock_guard<std::mutex> lock(mu_); cur_mod = mode_config_.fixed_modulation; }
+      static Modulation last_mod = Modulation::kNfm;
+      if (cur_mod != last_mod) {
+        last_mod = cur_mod;
+        std::string demod_name;
+        if (cur_mod == Modulation::kFsk)  demod_name = "fsk_demod";
+        if (cur_mod == Modulation::kGmsk) demod_name = "gmsk_demod";
+        plugin_host_->SetActiveDemodulator(demod_name);
+      }
     }
 
     // Plugin IQ processing — runs on every block regardless of mode.

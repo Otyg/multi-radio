@@ -288,6 +288,9 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
     if (plugin.fn_process_iq == nullptr || plugin.ctx == nullptr) continue;
     // Decoder-only plugins are invoked via EmitFromPlugin chaining, not directly.
     if (plugin.role == static_cast<int>(MR_PLUGIN_ROLE_DECODER)) continue;
+    // Skip if a specific demodulator is selected and this isn't it.
+    if (!active_demodulator_name_.empty() &&
+        plugin.info.plugin_name != active_demodulator_name_) continue;
 
     EmitCallbackState state;
     state.callback     = &callback;
@@ -393,6 +396,11 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
 void PluginHost::SetActiveDecoder(const std::string& plugin_name) {
   std::lock_guard<std::mutex> lock(mu_);
   active_decoder_name_ = plugin_name;
+}
+
+void PluginHost::SetActiveDemodulator(const std::string& plugin_name) {
+  std::lock_guard<std::mutex> lock(mu_);
+  active_demodulator_name_ = plugin_name;
 }
 
 void PluginHost::SetParam(const std::string& key, const std::string& value) {
