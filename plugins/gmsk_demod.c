@@ -24,7 +24,7 @@
 #define GMSK_DEFAULT_BAUD_RATE 9600
 #define GMSK_DEFAULT_BT        0.3f
 #define GMSK_K                 8     /* samples per symbol */
-#define GMSK_M                 3     /* filter delay in symbols */
+#define GMSK_M                 5     /* filter delay in symbols; 5 gives better BER for BT 0.3-0.5 */
 #define GMSK_MAX_BITS          1024
 #define GMSK_MIN_BITS          8
 #define GMSK_IDLE_GAP_SYMS     8
@@ -90,6 +90,7 @@ typedef struct {
 
   msresamp_crcf resampler;
   gmskdem       demodulator;
+  iirfilt_cccf  pre_filter;   /* channel-select IIR LP before resampling */
 
   liquid_float_complex* sym_buf;
   uint32_t sym_buf_fill;
@@ -118,6 +119,7 @@ typedef struct {
 static void gmsk_teardown(GmskCtx* ctx) {
   if (ctx->resampler)    { msresamp_crcf_destroy(ctx->resampler);  ctx->resampler   = NULL; }
   if (ctx->demodulator)  { gmskdem_destroy(ctx->demodulator);       ctx->demodulator = NULL; }
+  if (ctx->pre_filter)   { iirfilt_cccf_destroy(ctx->pre_filter);   ctx->pre_filter  = NULL; }
   free(ctx->sym_buf);    ctx->sym_buf     = NULL;
   free(ctx->resamp_out); ctx->resamp_out  = NULL;
   ctx->resamp_out_cap = 0;
@@ -140,6 +142,16 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->nco_phase      = 0.0f;
   ctx->nco_freq       = 0.0f;
   ctx->freq_est       = 0.0f;
+
+  /* Channel-select pre-filter: 4th-order Butterworth LP at 2×baud_rate.
+     Reduces noise bandwidth and adjacent-channel interference before resampling.
+     Cutoff must stay below 0.45 to avoid aliasing issues. */
+  const float cutoff = 2.0f * (float)ctx->baud_rate / (float)sr;
+  if (cutoff > 0.0f && cutoff < 0.45f) {
+    ctx->pre_filter = iirfilt_cccf_create_prototype(
+        LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
+        4, cutoff, 0.0f, 1.0f, 60.0f);
+  }
 
   const float rate = (float)ctx->baud_rate * GMSK_K / (float)sr;
   ctx->resampler = msresamp_crcf_create(rate, 60.0f);
@@ -238,9 +250,19 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       (liquid_float_complex*)malloc(num_pairs * sizeof(liquid_float_complex));
   if (!in_buf) return;
   const float norm = 1.0f / 32768.0f;
-  for (uint32_t n = 0; n < num_pairs; ++n) {
-    __real__ in_buf[n] = (float)iq[n * 2]     * norm;
-    __imag__ in_buf[n] = (float)iq[n * 2 + 1] * norm;
+  if (ctx->pre_filter) {
+    /* Apply channel-select filter before resampling */
+    for (uint32_t n = 0; n < num_pairs; ++n) {
+      liquid_float_complex s;
+      __real__ s = (float)iq[n * 2]     * norm;
+      __imag__ s = (float)iq[n * 2 + 1] * norm;
+      iirfilt_cccf_execute(ctx->pre_filter, s, &in_buf[n]);
+    }
+  } else {
+    for (uint32_t n = 0; n < num_pairs; ++n) {
+      __real__ in_buf[n] = (float)iq[n * 2]     * norm;
+      __imag__ in_buf[n] = (float)iq[n * 2 + 1] * norm;
+    }
   }
 
   unsigned int n_out = 0;
