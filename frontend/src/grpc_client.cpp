@@ -146,6 +146,31 @@ bool GrpcClient::SetModeConfig(uint32_t receiver_id, const v1::ModeConfig& confi
   return true;
 }
 
+bool GrpcClient::GetHardwareConfig(v1::HardwareConfig* config, std::string* error) {
+  grpc::ClientContext context;
+  AddAuth(&context);
+  SetUnaryDeadline(&context);
+  v1::GetHardwareConfigRequest request;
+  v1::GetHardwareConfigResponse response;
+  grpc::Status status = control_client_->GetHardwareConfig(&context, request, &response);
+  if (!status.ok()) { if (error) *error = status.error_message(); return false; }
+  if (config) *config = response.config();
+  return true;
+}
+
+bool GrpcClient::SetHardwareConfig(const v1::HardwareConfig& config, std::string* error) {
+  grpc::ClientContext context;
+  AddAuth(&context);
+  SetUnaryDeadline(&context);
+  v1::SetHardwareConfigRequest request;
+  *request.mutable_config() = config;
+  v1::SetHardwareConfigResponse response;
+  grpc::Status status = control_client_->SetHardwareConfig(&context, request, &response);
+  if (!status.ok()) { if (error) *error = status.error_message(); return false; }
+  if (!response.ok()) { if (error) *error = response.error(); return false; }
+  return true;
+}
+
 void GrpcClient::StartStreaming() {
   bool expected = false;
   if (!streaming_.compare_exchange_strong(expected, true)) {

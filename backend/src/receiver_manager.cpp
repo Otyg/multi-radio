@@ -115,6 +115,15 @@ bool ReceiverManager::SetModeConfig(uint32_t receiver_id, const ModeConfig& conf
   return worker->SetModeConfig(config, error);
 }
 
+void ReceiverManager::ApplyHardwarePpm(int ppm) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (auto& worker : workers_) {
+    ModeConfig cfg = worker->GetModeConfig();
+    cfg.ppm_correction = ppm;
+    worker->SetModeConfig(cfg, nullptr);
+  }
+}
+
 ReceiverWorker* ReceiverManager::FindWorker(uint32_t receiver_id) {
   auto it = std::find_if(workers_.begin(), workers_.end(), [&](const auto& worker) {
     return worker->Status().receiver_id == receiver_id;

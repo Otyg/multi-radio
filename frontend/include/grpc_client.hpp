@@ -31,6 +31,8 @@ class GrpcClient : public QObject {
   bool StopReceiver(uint32_t receiver_id, std::string* error);
   bool SetMode(uint32_t receiver_id, v1::RadioMode mode, std::string* error);
   bool SetModeConfig(uint32_t receiver_id, const v1::ModeConfig& config, std::string* error);
+  bool GetHardwareConfig(v1::HardwareConfig* config, std::string* error);
+  bool SetHardwareConfig(const v1::HardwareConfig& config, std::string* error);
 
   void StartStreaming();
   void StopStreaming();

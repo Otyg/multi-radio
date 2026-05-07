@@ -29,6 +29,7 @@ class ReceiverWorker {
 
   bool SetMode(RadioMode mode, std::string* error);
   bool SetModeConfig(const ModeConfig& config, std::string* error);
+  ModeConfig GetModeConfig() const;
 
   ReceiverStatus Status() const;
 

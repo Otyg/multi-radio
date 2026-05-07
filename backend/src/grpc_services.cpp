@@ -1,10 +1,15 @@
 #include <grpcpp/grpcpp.h>
 
+#include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 
 #include "multi_radio/auth.hpp"
+#include "multi_radio/hardware_config.hpp"
 #include "multi_radio/receiver_manager.hpp"
 #include "multi_radio/server_app.hpp"
 #include "multi_radio/types.hpp"
@@ -12,6 +17,50 @@
 
 namespace multi_radio {
 namespace {
+
+/* ------------------------------------------------------------------ */
+/* Server-side hardware config persistence                              */
+/* ------------------------------------------------------------------ */
+
+// Writes ppm_correction to hardware.conf (creates parent dir if possible).
+bool SaveHardwarePpm(int ppm, std::string* error) {
+  const std::string path = HardwareConfigPath();
+  // Best-effort mkdir for the directory.
+  const auto slash = path.rfind('/');
+  if (slash != std::string::npos) {
+    const std::string dir = path.substr(0, slash);
+    std::string cmd = "mkdir -p " + dir;
+    std::system(cmd.c_str());  // NOLINT(cert-env33-c)
+  }
+  std::ofstream f(path, std::ios::trunc);
+  if (!f) { if (error) *error = "cannot write " + path; return false; }
+  f << "ppm=" << ppm << "\n";
+  return true;
+}
+
+// In-memory cache so GetHardwareConfig doesn't need to re-read the file.
+struct HardwareConfigCache {
+  std::mutex mu;
+  int ppm = 0;
+  bool loaded = false;
+
+  int GetPpm() {
+    std::lock_guard<std::mutex> lk(mu);
+    if (!loaded) { ppm = LoadHardwarePpm(); loaded = true; }
+    return ppm;
+  }
+  bool SetPpm(int v, std::string* err) {
+    if (!SaveHardwarePpm(v, err)) return false;
+    std::lock_guard<std::mutex> lk(mu);
+    ppm = v; loaded = true;
+    return true;
+  }
+};
+
+HardwareConfigCache& HwCfg() {
+  static HardwareConfigCache instance;
+  return instance;
+}
 
 RadioMode FromProto(v1::RadioMode mode) {
   switch (mode) {
@@ -343,6 +392,31 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     std::string error;
     response->set_ok(plugin_host_->DisablePlugin(request->plugin_name(), &error));
     response->set_error(error);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status SetHardwareConfig(grpc::ServerContext* context,
+                                  const v1::SetHardwareConfigRequest* request,
+                                  v1::SetHardwareConfigResponse* response) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_))
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    std::string error;
+    const bool ok = HwCfg().SetPpm(request->config().ppm_correction(), &error);
+    response->set_ok(ok);
+    response->set_error(error);
+    if (ok) {
+      /* Apply immediately to all running receivers via SetModeConfig PPM field */
+      receiver_manager_->ApplyHardwarePpm(request->config().ppm_correction());
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetHardwareConfig(grpc::ServerContext* context,
+                                  const v1::GetHardwareConfigRequest* /*request*/,
+                                  v1::GetHardwareConfigResponse* response) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_))
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    response->mutable_config()->set_ppm_correction(HwCfg().GetPpm());
     return grpc::Status::OK;
   }
 

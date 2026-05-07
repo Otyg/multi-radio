@@ -1,4 +1,5 @@
 #include "multi_radio/receiver_worker.hpp"
+#include "multi_radio/hardware_config.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -474,6 +475,11 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
   return true;
 }
 
+ModeConfig ReceiverWorker::GetModeConfig() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return mode_config_;
+}
+
 ReceiverStatus ReceiverWorker::Status() const {
   std::lock_guard<std::mutex> lock(mu_);
   return ReceiverStatus{.receiver_id = receiver_id_,
@@ -505,7 +511,9 @@ void ReceiverWorker::IngestLoop() {
   uint32_t configured_sample_rate_hz = 0;
   uint32_t configured_hardware_bandwidth_hz = 0;
   int configured_gain_tenth_db = std::numeric_limits<int>::min();
-  int configured_ppm_correction = std::numeric_limits<int>::min();
+  /* Seed from hardware config file so PPM is applied on first device open,
+     even before the client sends a ModeConfig. */
+  int configured_ppm_correction = LoadHardwarePpm() - 1; /* -1 forces set on first loop */
   bool device_opened = false;
 
   while (running_.load()) {

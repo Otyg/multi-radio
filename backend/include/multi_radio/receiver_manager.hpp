@@ -28,6 +28,7 @@ class ReceiverManager {
 
   bool SetMode(uint32_t receiver_id, RadioMode mode, std::string* error);
   bool SetModeConfig(uint32_t receiver_id, const ModeConfig& config, std::string* error);
+  void ApplyHardwarePpm(int ppm);
 
  private:
   ReceiverWorker* FindWorker(uint32_t receiver_id);

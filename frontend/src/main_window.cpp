@@ -1430,7 +1430,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   ppm_correction_spin_ = new QSpinBox(global_tab);
   ppm_correction_spin_->setRange(-200, 200);
   ppm_correction_spin_->setSingleStep(1);
-  ppm_correction_spin_->setValue(0);
   ppm_correction_spin_->setSuffix(" ppm");
   ppm_correction_spin_->setToolTip(
       "Frekvenskorrigering för RTL-SDR-kristallen.\n"
@@ -1645,7 +1644,15 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(lo_offset_checkbox_, &QCheckBox::toggled, this, [this](bool enabled) {
     lo_offset_spin_->setEnabled(enabled);
   });
-  connect(ppm_correction_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, apply_on_spin);
+  connect(ppm_correction_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int ppm) {
+            v1::HardwareConfig hw;
+            hw.set_ppm_correction(ppm);
+            std::string err;
+            if (client_ && !client_->SetHardwareConfig(hw, &err))
+              AppendLog(QString("PPM save failed: %1").arg(QString::fromStdString(err)));
+            if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+          });
 
   auto update_scan_noise_gate = [this]() {
     if (scan_range_viz_ == nullptr) return;
@@ -1702,6 +1709,16 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::RefreshReceivers() {
+  /* Load persisted hardware config from server and populate PPM spinbox. */
+  {
+    v1::HardwareConfig hw;
+    std::string hw_err;
+    if (client_->GetHardwareConfig(&hw, &hw_err) && ppm_correction_spin_) {
+      QSignalBlocker blocker(ppm_correction_spin_);
+      ppm_correction_spin_->setValue(hw.ppm_correction());
+    }
+  }
+
   std::vector<v1::ReceiverInfo> receivers;
   std::string error;
   if (!client_->ListReceivers(&receivers, &error)) {

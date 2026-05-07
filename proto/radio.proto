@@ -183,6 +183,14 @@ message IqFrame {
   uint64 sample_index = 7;
 }
 
+message HardwareConfig {
+  int32 ppm_correction = 1;
+}
+message SetHardwareConfigRequest { HardwareConfig config = 1; }
+message SetHardwareConfigResponse { bool ok = 1; string error = 2; }
+message GetHardwareConfigRequest {}
+message GetHardwareConfigResponse { HardwareConfig config = 1; }
+
 service RadioControlService {
   rpc ListReceivers(ListReceiversRequest) returns (ListReceiversResponse);
   rpc GetReceiverStatus(GetReceiverStatusRequest) returns (GetReceiverStatusResponse);
@@ -193,6 +201,8 @@ service RadioControlService {
   rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse);
   rpc EnablePlugin(EnablePluginRequest) returns (EnablePluginResponse);
   rpc DisablePlugin(DisablePluginRequest) returns (DisablePluginResponse);
+  rpc SetHardwareConfig(SetHardwareConfigRequest) returns (SetHardwareConfigResponse);
+  rpc GetHardwareConfig(GetHardwareConfigRequest) returns (GetHardwareConfigResponse);
 }
 
 service TelemetryService {
