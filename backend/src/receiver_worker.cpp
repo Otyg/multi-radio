@@ -384,6 +384,7 @@ bool ReceiverWorker::Start(std::string* error) {
   // Size: enough to buffer ~2 seconds of WFM audio (32kHz * 2s = 64k samples)
   // Larger buffer provides better tolerance for timing variations
   audio_buffer_ = std::make_unique<AudioRingBuffer>(131072);
+  PushPluginConfig();
 
   thread_ = std::thread(&ReceiverWorker::RunLoop, this);
   ingest_thread_ = std::thread(&ReceiverWorker::IngestLoop, this);
@@ -456,6 +457,7 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
     mode_config_ = std::move(normalized);
     scan_channel_idx_ = 0;
   }
+  PushPluginConfig();
   if (error != nullptr) {
     error->clear();
   }
@@ -480,6 +482,20 @@ ReceiverStatus ReceiverWorker::Status() const {
                         .mode = mode_,
                         .mode_config = mode_config_,
                         .last_error = last_error_};
+}
+
+void ReceiverWorker::PushPluginConfig() {
+  if (plugin_host_ == nullptr) return;
+  ModeConfig cfg;
+  { std::lock_guard<std::mutex> lock(mu_); cfg = mode_config_; }
+  plugin_host_->SetParam("baud_rate",        std::to_string(cfg.gmsk_baud_rate));
+  plugin_host_->SetParam("bt",               std::to_string(cfg.gmsk_bt));
+  plugin_host_->SetParam("modulation_index", std::to_string(cfg.gmsk_modulation_index));
+  plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
+  std::string demod_name;
+  if (cfg.fixed_modulation == Modulation::kFsk)  demod_name = "fsk_demod";
+  if (cfg.fixed_modulation == Modulation::kGmsk) demod_name = "gmsk_demod";
+  plugin_host_->SetActiveDemodulator(demod_name);
 }
 
 void ReceiverWorker::IngestLoop() {
@@ -1010,43 +1026,6 @@ void ReceiverWorker::ProcessLoop() {
       iq_sample_index += block_samples;
     }
 
-    // Push GMSK config params to plugins whenever config changes.
-    if (plugin_host_ != nullptr) {
-      static uint32_t last_gmsk_baud = 0;
-      static float    last_gmsk_bt   = 0.0f;
-      static float    last_gmsk_mi   = 0.0f;
-      uint32_t cur_baud; float cur_bt, cur_mi;
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        cur_baud = mode_config_.gmsk_baud_rate;
-        cur_bt   = mode_config_.gmsk_bt;
-        cur_mi   = mode_config_.gmsk_modulation_index;
-      }
-      std::string cur_dec;
-      { std::lock_guard<std::mutex> lock(mu_); cur_dec = mode_config_.gmsk_decoder; }
-      if (cur_baud != last_gmsk_baud || cur_bt != last_gmsk_bt || cur_mi != last_gmsk_mi) {
-        last_gmsk_baud = cur_baud; last_gmsk_bt = cur_bt; last_gmsk_mi = cur_mi;
-        plugin_host_->SetParam("baud_rate",        std::to_string(cur_baud));
-        plugin_host_->SetParam("bt",               std::to_string(cur_bt));
-        plugin_host_->SetParam("modulation_index", std::to_string(cur_mi));
-      }
-      static std::string last_decoder;
-      if (cur_dec != last_decoder) {
-        last_decoder = cur_dec;
-        plugin_host_->SetActiveDecoder(cur_dec);
-      }
-      // Only run the demodulator plugin matching the current modulation.
-      Modulation cur_mod;
-      { std::lock_guard<std::mutex> lock(mu_); cur_mod = mode_config_.fixed_modulation; }
-      static Modulation last_mod = Modulation::kNfm;
-      if (cur_mod != last_mod) {
-        last_mod = cur_mod;
-        std::string demod_name;
-        if (cur_mod == Modulation::kFsk)  demod_name = "fsk_demod";
-        if (cur_mod == Modulation::kGmsk) demod_name = "gmsk_demod";
-        plugin_host_->SetActiveDemodulator(demod_name);
-      }
-    }
 
     // Plugin IQ processing — runs on every block regardless of mode.
     if (plugin_host_ != nullptr && !entry.block.interleaved_iq.empty()) {

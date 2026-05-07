@@ -36,6 +36,7 @@ class ReceiverWorker {
   void RunLoop();
   void IngestLoop();
   void ProcessLoop();
+  void PushPluginConfig();  // pushes current mode_config_ params to plugin_host_
   void PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz = 0.0,
                     bool log_event = true);
 
