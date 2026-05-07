@@ -66,7 +66,7 @@ static uint64_t ais_bits(const uint8_t* data, uint32_t data_bytes,
     for (i = 0; i < len; ++i) {
         int abs  = start + i;
         int bidx = abs / 8;
-        int boff = abs % 8;
+        int boff = 7 - (abs % 8);  /* MSB-first: first AIS bit is MSB of byte 0 */
         if (bidx < (int)data_bytes && (data[bidx] & (1u << boff)))
             r |= (1ULL << (len - 1 - i));
     }
