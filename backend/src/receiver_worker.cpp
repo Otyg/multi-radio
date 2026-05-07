@@ -1015,15 +1015,18 @@ void ReceiverWorker::ProcessLoop() {
       static uint32_t last_gmsk_baud = 0;
       static float    last_gmsk_bt   = 0.0f;
       static float    last_gmsk_mi   = 0.0f;
-      if (config.gmsk_baud_rate != last_gmsk_baud ||
-          config.gmsk_bt != last_gmsk_bt ||
-          config.gmsk_modulation_index != last_gmsk_mi) {
-        last_gmsk_baud = config.gmsk_baud_rate;
-        last_gmsk_bt   = config.gmsk_bt;
-        last_gmsk_mi   = config.gmsk_modulation_index;
-        plugin_host_->SetParam("baud_rate",        std::to_string(config.gmsk_baud_rate));
-        plugin_host_->SetParam("bt",               std::to_string(config.gmsk_bt));
-        plugin_host_->SetParam("modulation_index", std::to_string(config.gmsk_modulation_index));
+      uint32_t cur_baud; float cur_bt, cur_mi;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        cur_baud = mode_config_.gmsk_baud_rate;
+        cur_bt   = mode_config_.gmsk_bt;
+        cur_mi   = mode_config_.gmsk_modulation_index;
+      }
+      if (cur_baud != last_gmsk_baud || cur_bt != last_gmsk_bt || cur_mi != last_gmsk_mi) {
+        last_gmsk_baud = cur_baud; last_gmsk_bt = cur_bt; last_gmsk_mi = cur_mi;
+        plugin_host_->SetParam("baud_rate",        std::to_string(cur_baud));
+        plugin_host_->SetParam("bt",               std::to_string(cur_bt));
+        plugin_host_->SetParam("modulation_index", std::to_string(cur_mi));
       }
     }
 
