@@ -29,6 +29,13 @@
 #define GMSK_MIN_BITS          8
 #define GMSK_IDLE_GAP_SYMS     8
 
+/* Signal gate constants */
+#define GMSK_SQUELCH_RATIO  4.0f   /* default: signal must be 6 dB above noise floor */
+#define GMSK_HOLD_SYMS      48     /* keep gate open N symbols after energy drops */
+#define GMSK_NOISE_ALPHA    0.001f /* noise floor EMA alpha (~1000 sym time constant) */
+#define GMSK_ENERGY_ALPHA   0.10f  /* signal energy EMA alpha (~10 sym time constant) */
+#define GMSK_NOISE_INIT     1e-4f  /* initial noise floor estimate */
+
 /* ------------------------------------------------------------------ */
 /* Shared bit-buffer helpers                                            */
 /* ------------------------------------------------------------------ */
@@ -88,6 +95,13 @@ typedef struct {
 
   uint32_t idle_sym_count;
 
+  /* Signal gate */
+  float    noise_floor;    /* slow EMA of per-sample energy during quiet periods */
+  float    signal_energy;  /* fast EMA of per-sample energy */
+  float    squelch_ratio;  /* gate opens when signal_energy > noise_floor * ratio */
+  uint32_t hold_syms;      /* symbols remaining in hold-off after energy drops */
+  int      gate_open;      /* 1 = demodulating, 0 = gated off */
+
   uint8_t  bit_buf[GMSK_MAX_BITS / 8 + 1];
   uint32_t bit_count;
 } GmskCtx;
@@ -110,6 +124,10 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   ctx->bit_count = 0;
   memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
   ctx->idle_sym_count = 0;
+  ctx->signal_energy  = 0.0f;
+  ctx->noise_floor    = GMSK_NOISE_INIT;
+  ctx->hold_syms      = 0;
+  ctx->gate_open      = 0;
 
   const float rate = (float)ctx->baud_rate * GMSK_K / (float)sr;
   ctx->resampler = msresamp_crcf_create(rate, 60.0f);
@@ -139,6 +157,8 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->baud_rate        = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
   ctx->bt               = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
   ctx->modulation_index = 0.5f;
+  ctx->noise_floor      = GMSK_NOISE_INIT;
+  ctx->squelch_ratio    = GMSK_SQUELCH_RATIO;
   return (MrPluginCtx*)ctx;
 }
 
@@ -165,6 +185,12 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   if (strcmp(key, "modulation_index") == 0) {
     const float v = (float)atof(value);
     if (v > 0.0f) ctx->modulation_index = v;
+    return 1;
+  }
+  if (strcmp(key, "squelch_db") == 0) {
+    /* Convert dB to linear ratio: e.g. "6" → 4.0, "10" → 10.0, "0" disables gate */
+    const float db = (float)atof(value);
+    ctx->squelch_ratio = (db <= 0.0f) ? 0.0f : powf(10.0f, db / 10.0f);
     return 1;
   }
   return 0;
@@ -220,17 +246,42 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       const float im = __imag__ ctx->sym_buf[s];
       energy += re * re + im * im;
     }
-    if (energy < 1e-6f) {
-      if (++ctx->idle_sym_count >= (uint32_t)GMSK_IDLE_GAP_SYMS
-          && ctx->bit_count >= GMSK_MIN_BITS) {
+    const float per_sample_energy = energy / (float)GMSK_K;
+
+    /* Noise floor EMA: only update during quiet periods to avoid signal inflating it */
+    if (per_sample_energy < ctx->noise_floor * ctx->squelch_ratio) {
+      ctx->noise_floor = ctx->noise_floor * (1.0f - GMSK_NOISE_ALPHA)
+                       + per_sample_energy * GMSK_NOISE_ALPHA;
+    }
+    if (ctx->noise_floor < 1e-12f) ctx->noise_floor = 1e-12f;
+
+    /* Fast signal energy EMA */
+    ctx->signal_energy = ctx->signal_energy * (1.0f - GMSK_ENERGY_ALPHA)
+                       + per_sample_energy * GMSK_ENERGY_ALPHA;
+
+    /* Gate: open when signal energy exceeds noise floor by squelch_ratio */
+    const int above = (ctx->squelch_ratio > 0.0f)
+                    && (ctx->signal_energy > ctx->noise_floor * ctx->squelch_ratio);
+    if (above) {
+      ctx->hold_syms = GMSK_HOLD_SYMS;
+    } else if (ctx->hold_syms > 0) {
+      ctx->hold_syms--;
+    }
+    const int prev_gate = ctx->gate_open;
+    ctx->gate_open = above | (ctx->hold_syms > 0);
+
+    if (!ctx->gate_open) {
+      /* Gate closed: flush on falling edge, then discard */
+      if (prev_gate && ctx->bit_count >= GMSK_MIN_BITS) {
         emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
                   freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
-        ctx->idle_sym_count = 0;
       }
+      ctx->bit_count = 0;
+      memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
       continue;
     }
-    ctx->idle_sym_count = 0;
 
+    /* Gate open: demodulate */
     unsigned int bit = 0;
     gmskdem_demodulate(ctx->demodulator, ctx->sym_buf, &bit);
     push_bit(ctx->bit_buf, &ctx->bit_count, bit & 1u);
@@ -261,6 +312,12 @@ typedef struct {
   uint32_t sym_acc;
   float    sym_val;
   uint32_t sym_n, idle_samples;
+  /* Signal gate */
+  float    noise_floor;
+  float    signal_energy;
+  float    squelch_ratio;
+  uint32_t hold_syms;
+  int      gate_open;
   uint8_t  bit_buf[GMSK_MAX_BITS / 8 + 1];
   uint32_t bit_count;
 } GmskCtx;
@@ -303,7 +360,9 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->baud_rate        = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
   ctx->bt               = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
   ctx->modulation_index = 0.5f;
-  ctx->gauss_len = 1; ctx->gauss_c[0] = 1.0f;
+  ctx->gauss_len     = 1; ctx->gauss_c[0] = 1.0f;
+  ctx->noise_floor   = GMSK_NOISE_INIT;
+  ctx->squelch_ratio = GMSK_SQUELCH_RATIO;
   return (MrPluginCtx*)ctx;
 }
 
@@ -325,6 +384,11 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   if (strcmp(key, "modulation_index") == 0) {
     const float v = (float)atof(value);
     if (v > 0.0f) ctx->modulation_index = v;
+    return 1;
+  }
+  if (strcmp(key, "squelch_db") == 0) {
+    const float db = (float)atof(value);
+    ctx->squelch_ratio = (db <= 0.0f) ? 0.0f : powf(10.0f, db / 10.0f);
     return 1;
   }
   return 0;
@@ -362,23 +426,44 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       out += ctx->gauss_c[t] * ctx->gauss_d[bi];
       bi = (bi + 1) % ctx->gauss_len;
     }
-    const float af = out < 0.0f ? -out : out;
-    if (af < 0.01f) {
-      if (++ctx->idle_samples >= GMSK_IDLE_GAP_SYMS * ctx->samples_per_symbol
-          && ctx->bit_count >= GMSK_MIN_BITS) {
-        emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                  freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
-        ctx->idle_samples = 0;
-      }
-    } else { ctx->idle_samples = 0; }
+    /* Per-sample energy for gate (use squared discriminator output as proxy) */
+    const float per_sample_energy = out * out;
+    if (per_sample_energy < ctx->noise_floor * ctx->squelch_ratio) {
+      ctx->noise_floor = ctx->noise_floor * (1.0f - GMSK_NOISE_ALPHA)
+                       + per_sample_energy * GMSK_NOISE_ALPHA;
+    }
+    if (ctx->noise_floor < 1e-12f) ctx->noise_floor = 1e-12f;
+    ctx->signal_energy = ctx->signal_energy * (1.0f - GMSK_ENERGY_ALPHA)
+                       + per_sample_energy * GMSK_ENERGY_ALPHA;
+
     ctx->sym_val += out; ctx->sym_n++; ctx->sym_acc++;
     if (ctx->sym_acc >= ctx->samples_per_symbol) {
-      push_bit(ctx->bit_buf, &ctx->bit_count,
-               ctx->sym_val / (float)ctx->sym_n > 0.0f ? 1 : 0);
+      /* Evaluate gate once per symbol */
+      const int above = (ctx->squelch_ratio > 0.0f)
+                      && (ctx->signal_energy > ctx->noise_floor * ctx->squelch_ratio);
+      if (above) {
+        ctx->hold_syms = GMSK_HOLD_SYMS;
+      } else if (ctx->hold_syms > 0) {
+        ctx->hold_syms--;
+      }
+      const int prev_gate = ctx->gate_open;
+      ctx->gate_open = above | (ctx->hold_syms > 0);
+
+      if (!ctx->gate_open) {
+        if (prev_gate && ctx->bit_count >= GMSK_MIN_BITS) {
+          emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
+                    freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+        }
+        ctx->bit_count = 0;
+        memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
+      } else {
+        push_bit(ctx->bit_buf, &ctx->bit_count,
+                 ctx->sym_val / (float)ctx->sym_n > 0.0f ? 1 : 0);
+        if (ctx->bit_count >= GMSK_MAX_BITS)
+          emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
+                    freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+      }
       ctx->sym_acc = 0; ctx->sym_val = 0.0f; ctx->sym_n = 0;
-      if (ctx->bit_count >= GMSK_MAX_BITS)
-        emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                  freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
     }
   }
 }
