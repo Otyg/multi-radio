@@ -30,8 +30,9 @@ struct EmitCallbackState {
   const PluginHost::MessageCallback* callback = nullptr;
   double frequency_hz = 0.0;
   // Set when a decoder plugin should be chained.
-  PluginHost::FnProcessBits decoder_fn  = nullptr;
-  MrPluginCtx*              decoder_ctx = nullptr;
+  void (*decoder_fn)(MrPluginCtx*, const uint8_t*, uint32_t,
+                     double, uint64_t, const char*, MrEmitFn, void*) = nullptr;
+  MrPluginCtx* decoder_ctx = nullptr;
 };
 
 // Tiny JSON key=value parser: extract value for `key` from a flat object like
