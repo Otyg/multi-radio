@@ -5,7 +5,8 @@
  *
  * Reads a packed bit stream (MSB-first) from mr_plugin_process_bits,
  * performs bit-stuffing removal, extracts HDLC frames delimited by
- * flag bytes (0x7E = 01111110), validates CRC-16-CCITT and periodically
+ * flag bytes (0x7E = 01111110), assembles bytes LSB-first (HDLC standard),
+ * validates CRC-16-CCITT and periodically
  * emits aggregate statistics:
  *
  *   signal_type = "HDLC_STATS"
@@ -184,8 +185,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                it is the stuffed bit that will be stripped — we strip
                on the following 0). */
             if (ctx->in_frame && ctx->consecutive_ones <= 5) {
-                /* Normal data bit = 1 */
-                ctx->cur_byte |= (uint8_t)(1u << (7 - ctx->bit_pos));
+                /* Normal data bit = 1; HDLC transmits LSB-first */
+                ctx->cur_byte |= (uint8_t)(1u << ctx->bit_pos);
                 ctx->bit_pos++;
                 if (ctx->bit_pos == 8) {
                     if (ctx->frame_len < HDLC_MAX_FRAME_BYTES)
@@ -225,9 +226,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 ctx->consecutive_ones = 0;
             }
 
-            /* Normal data bit = 0 */
+            /* Normal data bit = 0; LSB-first, bit already 0 from reset */
             if (ctx->in_frame) {
-                /* cur_byte bit already 0 from calloc/reset, just advance */
                 ctx->bit_pos++;
                 if (ctx->bit_pos == 8) {
                     if (ctx->frame_len < HDLC_MAX_FRAME_BYTES)
