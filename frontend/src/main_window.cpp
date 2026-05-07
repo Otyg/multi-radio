@@ -1108,24 +1108,21 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_audio_lpf3k5_checkbox_->setToolTip("Low-pass filter at 3.5 kHz \xe2\x80\x94 aggressive double-pass, very steep rolloff (~96 dB/octave)");
   fixed_audio_lpf4k5_checkbox_->setToolTip("Low-pass filter at 4.5 kHz \xe2\x80\x94 order-8 Butterworth, cuts noise above wider speech band");
   fixed_audio_bpf_voice_checkbox_->setToolTip("Band-pass filter 300 Hz \xe2\x80\x93 3 kHz \xe2\x80\x94 pass-band optimised for voice communications");
-  auto* fixed_filter_row = new QHBoxLayout();
-  fixed_filter_row->addWidget(fixed_audio_hpf300_checkbox_);
-  fixed_filter_row->addWidget(fixed_audio_lpf3k5_checkbox_);
-  fixed_filter_row->addWidget(fixed_audio_lpf4k5_checkbox_);
-  fixed_filter_row->addWidget(fixed_audio_bpf_voice_checkbox_);
-  fixed_filter_row->addStretch(1);
-
   fixed_audio_rnnoise_checkbox_ = new QCheckBox("RNNoise", fixed_tab);
   fixed_audio_rnnoise_checkbox_->setToolTip("RNNoise neural network noise reduction");
   fixed_audio_rnnoise_strength_spin_ = new QSpinBox(fixed_tab);
   fixed_audio_rnnoise_strength_spin_->setRange(0, 100);
   fixed_audio_rnnoise_strength_spin_->setValue(100);
   fixed_audio_rnnoise_strength_spin_->setSuffix("%");
-  fixed_audio_rnnoise_strength_spin_->setToolTip("Blend between original (0%) and fully denoised (100%)");
-  auto* fixed_rnnoise_row = new QHBoxLayout();
-  fixed_rnnoise_row->addWidget(fixed_audio_rnnoise_checkbox_);
-  fixed_rnnoise_row->addWidget(fixed_audio_rnnoise_strength_spin_);
-  fixed_rnnoise_row->addStretch(1);
+  fixed_audio_rnnoise_strength_spin_->setToolTip("Blend between original (0%) och fully denoised (100%)");
+  auto* fixed_filter_row = new QHBoxLayout();
+  fixed_filter_row->addWidget(fixed_audio_hpf300_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_lpf3k5_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_lpf4k5_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_bpf_voice_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_rnnoise_checkbox_);
+  fixed_filter_row->addWidget(fixed_audio_rnnoise_strength_spin_);
+  fixed_filter_row->addStretch(1);
 
   // GMSK parameter controls (shown only when GMSK modulation is selected).
   gmsk_params_widget_ = new QWidget(fixed_tab);
@@ -1159,9 +1156,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_row->addSpacing(12);
   gmsk_row->addWidget(new QLabel("Avkodare:", gmsk_params_widget_));
   gmsk_decoder_combo_ = new QComboBox(gmsk_params_widget_);
-  gmsk_decoder_combo_->addItem("Ingen",         QVariant(QString("")));
-  gmsk_decoder_combo_->addItem("NRZI",          QVariant(QString("nrzi_decoder")));
-  gmsk_decoder_combo_->setToolTip("Post-demodulationsavkodare att kedja efter GMSK");
+  gmsk_decoder_combo_->addItem("Ingen",              QVariant(QString("")));
+  gmsk_decoder_combo_->addItem("NRZI",               QVariant(QString("nrzi_decoder:0")));
+  gmsk_decoder_combo_->addItem("NRZ-S (AIS/HDLC)",  QVariant(QString("nrzi_decoder:1")));
+  gmsk_decoder_combo_->setToolTip(
+      "Avkodare att kedja efter GMSK.\n"
+      "NRZI: transition=1 (NRZ-Mark).\n"
+      "NRZ-S (AIS/HDLC): transition=0, no-transition=1 (ITU-R M.1371).");
   gmsk_row->addWidget(gmsk_decoder_combo_);
   gmsk_row->addSpacing(12);
   gmsk_row->addWidget(new QLabel("Postprocessing:", gmsk_params_widget_));
@@ -1170,11 +1171,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_postproc_combo_->addItem("HDLC",                 QVariant(QString("hdlc_postproc")));
   gmsk_postproc_combo_->setToolTip("Postprocessing att kedja efter avkodaren");
   gmsk_row->addWidget(gmsk_postproc_combo_);
-  gmsk_nrzi_invert_checkbox_ = new QCheckBox("NRZI invert", gmsk_params_widget_);
-  gmsk_nrzi_invert_checkbox_->setToolTip(
-      "Invertera NRZI-konventionen: transition='0', no-transition='1'.\n"
-      "Aktivera för AIS (ITU-R M.1371) och liknande protokoll.");
-  gmsk_row->addWidget(gmsk_nrzi_invert_checkbox_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
 
@@ -1182,7 +1178,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
   fixed_layout->addRow("GMSK", gmsk_params_widget_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
-  fixed_layout->addRow("Brusreducering", fixed_rnnoise_row);
   mode_tabs_->addTab(fixed_tab, "FIXED");
 
   // Create scan_range_viz_ here so it can live inside the SCAN_RANGE tab.
@@ -1349,7 +1344,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
   connect(gmsk_postproc_combo_,  QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
-  connect(gmsk_nrzi_invert_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
@@ -1964,11 +1958,15 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_gmsk_baud_rate(gmsk_baud_rate_spin_ ? static_cast<uint32_t>(gmsk_baud_rate_spin_->value()) : 9600u);
   config.set_gmsk_bt(gmsk_bt_spin_ ? static_cast<float>(gmsk_bt_spin_->value()) : 0.4f);
   config.set_gmsk_modulation_index(gmsk_mod_index_spin_ ? static_cast<float>(gmsk_mod_index_spin_->value()) : 0.5f);
-  config.set_gmsk_decoder(gmsk_decoder_combo_
-      ? gmsk_decoder_combo_->currentData().toString().toStdString() : "");
+  {
+    const QString decoder_raw = gmsk_decoder_combo_
+        ? gmsk_decoder_combo_->currentData().toString() : QString();
+    const QStringList parts = decoder_raw.split(':');
+    config.set_gmsk_decoder(parts.value(0).toStdString());
+    config.set_gmsk_nrzi_invert(parts.value(1, "0").toInt() != 0);
+  }
   config.set_gmsk_postprocessor(gmsk_postproc_combo_
       ? gmsk_postproc_combo_->currentData().toString().toStdString() : "");
-  config.set_gmsk_nrzi_invert(gmsk_nrzi_invert_checkbox_ && gmsk_nrzi_invert_checkbox_->isChecked());
   config.set_ppm_correction(ppm_correction_spin_ ? ppm_correction_spin_->value() : 0);
   config.set_scan_list_locked_channel_index(
       static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
