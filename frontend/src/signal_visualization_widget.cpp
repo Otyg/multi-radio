@@ -727,8 +727,8 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
     return;
   }
 
-  constexpr double kMinDb = -120.0;
-  constexpr double kMaxDb = 0.0;
+  constexpr double kMinDb = -90.0;
+  constexpr double kMaxDb = -20.0;
   const double display_min_db = has_noise_floor_threshold_db
                                     ? std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb - 1.0)
                                     : kMinDb;
@@ -738,7 +738,7 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   painter->setClipRect(area);
   painter->fillRect(area, QColor(11, 16, 24));
 
-  const QRect plot = area.adjusted(46, 8, -10, -24);
+  const QRect plot = area.adjusted(36, 8, -10, -24);
   painter->setPen(QPen(QColor(70, 84, 109), 1));
   painter->drawRect(plot);
 
@@ -747,19 +747,20 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
     return plot.bottom() - static_cast<int>(t * (plot.height() - 1));
   };
   auto amp_to_db = [](double amp) {
-    return kMinDb + std::pow(Clamp01(amp), 0.42) * (kMaxDb - kMinDb);
+    return kMinDb + Clamp01(amp) * (kMaxDb - kMinDb);
   };
   const double clamped_noise_floor_db =
       std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb);
 
+  const QFontMetrics fm_grid(painter->font());
   painter->setPen(QPen(QColor(48, 58, 78), 1));
-  for (int i = 0; i <= 4; ++i) {
-    const double t = static_cast<double>(i) / 4.0;
-    const double tick_db = display_min_db + t * display_span_db;
-    const int y = db_to_y(tick_db);
+  for (int db = static_cast<int>(kMinDb); db <= static_cast<int>(kMaxDb); db += 10) {
+    const int y = db_to_y(static_cast<double>(db));
     painter->drawLine(plot.left(), y, plot.right(), y);
-    painter->setPen(QColor(160, 176, 200));
-    painter->drawText(area.left() + 2, y + 4, QString::number(tick_db, 'f', 1));
+    const QString lbl = QString::number(db);
+    const int lw = fm_grid.horizontalAdvance(lbl);
+    painter->setPen(QColor(110, 128, 160));
+    painter->drawText(area.left() + 34 - lw - 2, y + fm_grid.ascent() / 2, lbl);
     painter->setPen(QPen(QColor(48, 58, 78), 1));
   }
 
@@ -775,11 +776,11 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   }
 
   painter->setPen(QColor(178, 192, 214));
-  painter->drawText(area.left() + 2, plot.top() - 2, "dB");
-  painter->drawText(plot.right() - 64, area.bottom() - 4, "Freq (Hz)");
+  painter->drawText(area.left() + 2, plot.top() - 2, "dBFS");
+  painter->drawText(plot.right() - 64, area.bottom() - 4, "Hz");
 
   if (has_squelch_threshold_db) {
-    const double clamped_db = std::clamp(squelch_threshold_db, display_min_db, kMaxDb);
+    const double clamped_db = std::clamp(squelch_threshold_db, display_min_db, kMaxDb - 0.5);
     const int y = db_to_y(clamped_db);
     painter->setPen(QPen(QColor(96, 216, 255), 1, Qt::DashLine));
     painter->drawLine(plot.left(), y, plot.right(), y);
@@ -894,10 +895,10 @@ void SignalVisualizationWidget::DrawHeatmap(QPainter* painter, const QRect& area
   painter->save();
   painter->setClipRect(area);
   painter->fillRect(area, QColor(11, 16, 24));
-  constexpr double kMinDb = -120.0;
-  constexpr double kMaxDb = 0.0;
+  constexpr double kMinDb = -90.0;
+  constexpr double kMaxDb = -20.0;
   auto amp_to_db = [](double amp) {
-    return kMinDb + std::pow(Clamp01(amp), 0.42) * (kMaxDb - kMinDb);
+    return kMinDb + Clamp01(amp) * (kMaxDb - kMinDb);
   };
   const double clamped_noise_floor_db =
       std::clamp(noise_floor_threshold_db, kMinDb, kMaxDb);

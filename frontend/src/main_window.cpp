@@ -581,7 +581,8 @@ void BuildReceiverVisualizationFrame(const QByteArray& interleaved_iq_s16le, int
 
   const double rms = std::sqrt(power_sum / static_cast<double>(iq_pairs));
   *signal_level_db = std::clamp(20.0 * std::log10(std::max(1.0e-9, rms)), -120.0, 0.0);
-  *spectrum = BuildNormalizedSpectrumFromComplexShifted(complex_samples, spectrum_bins);
+  *spectrum = BuildFixedScaleSpectrumFromComplex(complex_samples, spectrum_bins,
+                                                 kScanSpectrumFloorDb, kScanSpectrumCeilingDb);
 }
 
 void BuildDemodVisualizationFrame(const QByteArray& pcm_s16le, int spectrum_bins, std::vector<double>* waveform,
