@@ -14,6 +14,8 @@
  */
 
 #include "mr_plugin_api.h"
+#include "mr_signal_gate.h"
+#include "mr_bit_buf.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -32,14 +34,9 @@
 /* Shared bit-buffer helpers                                            */
 /* ------------------------------------------------------------------ */
 
-static void push_bit(uint8_t* buf, uint32_t* count, unsigned int bit) {
-  if (*count >= FSK_MAX_BITS) return;
-  const uint32_t byte_idx = *count / 8;
-  const uint32_t bit_idx  = 7 - (*count % 8);
-  if (bit) buf[byte_idx] |=  (uint8_t)(1u << bit_idx);
-  else     buf[byte_idx] &= (uint8_t)~(1u << bit_idx);
-  ++(*count);
-}
+/* push_bit forwarded to shared header */
+#define push_bit(buf, count, bit) \
+    mr_push_bit((buf), (count), FSK_MAX_BITS, (bit))
 
 static void emit_bits(uint8_t* bit_buf, uint32_t* bit_count,
                       MrEmitFn emit_fn, void* user_data,
@@ -70,35 +67,35 @@ static void emit_bits(uint8_t* bit_buf, uint32_t* bit_count,
 
 #if defined(MR_PLUGIN_HAS_LIQUID) && MR_PLUGIN_HAS_LIQUID
 #include <liquid/liquid.h>
+#include "mr_iir_prefilter.h"
 
 typedef struct {
   uint32_t baud_rate;
   uint32_t deviation_hz;
 
-  uint32_t sample_rate_hz;  /* last configured */
+  uint32_t sample_rate_hz;
 
-  msresamp_crcf    resampler;
-  fskdem           demodulator;
+  msresamp_crcf  resampler;
+  fskdem         demodulator;
+  MrIirPrefilter pre_filter;  /* channel-select LP before resampling */
 
-  /* partial symbol accumulation buffer */
   liquid_float_complex* sym_buf;
   uint32_t sym_buf_fill;
 
-  /* output buffer for resampler (heap-allocated, grown as needed) */
   liquid_float_complex* resamp_out;
   uint32_t resamp_out_cap;
 
-  /* idle detection: count symbols with near-zero energy */
-  uint32_t idle_sym_count;
+  MrSignalGate gate;  /* EMA-based signal gate (replaces idle_sym_count) */
 
   uint8_t  bit_buf[FSK_MAX_BITS / 8 + 1];
   uint32_t bit_count;
 } FskCtx;
 
 static void fsk_teardown(FskCtx* ctx) {
-  if (ctx->resampler)   { msresamp_crcf_destroy(ctx->resampler);  ctx->resampler   = NULL; }
-  if (ctx->demodulator) { fskdem_destroy(ctx->demodulator);        ctx->demodulator = NULL; }
-  free(ctx->sym_buf);   ctx->sym_buf     = NULL;
+  if (ctx->resampler)   { msresamp_crcf_destroy(ctx->resampler); ctx->resampler  = NULL; }
+  if (ctx->demodulator) { fskdem_destroy(ctx->demodulator);       ctx->demodulator = NULL; }
+  mr_iir_prefilter_destroy(&ctx->pre_filter);
+  free(ctx->sym_buf);    ctx->sym_buf    = NULL;
   free(ctx->resamp_out); ctx->resamp_out = NULL;
   ctx->resamp_out_cap = 0;
   ctx->sym_buf_fill   = 0;
@@ -125,14 +122,17 @@ static int fsk_configure(FskCtx* ctx, uint32_t sample_rate_hz) {
   ctx->sym_buf = (liquid_float_complex*)calloc(FSK_K, sizeof(liquid_float_complex));
   if (!ctx->sym_buf) return 0;
 
-  /* initial output buffer: 2× worst-case upsample headroom */
   const uint32_t init_cap = (uint32_t)(2048.0f / rate) + 64;
   ctx->resamp_out = (liquid_float_complex*)malloc(init_cap * sizeof(liquid_float_complex));
   if (!ctx->resamp_out) return 0;
   ctx->resamp_out_cap = init_cap;
 
-  ctx->idle_sym_count = 0;
-  ctx->sym_buf_fill   = 0;
+  /* Channel-select pre-filter at 2×baud_rate */
+  const float cutoff = 2.0f * (float)ctx->baud_rate / (float)sample_rate_hz;
+  mr_iir_prefilter_create(&ctx->pre_filter, cutoff);
+
+  mr_signal_gate_reset(&ctx->gate);
+  ctx->sym_buf_fill = 0;
   return 1;
 }
 
@@ -143,6 +143,8 @@ MrPluginCtx* mr_plugin_create(void) {
   const char* d = getenv("MR_FSK_DEVIATION_HZ");
   ctx->baud_rate    = (b && atoi(b) > 0) ? (uint32_t)atoi(b) : FSK_DEFAULT_BAUD_RATE;
   ctx->deviation_hz = (d && atoi(d) > 0) ? (uint32_t)atoi(d) : FSK_DEFAULT_DEVIATION_HZ;
+  mr_signal_gate_init(&ctx->gate, MR_GATE_SQUELCH_RATIO);
+  mr_iir_prefilter_init(&ctx->pre_filter);
   return (MrPluginCtx*)ctx;
 }
 
@@ -180,43 +182,46 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->resamp_out_cap = needed;
   }
 
-  /* Convert int16 IQ → liquid_float_complex */
+  /* Convert int16 IQ → filtered liquid_float_complex */
   liquid_float_complex* in_buf =
       (liquid_float_complex*)malloc(num_pairs * sizeof(liquid_float_complex));
   if (!in_buf) return;
   const float norm = 1.0f / 32768.0f;
   for (uint32_t n = 0; n < num_pairs; ++n) {
-    __real__ in_buf[n] = (float)iq[n * 2]     * norm;
-    __imag__ in_buf[n] = (float)iq[n * 2 + 1] * norm;
+    liquid_float_complex s;
+    __real__ s = (float)iq[n * 2]     * norm;
+    __imag__ s = (float)iq[n * 2 + 1] * norm;
+    mr_iir_prefilter_execute(&ctx->pre_filter, s, &in_buf[n]);
   }
 
-  /* Resample */
   unsigned int n_out = 0;
   msresamp_crcf_execute(ctx->resampler, in_buf, num_pairs, ctx->resamp_out, &n_out);
   free(in_buf);
 
-  /* Feed resampled samples into fskdem FSK_K at a time */
   for (unsigned int i = 0; i < n_out; ++i) {
     ctx->sym_buf[ctx->sym_buf_fill++] = ctx->resamp_out[i];
     if (ctx->sym_buf_fill < (uint32_t)FSK_K) continue;
     ctx->sym_buf_fill = 0;
 
-    /* Energy check for idle detection */
     float energy = 0.0f;
     for (int s = 0; s < FSK_K; ++s) {
       const float re = __real__ ctx->sym_buf[s];
       const float im = __imag__ ctx->sym_buf[s];
       energy += re * re + im * im;
     }
-    if (energy < 1e-6f) {
-      if (++ctx->idle_sym_count >= (uint32_t)FSK_IDLE_GAP_SYMS && ctx->bit_count >= FSK_MIN_BITS) {
+    const int falling = mr_signal_gate_update(&ctx->gate,
+                                               energy / (float)FSK_K,
+                                               MR_GATE_HOLD_SYMS);
+    if (!ctx->gate.gate_open) {
+      if (falling)
         emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
                   freq_hz, unix_ms, ctx->baud_rate, ctx->deviation_hz);
-        ctx->idle_sym_count = 0;
+      else {
+        ctx->bit_count = 0;
+        memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
       }
       continue;
     }
-    ctx->idle_sym_count = 0;
 
     unsigned int sym = fskdem_demodulate(ctx->demodulator, ctx->sym_buf);
     push_bit(ctx->bit_buf, &ctx->bit_count, sym & 1u);
