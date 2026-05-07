@@ -217,8 +217,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     }
     ctx->idle_sym_count = 0;
 
-    unsigned int sym = 0;
-    fskdem_demodulate(ctx->demodulator, ctx->sym_buf, &sym);
+    unsigned int sym = fskdem_demodulate(ctx->demodulator, ctx->sym_buf);
     push_bit(ctx->bit_buf, &ctx->bit_count, sym & 1u);
 
     if (ctx->bit_count >= FSK_MAX_BITS)
