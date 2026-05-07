@@ -220,6 +220,43 @@ static void decode_static24(const uint8_t* d, uint32_t bytes,
     }
 }
 
+/* Type 8 (Binary Broadcast Message) */
+static void decode_bbm(const uint8_t* d, uint32_t bytes,
+                        char* kv, size_t kv_sz,
+                        char* payload, size_t pay_sz) {
+    uint32_t mmsi = (uint32_t)ais_bits(d, bytes, 8, 30);
+    int      dac  = (int)ais_bits(d, bytes, 40, 10);
+    int      fi   = (int)ais_bits(d, bytes, 50,  6);
+
+    /* Application data begins at byte 7 (bit 56).
+       With MSB-first storage, frame_buf[7..bytes-1] are the app data bytes. */
+    const uint32_t app_off   = 7u;
+    const uint32_t app_bytes = (bytes > app_off) ? (bytes - app_off) : 0u;
+
+    /* Hex-encode app data (max AIS frame gives ≤14 bytes = 28 hex chars) */
+    char app_hex[64] = "";
+    if (app_bytes > 0) {
+        uint32_t i;
+        uint32_t lim = app_bytes < 28u ? app_bytes : 28u; /* safety cap */
+        for (i = 0; i < lim; ++i)
+            snprintf(app_hex + i * 2, 3, "%02X", (unsigned)d[app_off + i]);
+    }
+
+    snprintf(kv, kv_sz,
+        "{\"signal_type\":\"AIS_BBM\","
+        "\"msg_type\":\"8\","
+        "\"mmsi\":\"%u\","
+        "\"dac\":\"%d\","
+        "\"fi\":\"%d\","
+        "\"app_data_bytes\":\"%u\","
+        "\"app_data\":\"%s\"}",
+        mmsi, dac, fi, app_bytes, app_hex);
+
+    snprintf(payload, pay_sz,
+             "MMSI:%u DAC:%d FI:%d Data:%s",
+             mmsi, dac, fi, app_hex[0] ? app_hex : "(none)");
+}
+
 /* Dispatch to per-type decoder and emit. */
 static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
                              double freq_hz, uint64_t unix_ms,
@@ -243,6 +280,11 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         if (data_bytes < 53) return;  /* 426 bits = 53.25 bytes */
         decode_voyage(frame_buf, data_bytes,
                       kv, sizeof(kv), payload, sizeof(payload));
+        break;
+    case 8:
+        if (data_bytes < 7) return;  /* 56 bits = 7 bytes minimum */
+        decode_bbm(frame_buf, data_bytes,
+                   kv, sizeof(kv), payload, sizeof(payload));
         break;
     case 24:
         if (data_bytes < 20) return;
@@ -269,7 +311,8 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
     }
     }
 
-    const char* sig = (msg_type == 5) ? "AIS_STAT"
+    const char* sig = (msg_type == 5)  ? "AIS_STAT"
+                    : (msg_type == 8)  ? "AIS_BBM"
                     : (msg_type == 24) ? "AIS_STAT24"
                     : "AIS_POS";
     if (emit_fn) emit_fn(sig, payload, freq_hz, unix_ms, kv, user_data);

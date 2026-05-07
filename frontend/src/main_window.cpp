@@ -2501,7 +2501,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   // AIS decoded message — append to the fixed-channel HDLC log and main log
   if (plugin_type == "AIS_POS" || plugin_type == "AIS_STAT" ||
-      plugin_type == "AIS_STAT24" || plugin_type == "AIS_OTHER") {
+      plugin_type == "AIS_STAT24" || plugin_type == "AIS_BBM" ||
+      plugin_type == "AIS_OTHER") {
     const QString ts    = row.timestamp.toString("HH:mm:ss");
     const QString mmsi  = fields.value("mmsi").toString();
     const QString mtype = fields.value("msg_type").toString();
