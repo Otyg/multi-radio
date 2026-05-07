@@ -1010,6 +1010,23 @@ void ReceiverWorker::ProcessLoop() {
       iq_sample_index += block_samples;
     }
 
+    // Push GMSK config params to plugins whenever config changes.
+    if (plugin_host_ != nullptr) {
+      static uint32_t last_gmsk_baud = 0;
+      static float    last_gmsk_bt   = 0.0f;
+      static float    last_gmsk_mi   = 0.0f;
+      if (config.gmsk_baud_rate != last_gmsk_baud ||
+          config.gmsk_bt != last_gmsk_bt ||
+          config.gmsk_modulation_index != last_gmsk_mi) {
+        last_gmsk_baud = config.gmsk_baud_rate;
+        last_gmsk_bt   = config.gmsk_bt;
+        last_gmsk_mi   = config.gmsk_modulation_index;
+        plugin_host_->SetParam("baud_rate",        std::to_string(config.gmsk_baud_rate));
+        plugin_host_->SetParam("bt",               std::to_string(config.gmsk_bt));
+        plugin_host_->SetParam("modulation_index", std::to_string(config.gmsk_modulation_index));
+      }
+    }
+
     // Plugin IQ processing — runs on every block regardless of mode.
     if (plugin_host_ != nullptr && !entry.block.interleaved_iq.empty()) {
       // Stamp the block with center frequency so plugins can use it.

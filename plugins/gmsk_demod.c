@@ -52,7 +52,7 @@ static void emit_bits(uint8_t* bit_buf, uint32_t* bit_count,
   if (!hex) { *bit_count = 0; return; }
   for (uint32_t i = 0; i < byte_count; ++i)
     snprintf(hex + i * 2, 3, "%02X", (unsigned)bit_buf[i]);
-  char kv[128];
+  char kv[160];
   snprintf(kv, sizeof(kv),
            "{\"baud_rate\":\"%u\",\"bt\":\"%.3f\",\"bit_count\":\"%u\"}",
            baud_rate, (double)bt, byte_count * 8);
@@ -72,6 +72,8 @@ static void emit_bits(uint8_t* bit_buf, uint32_t* bit_count,
 typedef struct {
   uint32_t baud_rate;
   float    bt;
+  float    modulation_index;  /* informational; affects discriminator scaling in fallback */
+  int      needs_reconfigure; /* set to 1 by set_param to trigger teardown on next call */
 
   uint32_t sample_rate_hz;
 
@@ -100,7 +102,8 @@ static void gmsk_teardown(GmskCtx* ctx) {
 }
 
 static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
-  if (sr == ctx->sample_rate_hz) return 1;
+  if (sr == ctx->sample_rate_hz && !ctx->needs_reconfigure) return 1;
+  ctx->needs_reconfigure = 0;
   gmsk_teardown(ctx);
   ctx->sample_rate_hz = sr;
 
@@ -129,8 +132,9 @@ MrPluginCtx* mr_plugin_create(void) {
   if (!ctx) return NULL;
   const char* b  = getenv("MR_GMSK_BAUD_RATE");
   const char* bt = getenv("MR_GMSK_BT");
-  ctx->baud_rate = (b  && atoi(b)  > 0)    ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
-  ctx->bt        = (bt && atof(bt) > 0.0)  ? (float)atof(bt)   : GMSK_DEFAULT_BT;
+  ctx->baud_rate        = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
+  ctx->bt               = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
+  ctx->modulation_index = 0.5f;
   return (MrPluginCtx*)ctx;
 }
 
@@ -139,6 +143,27 @@ void mr_plugin_destroy(MrPluginCtx* raw) {
   GmskCtx* ctx = (GmskCtx*)raw;
   gmsk_teardown(ctx);
   free(ctx);
+}
+
+int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
+  if (!raw || !key || !value) return 0;
+  GmskCtx* ctx = (GmskCtx*)raw;
+  if (strcmp(key, "baud_rate") == 0) {
+    const int v = atoi(value);
+    if (v > 0) { ctx->baud_rate = (uint32_t)v; ctx->needs_reconfigure = 1; }
+    return 1;
+  }
+  if (strcmp(key, "bt") == 0) {
+    const float v = (float)atof(value);
+    if (v > 0.0f) { ctx->bt = v; ctx->needs_reconfigure = 1; }
+    return 1;
+  }
+  if (strcmp(key, "modulation_index") == 0) {
+    const float v = (float)atof(value);
+    if (v > 0.0f) ctx->modulation_index = v;
+    return 1;
+  }
+  return 0;
 }
 
 static const MrPluginMeta kMeta = {
@@ -221,6 +246,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 typedef struct {
   uint32_t baud_rate;
   float    bt;
+  float    modulation_index;
+  int      needs_reconfigure;
   float prev_i, prev_q;
   float    gauss_c[GMSK_MAX_FILTER_TAPS];
   float    gauss_d[GMSK_MAX_FILTER_TAPS];
@@ -248,7 +275,8 @@ static uint32_t build_gauss(float* c, uint32_t max, uint32_t sps, float bt) {
 }
 
 static void gmsk_reconfigure(GmskCtx* ctx, uint32_t sr) {
-  if (sr == ctx->sample_rate_hz) return;
+  if (sr == ctx->sample_rate_hz && !ctx->needs_reconfigure) return;
+  ctx->needs_reconfigure = 0;
   ctx->sample_rate_hz     = sr;
   ctx->samples_per_symbol = sr / ctx->baud_rate;
   if (!ctx->samples_per_symbol) ctx->samples_per_symbol = 1;
@@ -264,13 +292,35 @@ MrPluginCtx* mr_plugin_create(void) {
   if (!ctx) return NULL;
   const char* b  = getenv("MR_GMSK_BAUD_RATE");
   const char* bt = getenv("MR_GMSK_BT");
-  ctx->baud_rate = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
-  ctx->bt        = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
+  ctx->baud_rate        = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
+  ctx->bt               = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
+  ctx->modulation_index = 0.5f;
   ctx->gauss_len = 1; ctx->gauss_c[0] = 1.0f;
   return (MrPluginCtx*)ctx;
 }
 
 void mr_plugin_destroy(MrPluginCtx* raw) { free(raw); }
+
+int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
+  if (!raw || !key || !value) return 0;
+  GmskCtx* ctx = (GmskCtx*)raw;
+  if (strcmp(key, "baud_rate") == 0) {
+    const int v = atoi(value);
+    if (v > 0) { ctx->baud_rate = (uint32_t)v; ctx->needs_reconfigure = 1; }
+    return 1;
+  }
+  if (strcmp(key, "bt") == 0) {
+    const float v = (float)atof(value);
+    if (v > 0.0f) { ctx->bt = v; ctx->needs_reconfigure = 1; }
+    return 1;
+  }
+  if (strcmp(key, "modulation_index") == 0) {
+    const float v = (float)atof(value);
+    if (v > 0.0f) ctx->modulation_index = v;
+    return 1;
+  }
+  return 0;
+}
 
 static const MrPluginMeta kMeta = {
   "gmsk_demod", "2.0.0", MR_PLUGIN_API_VERSION,

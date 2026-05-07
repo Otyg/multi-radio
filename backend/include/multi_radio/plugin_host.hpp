@@ -39,6 +39,8 @@ class PluginHost {
   bool DisablePlugin(const std::string& plugin_name, std::string* error);
 
   void ProcessIq(const IQSampleBlock& iq, const MessageCallback& callback);
+  // Call set_param on every loaded plugin that exports mr_plugin_set_param.
+  void SetParam(const std::string& key, const std::string& value);
 
  private:
   // Function-pointer typedefs matching the C API signatures.
@@ -47,6 +49,7 @@ class PluginHost {
   using FnGetMeta     = const MrPluginMeta* (*)(void);
   using FnProcessIq   = void (*)(MrPluginCtx*, const int16_t*, uint32_t, uint32_t,
                                   double, uint64_t, MrEmitFn, void*);
+  using FnSetParam    = int  (*)(MrPluginCtx*, const char*, const char*);
 
   struct LoadedPlugin {
     PluginInfo   info;
@@ -55,6 +58,7 @@ class PluginHost {
     FnDestroy    fn_destroy = nullptr;
     FnGetMeta    fn_get_meta = nullptr;
     FnProcessIq  fn_process_iq = nullptr;
+    FnSetParam   fn_set_param  = nullptr;  // optional
     MrPluginCtx* ctx        = nullptr;  // live instance
   };
 

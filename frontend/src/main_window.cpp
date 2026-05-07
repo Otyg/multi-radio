@@ -1217,8 +1217,41 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_rnnoise_row->addWidget(fixed_audio_rnnoise_strength_spin_);
   fixed_rnnoise_row->addStretch(1);
 
+  // GMSK parameter controls (shown only when GMSK modulation is selected).
+  gmsk_params_widget_ = new QWidget(fixed_tab);
+  auto* gmsk_row = new QHBoxLayout(gmsk_params_widget_);
+  gmsk_row->setContentsMargins(0, 0, 0, 0);
+  gmsk_baud_rate_spin_ = new QSpinBox(gmsk_params_widget_);
+  gmsk_baud_rate_spin_->setRange(300, 1000000);
+  gmsk_baud_rate_spin_->setSingleStep(100);
+  gmsk_baud_rate_spin_->setValue(9600);
+  gmsk_baud_rate_spin_->setSuffix(" bit/s");
+  gmsk_bt_spin_ = new QDoubleSpinBox(gmsk_params_widget_);
+  gmsk_bt_spin_->setRange(0.1, 1.0);
+  gmsk_bt_spin_->setSingleStep(0.05);
+  gmsk_bt_spin_->setDecimals(2);
+  gmsk_bt_spin_->setValue(0.4);
+  gmsk_bt_spin_->setToolTip("Bandwidth-Time product (BT). Typical: 0.3 (GSM), 0.4, 0.5");
+  gmsk_mod_index_spin_ = new QDoubleSpinBox(gmsk_params_widget_);
+  gmsk_mod_index_spin_->setRange(0.1, 2.0);
+  gmsk_mod_index_spin_->setSingleStep(0.05);
+  gmsk_mod_index_spin_->setDecimals(2);
+  gmsk_mod_index_spin_->setValue(0.5);
+  gmsk_mod_index_spin_->setToolTip("Modulation index h. Standard GMSK: 0.5");
+  gmsk_row->addWidget(new QLabel("Baudrate:", gmsk_params_widget_));
+  gmsk_row->addWidget(gmsk_baud_rate_spin_);
+  gmsk_row->addSpacing(8);
+  gmsk_row->addWidget(new QLabel("BT:", gmsk_params_widget_));
+  gmsk_row->addWidget(gmsk_bt_spin_);
+  gmsk_row->addSpacing(8);
+  gmsk_row->addWidget(new QLabel("Mod.index:", gmsk_params_widget_));
+  gmsk_row->addWidget(gmsk_mod_index_spin_);
+  gmsk_row->addStretch(1);
+  gmsk_params_widget_->setVisible(false);
+
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
+  fixed_layout->addRow("GMSK", gmsk_params_widget_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
   fixed_layout->addRow("Brusreducering", fixed_rnnoise_row);
   mode_tabs_->addTab(fixed_tab, "FIXED");
@@ -1378,6 +1411,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
+  auto apply_on_spin = [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); };
+  auto apply_on_dspin = [this](double) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); };
+  connect(gmsk_baud_rate_spin_,  QOverload<int>::of(&QSpinBox::valueChanged),       this, apply_on_spin);
+  connect(gmsk_bt_spin_,         QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
+  connect(gmsk_mod_index_spin_,  QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
   connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
@@ -1563,6 +1601,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   });
   connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
+    if (gmsk_params_widget_ != nullptr)
+      gmsk_params_widget_->setVisible(modulation == v1::MODULATION_GMSK);
     const int suggested_bandwidth_hz = DefaultBandwidthHzForModulation(modulation);
     const int current_bandwidth_hz = channel_bandwidth_spin_->value();
     const bool can_auto_apply =
@@ -1976,6 +2016,9 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_scan_list_monitor_mode(
       scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
   config.set_scan_list_channel_locked(frozen_scan_channel_index_ >= 0);
+  config.set_gmsk_baud_rate(gmsk_baud_rate_spin_ ? static_cast<uint32_t>(gmsk_baud_rate_spin_->value()) : 9600u);
+  config.set_gmsk_bt(gmsk_bt_spin_ ? static_cast<float>(gmsk_bt_spin_->value()) : 0.4f);
+  config.set_gmsk_modulation_index(gmsk_mod_index_spin_ ? static_cast<float>(gmsk_mod_index_spin_->value()) : 0.5f);
   config.set_scan_list_locked_channel_index(
       static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
   const double default_squelch_db =

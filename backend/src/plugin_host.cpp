@@ -186,11 +186,13 @@ bool PluginHost::LoadAll(std::string* error) {
     lp.info.enabled        = true;
     lp.info.path           = path_str;
     lp.dl_handle           = handle;
-    lp.fn_create           = fn_create;
-    lp.fn_destroy          = fn_destroy;
-    lp.fn_get_meta         = fn_get_meta;
-    lp.fn_process_iq       = fn_process_iq;
-    lp.ctx                 = ctx;
+    lp.fn_create     = fn_create;
+    lp.fn_destroy    = fn_destroy;
+    lp.fn_get_meta   = fn_get_meta;
+    lp.fn_process_iq = fn_process_iq;
+    // mr_plugin_set_param is optional — absence is not an error.
+    lp.fn_set_param  = reinterpret_cast<FnSetParam>(dlsym(handle, "mr_plugin_set_param"));
+    lp.ctx           = ctx;
 
     plugins_.push_back(std::move(lp));
   }
@@ -328,6 +330,15 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
   }
 
   (*state->callback)(msg);
+}
+
+void PluginHost::SetParam(const std::string& key, const std::string& value) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (auto& p : plugins_) {
+    if (p.fn_set_param && p.ctx) {
+      p.fn_set_param(p.ctx, key.c_str(), value.c_str());
+    }
+  }
 }
 
 PluginHost::LoadedPlugin* PluginHost::FindPluginByName(const std::string& name) {

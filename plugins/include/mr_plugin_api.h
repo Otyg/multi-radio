@@ -84,6 +84,20 @@ void mr_plugin_destroy(MrPluginCtx* ctx);
 const MrPluginMeta* mr_plugin_get_meta(void);
 
 /**
+ * mr_plugin_set_param — update a runtime parameter (OPTIONAL export).
+ *
+ * The host calls this when configuration changes, before the next
+ * mr_plugin_process_iq call.  Plugins that do not export this symbol
+ * are simply not reconfigured at runtime.
+ *
+ * @param ctx    Opaque context.
+ * @param key    NUL-terminated parameter name, e.g. "baud_rate".
+ * @param value  NUL-terminated string value, e.g. "9600".
+ * @return       1 if the parameter was accepted, 0 if unknown.
+ */
+int mr_plugin_set_param(MrPluginCtx* ctx, const char* key, const char* value);
+
+/**
  * mr_plugin_process_iq — demodulate one IQ block.
  *
  * @param ctx             Opaque context returned by mr_plugin_create.

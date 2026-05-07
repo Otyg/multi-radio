@@ -75,6 +75,9 @@ struct ModeConfig {
   bool audio_lpf4k5_enabled = false;
   bool scan_list_channel_locked = false;
   int32_t scan_list_locked_channel_index = -1;
+  uint32_t gmsk_baud_rate = 9600;
+  float gmsk_bt = 0.4f;
+  float gmsk_modulation_index = 0.5f;
   bool rnnoise_enabled = false;
   float rnnoise_strength = 100.0f;
 };
