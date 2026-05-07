@@ -5,13 +5,12 @@
  *
  * Reads a packed bit stream (MSB-first) from mr_plugin_process_bits,
  * performs bit-stuffing removal, extracts HDLC frames delimited by
- * flag bytes (0x7E = 01111110), validates CRC-16-CCITT and emits:
+ * flag bytes (0x7E = 01111110), validates CRC-16-CCITT and periodically
+ * emits aggregate statistics:
  *
- *   signal_type = "HDLC_FRAME"         (CRC OK)
- *   signal_type = "HDLC_FRAME_BAD_CRC" (CRC failed)
+ *   signal_type = "HDLC_STATS"
  *
- * Payload: hex string of frame content excluding the 2-byte FCS.
- * normalized_kv_json: {"byte_count":"N","crc_ok":"1"} or {"...":"0"}.
+ * normalized_kv_json: {"total":"N","ok":"X","fail":"Y","interval_s":"10"}
  *
  * State is maintained across calls because frames can span invocations.
  */
@@ -64,6 +63,13 @@ typedef struct {
     /* Assembled frame bytes (including FCS at end) */
     uint8_t  frame_buf[HDLC_MAX_FRAME_BYTES];
     uint32_t frame_len;     /* bytes accumulated so far */
+
+    /* Periodic statistics */
+    uint64_t stats_total;
+    uint64_t stats_ok;
+    uint64_t stats_fail;
+    uint64_t stats_last_emit_ms;
+    uint64_t stats_interval_ms;  /* default 10000 */
 } HdlcCtx;
 
 /* ------------------------------------------------------------------ */
@@ -80,6 +86,7 @@ static const MrPluginMeta kMeta = {
 
 MrPluginCtx* mr_plugin_create(void) {
     HdlcCtx* ctx = (HdlcCtx*)calloc(1, sizeof(HdlcCtx));
+    if (ctx) ctx->stats_interval_ms = 10000;
     return (MrPluginCtx*)ctx;
 }
 
@@ -88,53 +95,57 @@ void mr_plugin_destroy(MrPluginCtx* raw) { free(raw); }
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
 int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
-    (void)raw; (void)key; (void)value;
+    if (!raw || !key || !value) return 0;
+    HdlcCtx* ctx = (HdlcCtx*)raw;
+    if (strcmp(key, "stats_interval_s") == 0) {
+        double secs = atof(value);
+        if (secs > 0.0)
+            ctx->stats_interval_ms = (uint64_t)(secs * 1000.0);
+    }
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/* Emit a completed frame                                               */
+/* Validate a completed frame; returns 1 if CRC OK, 0 if bad, -1 too short */
 /* ------------------------------------------------------------------ */
 
-static void emit_frame(HdlcCtx* ctx, double freq_hz, uint64_t unix_ms,
-                       MrEmitFn emit_fn, void* user_data) {
-    /* Need at least 4 bytes total (2 data + 2 FCS minimum meaningful frame) */
-    if (ctx->frame_len < 4) return;
-
-    /* Compute CRC over all frame bytes including the FCS field */
+static int check_frame(HdlcCtx* ctx) {
+    if (ctx->frame_len < 4) return -1;
     uint16_t crc = HDLC_CRC_INIT;
     uint32_t i;
     for (i = 0; i < ctx->frame_len; ++i)
         crc = crc16_ccitt_byte(crc, ctx->frame_buf[i]);
-
-    const int crc_ok = (crc == HDLC_CRC_RESIDUE);
-
-    /* Payload = frame content excluding the 2-byte FCS */
-    const uint32_t data_len = ctx->frame_len - 2;
-
-    /* Build hex string */
-    char* hex = (char*)malloc(data_len * 2 + 1);
-    if (!hex) return;
-    for (i = 0; i < data_len; ++i)
-        snprintf(hex + i * 2, 3, "%02X", (unsigned)ctx->frame_buf[i]);
-
-    /* Build normalized KV JSON */
-    char kv[128];
-    snprintf(kv, sizeof(kv),
-             "{\"byte_count\":\"%u\",\"crc_ok\":\"%d\"}",
-             (unsigned)data_len, crc_ok);
-
-    const char* sig_type = crc_ok ? "HDLC_FRAME" : "HDLC_FRAME_BAD_CRC";
-
-    if (emit_fn)
-        emit_fn(sig_type, hex, freq_hz, unix_ms, kv, user_data);
-
-    free(hex);
+    return (crc == HDLC_CRC_RESIDUE) ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */
 /* mr_plugin_process_bits                                              */
 /* ------------------------------------------------------------------ */
+
+static void maybe_emit_stats(HdlcCtx* ctx, double freq_hz, uint64_t unix_ms,
+                             MrEmitFn emit_fn, void* user_data) {
+    if (ctx->stats_interval_ms == 0) return;
+    if (ctx->stats_last_emit_ms != 0 &&
+        unix_ms - ctx->stats_last_emit_ms < ctx->stats_interval_ms) return;
+    if (ctx->stats_last_emit_ms == 0) {
+        /* First call: just record start time, don't emit yet */
+        ctx->stats_last_emit_ms = unix_ms;
+        return;
+    }
+    char kv[256];
+    snprintf(kv, sizeof(kv),
+             "{\"total\":\"%llu\",\"ok\":\"%llu\",\"fail\":\"%llu\",\"interval_s\":\"%llu\"}",
+             (unsigned long long)ctx->stats_total,
+             (unsigned long long)ctx->stats_ok,
+             (unsigned long long)ctx->stats_fail,
+             (unsigned long long)(ctx->stats_interval_ms / 1000u));
+    if (emit_fn)
+        emit_fn("HDLC_STATS", "", freq_hz, unix_ms, kv, user_data);
+    ctx->stats_total = 0;
+    ctx->stats_ok    = 0;
+    ctx->stats_fail  = 0;
+    ctx->stats_last_emit_ms = unix_ms;
+}
 
 void mr_plugin_process_bits(MrPluginCtx* raw,
                             const uint8_t* bit_bytes, uint32_t bit_count,
@@ -196,8 +207,12 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 ctx->consecutive_ones = 0;
 
                 if (ctx->in_frame && ctx->frame_len >= 4) {
-                    /* Close the current frame */
-                    emit_frame(ctx, freq_hz, unix_ms, emit_fn, user_data);
+                    const int crc_ok = check_frame(ctx);
+                    if (crc_ok >= 0) {
+                        ctx->stats_total++;
+                        if (crc_ok) ctx->stats_ok++;
+                        else        ctx->stats_fail++;
+                    }
                 }
 
                 /* Start a new frame */
@@ -223,6 +238,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
             }
         }
     }
+
+    maybe_emit_stats(ctx, freq_hz, unix_ms, emit_fn, user_data);
 }
 
 /* mr_plugin_process_iq: no-op stub (postprocessing role never called for IQ) */

@@ -2538,19 +2538,15 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     return;
   }
 
-  // Log HDLC frames (postprocessed)
-  if (plugin_type == "HDLC_FRAME" || plugin_type == "HDLC_FRAME_BAD_CRC") {
-    const QString byte_count = fields.value("byte_count").toString();
-    const QString crc_ok_str = fields.value("crc_ok").toString();
-    const QString crc_label = (crc_ok_str == "1") ? "OK" : "FAIL";
-    AppendLog(QString("[%1] RX%2 %3 f=%4Hz bytes=%5 crc=%6: %7")
+  // Log HDLC periodic statistics
+  if (plugin_type == "HDLC_STATS") {
+    AppendLog(QString("[%1] RX%2 HDLC_STATS f=%3Hz: %4 frames, %5 OK, %6 FAIL")
                   .arg(row.timestamp.toString("HH:mm:ss"))
                   .arg(receiver_id)
-                  .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
-                  .arg(byte_count)
-                  .arg(crc_label)
-                  .arg(payload));
+                  .arg(fields.value("total").toString())
+                  .arg(fields.value("ok").toString())
+                  .arg(fields.value("fail").toString()));
     return;
   }
 
