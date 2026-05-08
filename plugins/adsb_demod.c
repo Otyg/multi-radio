@@ -43,6 +43,10 @@ typedef struct {
   uint32_t* mag;
   uint32_t  mag_cap;
   uint32_t  mag_len;
+  uint64_t  preamble_count;
+  uint64_t  crc_ok_count;
+  uint64_t  crc_fail_count;
+  uint64_t  last_stats_ms;
 } AdsbCtx;
 
 /* ------------------------------------------------------------------ */
@@ -172,6 +176,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   uint32_t p = 0;
   while (p + FRAME_SAMPS <= ctx->mag_len) {
     if (!preamble_ok(ctx->mag + p)) { ++p; continue; }
+    ++ctx->preamble_count;
 
     const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
 
@@ -203,11 +208,23 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                          (uint32_t)frame[n_bytes - 1u];
 
     if (crc_calc == crc_fram) {
+      ++ctx->crc_ok_count;
       emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
       p += n_samps;
     } else {
+      ++ctx->crc_fail_count;
       ++p;
     }
+  }
+
+  /* Skriv ut statistik var 10:e sekund */
+  if (unix_ms - ctx->last_stats_ms >= 10000u) {
+    ctx->last_stats_ms = unix_ms;
+    fprintf(stderr,
+            "[ADS-B] preamble=%llu  crc_ok=%llu  crc_fail=%llu\n",
+            (unsigned long long)ctx->preamble_count,
+            (unsigned long long)ctx->crc_ok_count,
+            (unsigned long long)ctx->crc_fail_count);
   }
 
   /* Behåll obearbetade samplar för nästa block */
