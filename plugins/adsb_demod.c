@@ -186,30 +186,37 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag[ctx->mag_len++] = (uint32_t)(i * i) + (uint32_t)(q * q);
   }
 
+  /* Samplar per bit ur faktisk sample rate (t.ex. 2.0 vid 2 Msps, 2.048 vid 2.048 Msps) */
+  float spb = (float)sr * 1e-6f;
+  /* Minsta buffert för att kunna avkoda en max-lång ram */
+  uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
+
   /* Sök efter preamblar och avkoda ramar */
   uint32_t p = 0;
-  while (p + FRAME_SAMPS <= ctx->mag_len) {
+  while (p + min_frame <= ctx->mag_len) {
     if (!preamble_ok(ctx->mag + p)) { ++p; continue; }
     ++ctx->preamble_count;
 
     const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
 
-    /* Avkoda de 5 MSB-bitarna (DF-fält) för att avgöra ramlängd */
+    /* DF-fält (5 bitar) med korrekt sampelposition för faktisk sr */
     uint32_t df5 = 0;
-    for (int b = 0; b < 5; ++b)
-      df5 = (df5 << 1) | (uint32_t)decode_bit(data[b * BIT_SAMPS],
-                                               data[b * BIT_SAMPS + 1u]);
+    for (int b = 0; b < 5; ++b) {
+      uint32_t s = (uint32_t)((float)b * spb);
+      df5 = (df5 << 1) | (uint32_t)decode_bit(data[s], data[s + 1u]);
+    }
     uint32_t n_bits  = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
-    uint32_t n_samps = PREAMBLE_SAMPS + n_bits * BIT_SAMPS;
+    uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
 
     /* Vänta om vi inte har tillräckligt med samplar för hela ramen */
     if (p + n_samps > ctx->mag_len) break;
 
-    /* Avkoda alla bitar */
+    /* Avkoda alla bitar med korrekt sampelposition för faktisk sr */
     uint8_t frame[LONG_BITS / 8u];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      if (decode_bit(data[bit * BIT_SAMPS], data[bit * BIT_SAMPS + 1u]))
+      uint32_t s = (uint32_t)((float)bit * spb);
+      if (decode_bit(data[s], data[s + 1u]))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
 
@@ -226,10 +233,19 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       ++ctx->crc_ok_count;
       if (df == 17u) ++ctx->df17_ok_count;
       emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
-      p += n_samps;
+      p += n_samps - 2u;
     } else {
+      if (df == 17u) {
+        if (ctx->df17_fail_count < 5u) {
+          fprintf(stderr, "[ADS-B DBG] DF17 #%llu sr=%u spb=%.3f: ",
+                  (unsigned long long)ctx->df17_fail_count + 1u, sr, (double)spb);
+          for (uint32_t x = 0; x < n_bytes; ++x)
+            fprintf(stderr, "%02X", frame[x]);
+          fprintf(stderr, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
+        }
+        ++ctx->df17_fail_count;
+      }
       ++ctx->crc_fail_count;
-      if (df == 17u) ++ctx->df17_fail_count;
       ++p;
     }
   }
