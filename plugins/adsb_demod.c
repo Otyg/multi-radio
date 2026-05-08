@@ -46,6 +46,8 @@ typedef struct {
   uint64_t  preamble_count;
   uint64_t  crc_ok_count;
   uint64_t  crc_fail_count;
+  uint64_t  df17_ok_count;
+  uint64_t  df17_fail_count;
   uint64_t  last_stats_ms;
 } AdsbCtx;
 
@@ -71,18 +73,20 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
 
 /* HIGH vid 0,2,7,9 — LÅG vid 1,3–6,8 och guard-intervall 10–15 */
 static int preamble_ok(const uint32_t* m) {
-  /* Hitta den starkaste låg-sampeln inklusive guard-intervallet */
-  uint32_t lo_max = m[1];
-  for (int i = 3; i <= 6;  ++i) if (m[i]  > lo_max) lo_max = m[i];
-  if (m[8]  > lo_max) lo_max = m[8];
-  for (int i = 10; i <= 15; ++i) if (m[i] > lo_max) lo_max = m[i];
+  /* Lokal kontrast: varje hög-puls måste överstiga sina direkta grannar × 2 */
+  if (m[0] < m[1] * 2u) return 0;
+  if (m[2] < m[1] * 2u || m[2] < m[3] * 2u) return 0;
+  if (m[7] < m[6] * 2u || m[7] < m[8] * 2u) return 0;
+  if (m[9] < m[8] * 2u || m[9] < m[10] * 2u) return 0;
 
-  /* Varje hög-puls måste individuellt överstiga den starkaste låg-sampeln */
-  if (m[0] <= lo_max || m[2] <= lo_max || m[7] <= lo_max || m[9] <= lo_max)
-    return 0;
+  /* Pulslikhet: de fyra hög-pulserna ska vara inom 3:1 i effekt */
+  uint32_t hi_min = m[0], hi_max = m[0];
+  if (m[2] < hi_min) hi_min = m[2]; else if (m[2] > hi_max) hi_max = m[2];
+  if (m[7] < hi_min) hi_min = m[7]; else if (m[7] > hi_max) hi_max = m[7];
+  if (m[9] < hi_min) hi_min = m[9]; else if (m[9] > hi_max) hi_max = m[9];
+  if (hi_min * 3u < hi_max) return 0;
 
-  /* Summa-SNR: hög-summan (4 samplar) mot låg-summan (12 samplar),
-     samma effektiva per-sampel-tröskel som tidigare (H ≥ 3×L) */
+  /* Summa-SNR: summan av 4 höga ≥ summan av 12 låga inkl. guard-intervall */
   uint32_t h = m[0] + m[2] + m[7] + m[9];
   uint32_t l = m[1] + m[3] + m[4] + m[5] + m[6] + m[8]
              + m[10] + m[11] + m[12] + m[13] + m[14] + m[15];
@@ -217,12 +221,15 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                         ((uint32_t)frame[n_bytes - 2u] <<  8) |
                          (uint32_t)frame[n_bytes - 1u];
 
+    uint32_t df = (frame[0] >> 3) & 0x1Fu;
     if (crc_calc == crc_fram) {
       ++ctx->crc_ok_count;
+      if (df == 17u) ++ctx->df17_ok_count;
       emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
       p += n_samps;
     } else {
       ++ctx->crc_fail_count;
+      if (df == 17u) ++ctx->df17_fail_count;
       ++p;
     }
   }
@@ -231,10 +238,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   if (unix_ms - ctx->last_stats_ms >= 10000u) {
     ctx->last_stats_ms = unix_ms;
     fprintf(stderr,
-            "[ADS-B] preamble=%llu  crc_ok=%llu  crc_fail=%llu\n",
+            "[ADS-B] preamble=%llu  crc_ok=%llu  crc_fail=%llu"
+            "  df17_ok=%llu  df17_fail=%llu\n",
             (unsigned long long)ctx->preamble_count,
             (unsigned long long)ctx->crc_ok_count,
-            (unsigned long long)ctx->crc_fail_count);
+            (unsigned long long)ctx->crc_fail_count,
+            (unsigned long long)ctx->df17_ok_count,
+            (unsigned long long)ctx->df17_fail_count);
   }
 
   /* Behåll obearbetade samplar för nästa block */
