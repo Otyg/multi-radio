@@ -45,6 +45,7 @@ typedef struct {
   uint32_t  mag_len;
   uint64_t  preamble_count;
   uint64_t  crc_ok_count;
+  uint64_t  crc_ok_corrected_count;
   uint64_t  crc_fail_count;
   uint64_t  df17_ok_count;
   uint64_t  df17_fail_count;
@@ -99,6 +100,25 @@ static int preamble_ok(const uint32_t* m) {
 
 static int decode_bit(uint32_t s0, uint32_t s1) {
   return (s0 > s1) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ettbitars-felkorrigering                                             */
+/* ------------------------------------------------------------------ */
+
+/* Provar att vända en bit i taget; returnerar bitindex (0-based) om en
+ * enda bit-vändning ger korrekt CRC-24, annars -1. */
+static int try_fix_single_bit(uint8_t* frame, uint32_t n_bytes) {
+  for (uint32_t bit = 0; bit < n_bytes * 8u; ++bit) {
+    frame[bit / 8u] ^= (uint8_t)(0x80u >> (bit % 8u));
+    uint32_t calc = crc24(frame, n_bytes - 3u);
+    uint32_t recv = ((uint32_t)frame[n_bytes - 3u] << 16) |
+                    ((uint32_t)frame[n_bytes - 2u] <<  8) |
+                     (uint32_t)frame[n_bytes - 1u];
+    if (calc == recv) return (int)bit;
+    frame[bit / 8u] ^= (uint8_t)(0x80u >> (bit % 8u)); /* återställ */
+  }
+  return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -247,18 +267,29 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
       p += n_samps - 2u;
     } else {
-      if (df == 17u) {
-        if (ctx->df17_fail_count < 5u) {
-          fprintf(stderr, "[ADS-B DBG] DF17 #%llu sr=%u spb=%.3f: ",
-                  (unsigned long long)ctx->df17_fail_count + 1u, sr, (double)spb);
-          for (uint32_t x = 0; x < n_bytes; ++x)
-            fprintf(stderr, "%02X", frame[x]);
-          fprintf(stderr, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
+      /* Försök rätta ett enskilt bitfel */
+      int fixed_bit = try_fix_single_bit(frame, n_bytes);
+      if (fixed_bit >= 0) {
+        ++ctx->crc_ok_corrected_count;
+        ++ctx->crc_ok_count;
+        df = (frame[0] >> 3) & 0x1Fu;
+        if (df == 17u) ++ctx->df17_ok_count;
+        emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
+        p += n_samps - 2u;
+      } else {
+        if (df == 17u) {
+          if (ctx->df17_fail_count < 5u) {
+            fprintf(stderr, "[ADS-B DBG] DF17 #%llu sr=%u spb=%.3f: ",
+                    (unsigned long long)ctx->df17_fail_count + 1u, sr, (double)spb);
+            for (uint32_t x = 0; x < n_bytes; ++x)
+              fprintf(stderr, "%02X", frame[x]);
+            fprintf(stderr, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
+          }
+          ++ctx->df17_fail_count;
         }
-        ++ctx->df17_fail_count;
+        ++ctx->crc_fail_count;
+        ++p;
       }
-      ++ctx->crc_fail_count;
-      ++p;
     }
   }
 
@@ -266,10 +297,11 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   if (unix_ms - ctx->last_stats_ms >= 10000u) {
     ctx->last_stats_ms = unix_ms;
     fprintf(stderr,
-            "[ADS-B] preamble=%llu  crc_ok=%llu  crc_fail=%llu"
+            "[ADS-B] preamble=%llu  crc_ok=%llu(+%llu korr)  crc_fail=%llu"
             "  df17_ok=%llu  df17_fail=%llu\n",
             (unsigned long long)ctx->preamble_count,
             (unsigned long long)ctx->crc_ok_count,
+            (unsigned long long)ctx->crc_ok_corrected_count,
             (unsigned long long)ctx->crc_fail_count,
             (unsigned long long)ctx->df17_ok_count,
             (unsigned long long)ctx->df17_fail_count);
