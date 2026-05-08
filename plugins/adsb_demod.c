@@ -199,11 +199,12 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
 
-    /* DF-fält (5 bitar) med korrekt sampelposition för faktisk sr */
+    /* DF-fält (5 bitar) — chip-centrerad sampling vid spb×0.25 / spb×0.75 */
     uint32_t df5 = 0;
     for (int b = 0; b < 5; ++b) {
-      uint32_t s = (uint32_t)((float)b * spb);
-      df5 = (df5 << 1) | (uint32_t)decode_bit(data[s], data[s + 1u]);
+      uint32_t s0 = (uint32_t)((float)b * spb + spb * 0.25f);
+      uint32_t s1 = (uint32_t)((float)b * spb + spb * 0.75f);
+      df5 = (df5 << 1) | (uint32_t)decode_bit(data[s0], data[s1]);
     }
     uint32_t n_bits  = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
     uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
@@ -211,12 +212,14 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     /* Vänta om vi inte har tillräckligt med samplar för hela ramen */
     if (p + n_samps > ctx->mag_len) break;
 
-    /* Avkoda alla bitar med korrekt sampelposition för faktisk sr */
+    /* Avkoda alla bitar — chip-centrerad sampling vid spb×0.25 / spb×0.75
+     * Garanterar att s0 och s1 alltid landar i var sitt chip oavsett sr */
     uint8_t frame[LONG_BITS / 8u];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      uint32_t s = (uint32_t)((float)bit * spb);
-      if (decode_bit(data[s], data[s + 1u]))
+      uint32_t s0 = (uint32_t)((float)bit * spb + spb * 0.25f);
+      uint32_t s1 = (uint32_t)((float)bit * spb + spb * 0.75f);
+      if (decode_bit(data[s0], data[s1]))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
 
