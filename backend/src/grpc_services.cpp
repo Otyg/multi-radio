@@ -112,6 +112,7 @@ Modulation FromProto(v1::Modulation modulation) {
     case v1::MODULATION_WFM:  return Modulation::kWfm;
     case v1::MODULATION_FSK:  return Modulation::kFsk;
     case v1::MODULATION_GMSK: return Modulation::kGmsk;
+    case v1::MODULATION_PPM:  return Modulation::kPpm;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return Modulation::kNfm;
@@ -124,6 +125,7 @@ v1::Modulation ToProto(Modulation modulation) {
     case Modulation::kWfm:  return v1::MODULATION_WFM;
     case Modulation::kFsk:  return v1::MODULATION_FSK;
     case Modulation::kGmsk: return v1::MODULATION_GMSK;
+    case Modulation::kPpm:  return v1::MODULATION_PPM;
     case Modulation::kNfm:
     default:                return v1::MODULATION_NFM;
   }
@@ -194,6 +196,8 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.gmsk_postprocessor  = config.gmsk_postprocessor();
   out.gmsk_nrzi_invert    = config.gmsk_nrzi_invert();
   out.ppm_correction      = config.ppm_correction();
+  if (config.ppm_bit_duration_us() > 0) out.ppm_bit_duration_us = config.ppm_bit_duration_us();
+  if (config.ppm_data_rate_bps() > 0)   out.ppm_data_rate_bps   = config.ppm_data_rate_bps();
   out.rnnoise_enabled = config.rnnoise_enabled();
   out.rnnoise_strength = config.rnnoise_strength();
   return out;
@@ -231,6 +235,8 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_gmsk_postprocessor(config.gmsk_postprocessor);
   out->set_gmsk_nrzi_invert(config.gmsk_nrzi_invert);
   out->set_ppm_correction(config.ppm_correction);
+  out->set_ppm_bit_duration_us(config.ppm_bit_duration_us);
+  out->set_ppm_data_rate_bps(config.ppm_data_rate_bps);
   out->set_rnnoise_enabled(config.rnnoise_enabled);
   out->set_rnnoise_strength(config.rnnoise_strength);
   out->clear_frequency_list_hz();

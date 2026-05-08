@@ -498,11 +498,14 @@ void ReceiverWorker::PushPluginConfig() {
   plugin_host_->SetParam("bt",               std::to_string(cfg.gmsk_bt));
   plugin_host_->SetParam("modulation_index", std::to_string(cfg.gmsk_modulation_index));
   plugin_host_->SetParam("invert",           cfg.gmsk_nrzi_invert ? "1" : "0");
+  plugin_host_->SetParam("bit_duration_us",  std::to_string(cfg.ppm_bit_duration_us));
+  plugin_host_->SetParam("data_rate",        std::to_string(cfg.ppm_data_rate_bps));
   plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
   plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
   std::string demod_name;
   if (cfg.fixed_modulation == Modulation::kFsk)  demod_name = "fsk_demod";
   if (cfg.fixed_modulation == Modulation::kGmsk) demod_name = "gmsk_demod";
+  if (cfg.fixed_modulation == Modulation::kPpm)  demod_name = "ppm_demod";
   plugin_host_->SetActiveDemodulator(demod_name);
 }
 

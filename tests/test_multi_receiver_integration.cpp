@@ -55,6 +55,7 @@ class FakeDevice final : public multi_radio::IRadioDevice {
   }
 
   bool SetGainTenthdB(int /*gain_tenth_db*/, std::string* /*error*/) override { return true; }
+  bool SetPpmCorrection(int /*ppm*/, std::string* /*error*/) override { return true; }
 
   bool ReadIq(multi_radio::IQSampleBlock* out, std::string* error) override {
     if (!opened_) {

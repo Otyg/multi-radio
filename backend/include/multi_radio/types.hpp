@@ -28,6 +28,7 @@ enum class Modulation {
   kAm,
   kFsk,
   kGmsk,
+  kPpm,
 };
 
 enum class EventKind {
@@ -82,6 +83,8 @@ struct ModeConfig {
   std::string gmsk_postprocessor;
   bool gmsk_nrzi_invert = false;
   int32_t ppm_correction = 0;
+  uint32_t ppm_bit_duration_us = 10;
+  uint32_t ppm_data_rate_bps   = 100000;
   bool rnnoise_enabled = false;
   float rnnoise_strength = 100.0f;
 };

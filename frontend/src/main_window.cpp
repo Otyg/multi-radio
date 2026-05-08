@@ -74,6 +74,7 @@ int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
     case v1::MODULATION_WFM:  return 180000;
     case v1::MODULATION_FSK:  return 12500;
     case v1::MODULATION_GMSK: return 12500;
+    case v1::MODULATION_PPM:  return 500000;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return 12500;
@@ -86,6 +87,7 @@ QString ModulationLabel(v1::Modulation modulation) {
     case v1::MODULATION_WFM:  return "WFM";
     case v1::MODULATION_FSK:  return "FSK";
     case v1::MODULATION_GMSK: return "GMSK";
+    case v1::MODULATION_PPM:  return "PPM";
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return "NFM";
@@ -135,7 +137,7 @@ v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
   const auto modulation = static_cast<v1::Modulation>(modulation_value);
   if (modulation == v1::MODULATION_NFM  || modulation == v1::MODULATION_WFM  ||
       modulation == v1::MODULATION_AM   || modulation == v1::MODULATION_FSK  ||
-      modulation == v1::MODULATION_GMSK) {
+      modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_PPM) {
     return modulation;
   }
   return v1::MODULATION_WFM;
@@ -1099,6 +1101,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_->addItem("AM",   QVariant::fromValue<int>(v1::MODULATION_AM));
   fixed_modulation_combo_->addItem("FSK",  QVariant::fromValue<int>(v1::MODULATION_FSK));
   fixed_modulation_combo_->addItem("GMSK", QVariant::fromValue<int>(v1::MODULATION_GMSK));
+  fixed_modulation_combo_->addItem("PPM",  QVariant::fromValue<int>(v1::MODULATION_PPM));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
   fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
@@ -1178,9 +1181,39 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
 
+  // PPM parameter controls (shown only when PPM modulation is selected).
+  ppm_params_widget_ = new QWidget(fixed_tab);
+  auto* ppm_row = new QHBoxLayout(ppm_params_widget_);
+  ppm_row->setContentsMargins(0, 0, 0, 0);
+  ppm_bit_duration_us_spin_ = new QSpinBox(ppm_params_widget_);
+  ppm_bit_duration_us_spin_->setRange(1, 100000);
+  ppm_bit_duration_us_spin_->setSingleStep(1);
+  ppm_bit_duration_us_spin_->setValue(10);
+  ppm_bit_duration_us_spin_->setSuffix(" \xc2\xb5s");
+  ppm_bit_duration_us_spin_->setToolTip(
+      "Bittid i mikrosekunder — bestämmer chirp-tidens längd.\n"
+      "Varje bit delas i två lika halvperioder:\n"
+      "  HÖG+LÅG = logisk 1,  LÅG+HÖG = logisk 0.\n"
+      "Kräver minst 4 samplar per bit.");
+  ppm_data_rate_mbit_spin_ = new QDoubleSpinBox(ppm_params_widget_);
+  ppm_data_rate_mbit_spin_->setRange(0.001, 100.0);
+  ppm_data_rate_mbit_spin_->setSingleStep(0.1);
+  ppm_data_rate_mbit_spin_->setDecimals(3);
+  ppm_data_rate_mbit_spin_->setValue(0.1);
+  ppm_data_rate_mbit_spin_->setSuffix(" MBit/s");
+  ppm_data_rate_mbit_spin_->setToolTip("Datatakt — sätter takten på sändningens bitström.");
+  ppm_row->addWidget(new QLabel("Bittid:", ppm_params_widget_));
+  ppm_row->addWidget(ppm_bit_duration_us_spin_);
+  ppm_row->addSpacing(12);
+  ppm_row->addWidget(new QLabel("Datatakt:", ppm_params_widget_));
+  ppm_row->addWidget(ppm_data_rate_mbit_spin_);
+  ppm_row->addStretch(1);
+  ppm_params_widget_->setVisible(false);
+
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
   fixed_layout->addRow("GMSK", gmsk_params_widget_);
+  fixed_layout->addRow("PPM", ppm_params_widget_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
 
   fixed_hdlc_log_ = new QPlainTextEdit(fixed_tab);
@@ -1361,6 +1394,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
   connect(gmsk_postproc_combo_,  QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
+  connect(ppm_bit_duration_us_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
+          this, apply_on_spin);
+  connect(ppm_data_rate_mbit_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+          this, apply_on_dspin);
   connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
@@ -1557,6 +1594,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
     if (gmsk_params_widget_ != nullptr)
       gmsk_params_widget_->setVisible(modulation == v1::MODULATION_GMSK);
+    if (ppm_params_widget_ != nullptr)
+      ppm_params_widget_->setVisible(modulation == v1::MODULATION_PPM);
     const int suggested_bandwidth_hz = DefaultBandwidthHzForModulation(modulation);
     const int current_bandwidth_hz = channel_bandwidth_spin_->value();
     const bool can_auto_apply =
@@ -1784,7 +1823,7 @@ void MainWindow::RefreshReceivers() {
         }
         if (fixed_modulation != v1::MODULATION_NFM  && fixed_modulation != v1::MODULATION_WFM  &&
             fixed_modulation != v1::MODULATION_AM   && fixed_modulation != v1::MODULATION_FSK  &&
-            fixed_modulation != v1::MODULATION_GMSK) {
+            fixed_modulation != v1::MODULATION_GMSK && fixed_modulation != v1::MODULATION_PPM) {
           fixed_modulation = v1::MODULATION_NFM;
         }
         const QSignalBlocker blocker(fixed_modulation_combo_);
@@ -1956,7 +1995,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       const auto parsed = static_cast<v1::Modulation>(modulation_value);
       if (parsed == v1::MODULATION_NFM  || parsed == v1::MODULATION_WFM  ||
           parsed == v1::MODULATION_AM   || parsed == v1::MODULATION_FSK  ||
-          parsed == v1::MODULATION_GMSK) {
+          parsed == v1::MODULATION_GMSK || parsed == v1::MODULATION_PPM) {
         fixed_modulation = parsed;
       }
     }
@@ -2001,6 +2040,12 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   }
   config.set_gmsk_postprocessor(gmsk_postproc_combo_
       ? gmsk_postproc_combo_->currentData().toString().toStdString() : "");
+  config.set_ppm_bit_duration_us(
+      ppm_bit_duration_us_spin_ ? static_cast<uint32_t>(ppm_bit_duration_us_spin_->value()) : 10u);
+  {
+    const double mbit = ppm_data_rate_mbit_spin_ ? ppm_data_rate_mbit_spin_->value() : 0.1;
+    config.set_ppm_data_rate_bps(static_cast<uint32_t>(mbit * 1e6));
+  }
   config.set_ppm_correction(ppm_correction_spin_ ? ppm_correction_spin_->value() : 0);
   config.set_scan_list_locked_channel_index(
       static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));

@@ -24,6 +24,7 @@ enum Modulation {
   MODULATION_NFM = 3;
   MODULATION_FSK = 4;
   MODULATION_GMSK = 5;
+  MODULATION_PPM = 6;
 }
 
 enum EventKind {
@@ -69,6 +70,8 @@ message ModeConfig {
   string gmsk_postprocessor = 34;
   bool   gmsk_nrzi_invert = 35;
   int32  ppm_correction   = 36;
+  uint32 ppm_bit_duration_us = 37;
+  uint32 ppm_data_rate_bps   = 38;
   bool rnnoise_enabled = 28;
   float rnnoise_strength = 29;
 }
