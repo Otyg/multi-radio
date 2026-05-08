@@ -127,7 +127,80 @@ static int try_fix_single_bit(uint8_t* frame, uint32_t n_bytes) {
 }
 
 /* ------------------------------------------------------------------ */
-/* ME-fältavkodning (DF17/18, TC 1–4, 9–18, 19)                       */
+/* ICAO 24-bitars adress → land (ICAO Annex 10-tilldelningar)          */
+/* ------------------------------------------------------------------ */
+
+typedef struct { uint32_t lo; uint32_t hi; const char* cc; } IcaoBlock;
+
+/* Sorterade block; binärsökning i icao_country() */
+static const IcaoBlock kIcaoBlocks[] = {
+  {0x004000,0x0043FF,"MZ"},{0x006000,0x006FFF,"ZA"},{0x008000,0x00FFFF,"ZA"},
+  {0x010000,0x017FFF,"EG"},{0x018000,0x01FFFF,"LY"},{0x020000,0x027FFF,"MA"},
+  {0x028000,0x02FFFF,"TN"},{0x030000,0x0303FF,"BW"},{0x032000,0x032FFF,"BI"},
+  {0x034000,0x034FFF,"CM"},{0x038000,0x03FFFF,"CG"},
+  {0x040000,0x043FFF,"DZ"},
+  {0x060000,0x067FFF,"KE"},{0x068000,0x06FFFF,"NG"},
+  {0x100000,0x1FFFFF,"RU"},
+  {0x201000,0x2013FF,"NA"},{0x202000,0x2023FF,"ER"},
+  {0x300000,0x33FFFF,"IT"},{0x340000,0x37FFFF,"ES"},
+  {0x380000,0x3BFFFF,"FR"},{0x3C0000,0x3FFFFF,"DE"},
+  {0x400000,0x43FFFF,"GB"},
+  {0x440000,0x447FFF,"AT"},{0x448000,0x44FFFF,"BE"},
+  {0x450000,0x457FFF,"BG"},{0x458000,0x45FFFF,"DK"},
+  {0x460000,0x467FFF,"FI"},{0x468000,0x46FFFF,"GR"},
+  {0x470000,0x477FFF,"HU"},{0x478000,0x47FFFF,"IE"},
+  {0x480000,0x487FFF,"IT"},{0x488000,0x48FFFF,"LU"},
+  {0x490000,0x497FFF,"MT"},{0x498000,0x49FFFF,"MC"},
+  {0x4A0000,0x4A7FFF,"NL"},{0x4A8000,0x4AFFFF,"NO"},
+  {0x4B0000,0x4B7FFF,"PL"},{0x4B8000,0x4BFFFF,"PT"},
+  {0x4C0000,0x4C7FFF,"RO"},{0x4C8000,0x4CFFFF,"CZ"},
+  {0x4D0000,0x4D7FFF,"SE"},{0x4D8000,0x4DFFFF,"CH"},
+  {0x4E0000,0x4E7FFF,"TR"},{0x4E8000,0x4EFFFF,"RS"},
+  {0x500000,0x5003FF,"UA"},{0x501000,0x5013FF,"BY"},
+  {0x504000,0x504FFF,"SK"},{0x508000,0x50FFFF,"UA"},
+  {0x510000,0x5103FF,"KZ"},{0x511000,0x5113FF,"GE"},
+  {0x600000,0x6003FF,"AM"},{0x600800,0x6008FF,"AZ"},
+  {0x601000,0x6013FF,"KG"},{0x601800,0x6018FF,"TJ"},
+  {0x680000,0x6803FF,"LV"},{0x681000,0x6813FF,"LT"},
+  {0x682000,0x6823FF,"EE"},
+  {0x700000,0x7003FF,"BA"},{0x701000,0x7013FF,"MK"},
+  {0x702000,0x7023FF,"ME"},{0x710000,0x717FFF,"SA"},
+  {0x720000,0x72FFFF,"IL"},{0x730000,0x737FFF,"IR"},
+  {0x740000,0x747FFF,"PK"},{0x748000,0x74FFFF,"AF"},
+  {0x750000,0x757FFF,"KW"},{0x758000,0x75FFFF,"AE"},
+  {0x760000,0x767FFF,"IQ"},{0x768000,0x76FFFF,"QA"},
+  {0x770000,0x777FFF,"BH"},{0x778000,0x77FFFF,"OM"},
+  {0x780000,0x7BFFFF,"CN"},{0x7C0000,0x7FFFFF,"AU"},
+  {0x800000,0x83FFFF,"IN"},{0x840000,0x87FFFF,"JP"},
+  {0x880000,0x887FFF,"TH"},{0x888000,0x88FFFF,"VN"},
+  {0x890000,0x890FFF,"SG"},{0x895000,0x8953FF,"MY"},
+  {0x898000,0x898FFF,"PH"},{0x8A0000,0x8AFFFF,"KR"},
+  {0x900000,0x9003FF,"NZ"},
+  {0xA00000,0xAFFFFF,"US"},
+  {0xB00000,0xB03FFF,"MX"},
+  {0xC00000,0xC3FFFF,"CA"},
+  {0xC80000,0xC83FFF,"AR"},{0xC84000,0xC87FFF,"BO"},
+  {0xC88000,0xC8BFFF,"BR"},{0xC8C000,0xC8FFFF,"CL"},
+  {0xC90000,0xC9001F,"CO"},
+  {0xE80000,0xE80FFF,"LK"},{0xE84000,0xE84FFF,"KH"},
+  {0xE8C000,0xE8CFFF,"BD"},
+};
+
+#define ICAO_NBLOCKS ((uint32_t)(sizeof(kIcaoBlocks)/sizeof(kIcaoBlocks[0])))
+
+static const char* icao_country(uint32_t icao) {
+  uint32_t lo = 0, hi = ICAO_NBLOCKS - 1u;
+  while (lo <= hi) {
+    uint32_t mid = (lo + hi) >> 1u;
+    if      (icao < kIcaoBlocks[mid].lo) { if (mid == 0) break; hi = mid - 1u; }
+    else if (icao > kIcaoBlocks[mid].hi) lo = mid + 1u;
+    else return kIcaoBlocks[mid].cc;
+  }
+  return "??";
+}
+
+/* ------------------------------------------------------------------ */
+/* ME-fältavkodning + ramemission                                       */
 /* ------------------------------------------------------------------ */
 
 /* ADS-B 6-bitars teckentabell (ICAO Annex 10) */
@@ -145,134 +218,150 @@ static uint32_t me_bits(const uint8_t* me, uint32_t start, uint32_t len) {
   return val;
 }
 
-/* Lägg till avkodade ME-fält i kv-bufferten; returnerar nya pos */
-static int decode_me(const uint8_t* me, char* kv, int pos, int sz) {
-  uint32_t tc = me_bits(me, 0, 5);
-  pos += snprintf(kv + pos, (size_t)(sz - pos), ",\"tc\":\"%u\"", tc);
-
-  if (tc >= 1u && tc <= 4u) {
-    /* ---- Identification ---- */
-    char cs[9];
-    for (int i = 0; i < 8; ++i)
-      cs[i] = kAdsbCS[me_bits(me, 8u + (uint32_t)i * 6u, 6u) & 0x3Fu];
-    /* Trimma avslutande mellanslag */
-    int end = 7;
-    while (end > 0 && cs[end] == ' ') --end;
-    cs[end + 1] = '\0';
-    pos += snprintf(kv + pos, (size_t)(sz - pos),
-                    ",\"callsign\":\"%s\"", cs);
-
-  } else if (tc >= 9u && tc <= 18u) {
-    /* ---- Airborne Position (barometrisk höjd) ---- */
-    uint32_t alt12 = me_bits(me, 8u, 12u);
-    uint32_t F     = me_bits(me, 21u, 1u);
-    uint32_t lat17 = me_bits(me, 22u, 17u);
-    uint32_t lon17 = me_bits(me, 39u, 17u);
-    /* Q-bit på position 4 räknat från LSB i 12-bitarsfältet */
-    if ((alt12 >> 4u) & 1u) {
-      int32_t N   = (int32_t)(((alt12 & 0xFE0u) >> 1u) | (alt12 & 0xFu));
-      int32_t alt = N * 25 - 1000;
-      pos += snprintf(kv + pos, (size_t)(sz - pos),
-                      ",\"alt_ft\":\"%d\"", alt);
-    }
-    pos += snprintf(kv + pos, (size_t)(sz - pos),
-                    ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
-                    F, lat17, lon17);
-
-  } else if (tc >= 20u && tc <= 22u) {
-    /* ---- Airborne Position (GNSS-höjd) ---- */
-    uint32_t F     = me_bits(me, 21u, 1u);
-    uint32_t lat17 = me_bits(me, 22u, 17u);
-    uint32_t lon17 = me_bits(me, 39u, 17u);
-    pos += snprintf(kv + pos, (size_t)(sz - pos),
-                    ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
-                    F, lat17, lon17);
-
-  } else if (tc == 19u) {
-    /* ---- Airborne Velocity ---- */
-    uint32_t st = me_bits(me, 5u, 3u);
-
-    if (st == 1u || st == 2u) {
-      /* Markhastighet */
-      uint32_t dew   = me_bits(me, 13u, 1u);
-      uint32_t vew_r = me_bits(me, 14u, 10u);
-      uint32_t dns   = me_bits(me, 24u, 1u);
-      uint32_t vns_r = me_bits(me, 25u, 10u);
-      uint32_t vrsgn = me_bits(me, 36u, 1u);
-      uint32_t vr_r  = me_bits(me, 37u, 9u);
-      double   mult  = (st == 2u) ? 4.0 : 1.0;
-      if (vew_r > 0u && vns_r > 0u) {
-        double vew = (double)(vew_r - 1u) * mult * (dew ? -1.0 : 1.0);
-        double vns = (double)(vns_r - 1u) * mult * (dns ? -1.0 : 1.0);
-        double spd = sqrt(vew * vew + vns * vns);
-        double hdg = atan2(vew, vns) * (180.0 / M_PI);
-        if (hdg < 0.0) hdg += 360.0;
-        pos += snprintf(kv + pos, (size_t)(sz - pos),
-                        ",\"spd_kt\":\"%.0f\",\"hdg_deg\":\"%.1f\"", spd, hdg);
-      }
-      if (vr_r > 0u) {
-        int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
-        pos += snprintf(kv + pos, (size_t)(sz - pos),
-                        ",\"vrate_fpm\":\"%d\"", vrate);
-      }
-
-    } else if (st == 3u || st == 4u) {
-      /* Lufthastighet */
-      uint32_t hdg_ok = me_bits(me, 13u, 1u);
-      uint32_t hdg_r  = me_bits(me, 14u, 10u);
-      uint32_t is_tas = me_bits(me, 24u, 1u);
-      uint32_t as_r   = me_bits(me, 25u, 10u);
-      uint32_t vrsgn  = me_bits(me, 36u, 1u);
-      uint32_t vr_r   = me_bits(me, 37u, 9u);
-      double   mult   = (st == 4u) ? 4.0 : 1.0;
-      if (hdg_ok)
-        pos += snprintf(kv + pos, (size_t)(sz - pos),
-                        ",\"hdg_deg\":\"%.1f\"", hdg_r * (360.0 / 1024.0));
-      if (as_r > 0u)
-        pos += snprintf(kv + pos, (size_t)(sz - pos),
-                        ",\"%s\":\"%d\"",
-                        is_tas ? "tas_kt" : "ias_kt",
-                        (int)((as_r - 1u) * mult));
-      if (vr_r > 0u) {
-        int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
-        pos += snprintf(kv + pos, (size_t)(sz - pos),
-                        ",\"vrate_fpm\":\"%d\"", vrate);
-      }
-    }
-  }
-  return pos;
-}
-
-/* ------------------------------------------------------------------ */
-/* Ramemission                                                          */
-/* ------------------------------------------------------------------ */
-
+/* emit_frame bygger:
+ *   payload  — läsbar text som syns i host-utskriften
+ *   kv JSON  — maskinavläsbar, inkl. råhex och avkodade fält              */
 static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                        double freq_hz, uint64_t unix_ms,
                        MrEmitFn emit_fn, void* user_data) {
-  char* hex = (char*)malloc(n_bytes * 2u + 1u);
-  if (!hex) return;
+  /* Råhex — läggs i kv */
+  char* raw = (char*)malloc(n_bytes * 2u + 1u);
+  if (!raw) return;
   for (uint32_t i = 0; i < n_bytes; ++i)
-    snprintf(hex + i * 2u, 3, "%02X", (unsigned)frame[i]);
+    snprintf(raw + i * 2u, 3, "%02X", (unsigned)frame[i]);
 
   uint32_t df   = (frame[0] >> 3) & 0x1Fu;
   uint32_t icao = ((uint32_t)frame[1] << 16) |
                   ((uint32_t)frame[2] <<  8) |
                    (uint32_t)frame[3];
 
-  char kv[512];
-  int pos = snprintf(kv, sizeof(kv),
-                     "{\"df\":\"%u\",\"icao\":\"%06X\",\"bits\":\"%u\"",
-                     df, icao, n_bytes * 8u);
+  char text[256];   /* läsbar payload — visas av hosten */
+  char kv[512];     /* JSON — maskinavläsbar             */
 
-  /* Avkoda ME-fältet för DF17 (ADS-B ES) och DF18 (Non-transponder ADS-B) */
-  if ((df == 17u || df == 18u) && n_bytes == 14u)
-    pos = decode_me(frame + 4, kv, pos, (int)sizeof(kv) - 1);
+  const char* cc = icao_country(icao);
+  int kpos = snprintf(kv, sizeof(kv),
+                      "{\"df\":\"%u\",\"icao\":\"%06X\",\"country\":\"%s\","
+                      "\"bits\":\"%u\",\"raw\":\"%s\"",
+                      df, icao, cc, n_bytes * 8u, raw);
+  int tpos = snprintf(text, sizeof(text), "[%s] ", cc);
 
-  snprintf(kv + pos, sizeof(kv) - (size_t)pos, "}");
+  if ((df == 17u || df == 18u) && n_bytes == 14u) {
+    const uint8_t* me = frame + 4;
+    uint32_t tc = me_bits(me, 0u, 5u);
+    kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, ",\"tc\":\"%u\"", tc);
+    tpos  = snprintf(text, sizeof(text), "TC%u", tc);
 
-  emit_fn("ADSB", hex, freq_hz, unix_ms, kv, user_data);
-  free(hex);
+    if (tc >= 1u && tc <= 4u) {
+      /* ---- Identifiering ---- */
+      char cs[9];
+      for (int i = 0; i < 8; ++i)
+        cs[i] = kAdsbCS[me_bits(me, 8u + (uint32_t)i * 6u, 6u) & 0x3Fu];
+      int end = 7;
+      while (end > 0 && cs[end] == ' ') --end;
+      cs[end + 1] = '\0';
+      kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                       ",\"callsign\":\"%s\"", cs);
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, " %s", cs);
+
+    } else if (tc >= 9u && tc <= 18u) {
+      /* ---- Luftläge (barometrisk höjd) ---- */
+      uint32_t alt12 = me_bits(me, 8u, 12u);
+      uint32_t F     = me_bits(me, 21u, 1u);
+      uint32_t lat17 = me_bits(me, 22u, 17u);
+      uint32_t lon17 = me_bits(me, 39u, 17u);
+      if ((alt12 >> 4u) & 1u) {
+        int32_t N   = (int32_t)(((alt12 & 0xFE0u) >> 1u) | (alt12 & 0xFu));
+        int32_t alt = N * 25 - 1000;
+        kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                         ",\"alt_ft\":\"%d\"", alt);
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                         " alt:%dft", alt);
+      }
+      kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                       ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
+                       F, lat17, lon17);
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                       " cpr:%u/%u/%u", F, lat17, lon17);
+
+    } else if (tc >= 20u && tc <= 22u) {
+      /* ---- Luftläge (GNSS-höjd) ---- */
+      uint32_t F     = me_bits(me, 21u, 1u);
+      uint32_t lat17 = me_bits(me, 22u, 17u);
+      uint32_t lon17 = me_bits(me, 39u, 17u);
+      kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                       ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
+                       F, lat17, lon17);
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                       " cpr:%u/%u/%u", F, lat17, lon17);
+
+    } else if (tc == 19u) {
+      /* ---- Hastighet ---- */
+      uint32_t st = me_bits(me, 5u, 3u);
+      if (st == 1u || st == 2u) {
+        uint32_t dew   = me_bits(me, 13u, 1u);
+        uint32_t vew_r = me_bits(me, 14u, 10u);
+        uint32_t dns   = me_bits(me, 24u, 1u);
+        uint32_t vns_r = me_bits(me, 25u, 10u);
+        uint32_t vrsgn = me_bits(me, 36u, 1u);
+        uint32_t vr_r  = me_bits(me, 37u, 9u);
+        double   mult  = (st == 2u) ? 4.0 : 1.0;
+        if (vew_r > 0u && vns_r > 0u) {
+          double vew = (double)(vew_r - 1u) * mult * (dew ? -1.0 :  1.0);
+          double vns = (double)(vns_r - 1u) * mult * (dns ? -1.0 :  1.0);
+          double spd = sqrt(vew * vew + vns * vns);
+          double hdg = atan2(vew, vns) * (180.0 / M_PI);
+          if (hdg < 0.0) hdg += 360.0;
+          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                           ",\"spd_kt\":\"%.0f\",\"hdg_deg\":\"%.1f\"", spd, hdg);
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           " %.0fkt hdg:%.0f\xc2\xb0", spd, hdg);
+        }
+        if (vr_r > 0u) {
+          int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
+          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                           ",\"vrate_fpm\":\"%d\"", vrate);
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           " vrate:%dfpm", vrate);
+        }
+      } else if (st == 3u || st == 4u) {
+        uint32_t hdg_ok = me_bits(me, 13u, 1u);
+        uint32_t hdg_r  = me_bits(me, 14u, 10u);
+        uint32_t is_tas = me_bits(me, 24u, 1u);
+        uint32_t as_r   = me_bits(me, 25u, 10u);
+        uint32_t vrsgn  = me_bits(me, 36u, 1u);
+        uint32_t vr_r   = me_bits(me, 37u, 9u);
+        double   mult   = (st == 4u) ? 4.0 : 1.0;
+        if (hdg_ok) {
+          double hdg = hdg_r * (360.0 / 1024.0);
+          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                           ",\"hdg_deg\":\"%.1f\"", hdg);
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           " hdg:%.0f\xc2\xb0", hdg);
+        }
+        if (as_r > 0u) {
+          int spd = (int)((as_r - 1u) * mult);
+          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                           ",\"%s\":\"%d\"", is_tas ? "tas_kt" : "ias_kt", spd);
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           " %s:%dkt", is_tas ? "TAS" : "IAS", spd);
+        }
+        if (vr_r > 0u) {
+          int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
+          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                           ",\"vrate_fpm\":\"%d\"", vrate);
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           " vrate:%dfpm", vrate);
+        }
+      }
+    }
+  } else {
+    /* Ej DF17/18 — payload = landkod + råhex */
+    snprintf(text + tpos, sizeof(text) - (size_t)tpos, "%s", raw);
+  }
+
+  snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, "}");
+  emit_fn("ADSB", text, freq_hz, unix_ms, kv, user_data);
+  free(raw);
 }
 
 /* ================================================================== */
