@@ -133,7 +133,8 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
   if (out.fixed_modulation != Modulation::kNfm && out.fixed_modulation != Modulation::kWfm &&
       out.fixed_modulation != Modulation::kAm  &&
       out.fixed_modulation != Modulation::kFsk &&
-      out.fixed_modulation != Modulation::kGmsk) {
+      out.fixed_modulation != Modulation::kGmsk &&
+      out.fixed_modulation != Modulation::kPpm) {
     out.fixed_modulation = Modulation::kWfm;
   }
   return out;

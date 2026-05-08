@@ -2544,6 +2544,27 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     return;
   }
 
+  if (plugin_type == "PPM_DATA") {
+    const QString bits    = fields.value("bit_count").toString();
+    const QString bit_us  = fields.value("bit_duration_us").toString();
+    const QString bit_part = bit_us.isEmpty() ? QString() : QString(" bit=%1\xc2\xb5s").arg(bit_us);
+    AppendLog(QString("[%1] RX%2 PPM_DATA f=%3Hz%4 bits=%5: %6")
+                  .arg(row.timestamp.toString("HH:mm:ss"))
+                  .arg(receiver_id)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(bit_part)
+                  .arg(bits)
+                  .arg(payload));
+    if (fixed_hdlc_log_ != nullptr) {
+      fixed_hdlc_log_->appendPlainText(
+          QString("[%1] PPM%2 %3")
+              .arg(row.timestamp.toString("HH:mm:ss"))
+              .arg(bit_part)
+              .arg(payload));
+    }
+    return;
+  }
+
   // AIS decoded message — append to the fixed-channel HDLC log and main log
   if (plugin_type == "AIS_POS"  || plugin_type == "AIS_STAT" ||
       plugin_type == "AIS_STAT24" || plugin_type == "AIS_BBM"  ||
