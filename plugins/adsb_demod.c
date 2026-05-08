@@ -69,14 +69,24 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
 /* Preambeldetektion                                                    */
 /* ------------------------------------------------------------------ */
 
-/* HIGH-samplar vid index 0, 2, 7, 9 (relativa till p) */
-/* LÅG-samplar vid index 1, 3–6, 8                     */
+/* HIGH vid 0,2,7,9 — LÅG vid 1,3–6,8 och guard-intervall 10–15 */
 static int preamble_ok(const uint32_t* m) {
+  /* Hitta den starkaste låg-sampeln inklusive guard-intervallet */
+  uint32_t lo_max = m[1];
+  for (int i = 3; i <= 6;  ++i) if (m[i]  > lo_max) lo_max = m[i];
+  if (m[8]  > lo_max) lo_max = m[8];
+  for (int i = 10; i <= 15; ++i) if (m[i] > lo_max) lo_max = m[i];
+
+  /* Varje hög-puls måste individuellt överstiga den starkaste låg-sampeln */
+  if (m[0] <= lo_max || m[2] <= lo_max || m[7] <= lo_max || m[9] <= lo_max)
+    return 0;
+
+  /* Summa-SNR: hög-summan (4 samplar) mot låg-summan (12 samplar),
+     samma effektiva per-sampel-tröskel som tidigare (H ≥ 3×L) */
   uint32_t h = m[0] + m[2] + m[7] + m[9];
-  uint32_t l = m[1] + m[3] + m[4] + m[5] + m[6] + m[8];
-  if (h < l * 2u) return 0;
-  uint32_t thr = l / 6u + 1u;
-  return (m[0] > thr && m[2] > thr && m[7] > thr && m[9] > thr);
+  uint32_t l = m[1] + m[3] + m[4] + m[5] + m[6] + m[8]
+             + m[10] + m[11] + m[12] + m[13] + m[14] + m[15];
+  return h >= l;
 }
 
 /* ------------------------------------------------------------------ */
