@@ -186,9 +186,23 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag[ctx->mag_len++] = (uint32_t)(i * i) + (uint32_t)(q * q);
   }
 
-  /* Samplar per bit ur faktisk sample rate (t.ex. 2.0 vid 2 Msps, 2.048 vid 2.048 Msps) */
+  /* Samplar per bit ur faktisk sample rate */
   float spb = (float)sr * 1e-6f;
-  /* Minsta buffert för att kunna avkoda en max-lång ram */
+
+  /* Vid sr > 2 Msps sträcker sig puls 1 (0–0.5 µs) över sample 1 (t=0.488 µs < 0.5 µs),
+   * vilket gör att preamble_ok matchar 1 sampel sent: p = P_true + 1.
+   * chip_off kompenserar för att datapekaren (p + PREAMBLE_SAMPS) hamnar
+   * (PREAMBLE_SAMPS + det_off) − 8×spb samplar efter den verkliga datastarten. */
+  uint32_t det_off  = (sr > 2000000u) ? 1u : 0u;
+  float    chip_off = (float)(PREAMBLE_SAMPS + det_off) - 8.0f * spb;
+
+  /* Chip-sampling: s0 = första sampel i chip 1, s1 = första sampel i chip 2.
+   * Använder ceil(base) = floor(base + 0.99999) för att undvika <math.h>. */
+#define CHIP_S0(b) ({ float _b = (float)(b) * spb - chip_off; \
+                      (_b > 0.0f) ? (uint32_t)(_b + 0.99999f) : 0u; })
+#define CHIP_S1(b) ({ float _b = (float)(b) * spb - chip_off + spb * 0.5f; \
+                      (_b > 0.0f) ? (uint32_t)(_b + 0.99999f) : 0u; })
+
   uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
 
   /* Sök efter preamblar och avkoda ramar */
@@ -199,27 +213,22 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
 
-    /* DF-fält (5 bitar) — chip-centrerad sampling vid spb×0.25 / spb×0.75 */
+    /* DF-fält (5 bitar) */
     uint32_t df5 = 0;
-    for (int b = 0; b < 5; ++b) {
-      uint32_t s0 = (uint32_t)((float)b * spb + spb * 0.25f);
-      uint32_t s1 = (uint32_t)((float)b * spb + spb * 0.75f);
-      df5 = (df5 << 1) | (uint32_t)decode_bit(data[s0], data[s1]);
-    }
+    for (int b = 0; b < 5; ++b)
+      df5 = (df5 << 1) | (uint32_t)decode_bit(data[CHIP_S0(b)], data[CHIP_S1(b)]);
+
     uint32_t n_bits  = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
     uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
 
     /* Vänta om vi inte har tillräckligt med samplar för hela ramen */
     if (p + n_samps > ctx->mag_len) break;
 
-    /* Avkoda alla bitar — chip-centrerad sampling vid spb×0.25 / spb×0.75
-     * Garanterar att s0 och s1 alltid landar i var sitt chip oavsett sr */
+    /* Avkoda alla bitar */
     uint8_t frame[LONG_BITS / 8u];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      uint32_t s0 = (uint32_t)((float)bit * spb + spb * 0.25f);
-      uint32_t s1 = (uint32_t)((float)bit * spb + spb * 0.75f);
-      if (decode_bit(data[s0], data[s1]))
+      if (decode_bit(data[CHIP_S0(bit)], data[CHIP_S1(bit)]))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
 
