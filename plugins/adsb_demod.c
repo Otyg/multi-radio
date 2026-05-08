@@ -218,6 +218,32 @@ static uint32_t me_bits(const uint8_t* me, uint32_t start, uint32_t len) {
   return val;
 }
 
+static const char* df_name(uint32_t df) {
+  switch (df) {
+    case  0: return "ACAS";
+    case  4: return "SurveillanceAlt";
+    case  5: return "SurveillanceId";
+    case 11: return "AllCall";
+    case 16: return "ACAS-Long";
+    case 17: return "ADS-B";
+    case 18: return "ADS-B/NT";
+    case 19: return "ADS-B/Mil";
+    case 20: return "CommB-Alt";
+    case 21: return "CommB-Id";
+    case 24: return "CommD";
+    default: return "Mode-S";
+  }
+}
+
+static const char* tc_type(uint32_t tc) {
+  if (tc == 0)              return "no-info";
+  if (tc >= 5u && tc <= 8u) return "surface-pos";
+  if (tc == 28u)            return "aircraft-status";
+  if (tc == 29u)            return "target-state";
+  if (tc == 31u)            return "op-status";
+  return "reserved";
+}
+
 /* emit_frame bygger:
  *   payload  — läsbar text som syns i host-utskriften
  *   kv JSON  — maskinavläsbar, inkl. råhex och avkodade fält              */
@@ -249,7 +275,7 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
     const uint8_t* me = frame + 4;
     uint32_t tc = me_bits(me, 0u, 5u);
     kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, ",\"tc\":\"%u\"", tc);
-    tpos  = snprintf(text, sizeof(text), "TC%u", tc);
+    tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "TC%u", tc);
 
     if (tc >= 1u && tc <= 4u) {
       /* ---- Identifiering ---- */
@@ -353,10 +379,14 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                            " vrate:%dfpm", vrate);
         }
       }
+    } else {
+      /* TC utan specifik avkodning — visa typnamn */
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                       "(%s)", tc_type(tc));
     }
   } else {
-    /* Ej DF17/18 — payload = landkod + råhex */
-    snprintf(text + tpos, sizeof(text) - (size_t)tpos, "%s", raw);
+    /* Ej DF17/18 — visa meddelandetyp */
+    tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "%s", df_name(df));
   }
 
   snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, "}");
