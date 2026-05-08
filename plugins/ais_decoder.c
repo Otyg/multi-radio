@@ -220,6 +220,76 @@ static void decode_static24(const uint8_t* d, uint32_t bytes,
     }
 }
 
+/* Type 4 (Base Station Report) — 168 bits */
+static void decode_base_station(const uint8_t* d, uint32_t bytes,
+                                  char* kv, size_t kv_sz,
+                                  char* payload, size_t pay_sz) {
+    uint32_t mmsi   = (uint32_t)ais_bits(d, bytes, 8, 30);
+    int year        = (int)ais_bits(d, bytes, 38, 14);
+    int month       = (int)ais_bits(d, bytes, 52,  4);
+    int day         = (int)ais_bits(d, bytes, 56,  5);
+    int hour        = (int)ais_bits(d, bytes, 61,  5);
+    int minute      = (int)ais_bits(d, bytes, 66,  6);
+    int second      = (int)ais_bits(d, bytes, 72,  6);
+    int64_t raw_lon = ais_signed(d, bytes, 79,  28);
+    int64_t raw_lat = ais_signed(d, bytes, 107, 27);
+
+    int lon_na = (raw_lon == 108600000LL);
+    int lat_na = (raw_lat ==  54600000LL);
+    char slat[20], slon[20];
+    if (lat_na) snprintf(slat, sizeof(slat), "N/A");
+    else        snprintf(slat, sizeof(slat), "%.6f", raw_lat / 600000.0);
+    if (lon_na) snprintf(slon, sizeof(slon), "N/A");
+    else        snprintf(slon, sizeof(slon), "%.6f", raw_lon / 600000.0);
+
+    snprintf(kv, kv_sz,
+        "{\"signal_type\":\"AIS_BSR\","
+        "\"msg_type\":\"4\","
+        "\"mmsi\":\"%u\","
+        "\"utc\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\","
+        "\"lat\":\"%s\","
+        "\"lon\":\"%s\"}",
+        mmsi, year, month, day, hour, minute, second, slat, slon);
+
+    snprintf(payload, pay_sz,
+             "MMSI:%u %04d-%02d-%02dT%02d:%02d:%02dZ Lat:%s Lon:%s",
+             mmsi, year, month, day, hour, minute, second, slat, slon);
+}
+
+/* Type 21 (Aid-to-Navigation Report) — 272 bits minimum */
+static void decode_aton(const uint8_t* d, uint32_t bytes,
+                         char* kv, size_t kv_sz,
+                         char* payload, size_t pay_sz) {
+    uint32_t mmsi    = (uint32_t)ais_bits(d, bytes, 8, 30);
+    int type_of_aton = (int)ais_bits(d, bytes, 38, 5);
+    char name[21];
+    ais_text(d, bytes, 43, 20, name);
+    int64_t raw_lon = ais_signed(d, bytes, 164, 28);
+    int64_t raw_lat = ais_signed(d, bytes, 192, 27);
+
+    int lon_na = (raw_lon == 108600000LL);
+    int lat_na = (raw_lat ==  54600000LL);
+    char slat[20], slon[20];
+    if (lat_na) snprintf(slat, sizeof(slat), "N/A");
+    else        snprintf(slat, sizeof(slat), "%.6f", raw_lat / 600000.0);
+    if (lon_na) snprintf(slon, sizeof(slon), "N/A");
+    else        snprintf(slon, sizeof(slon), "%.6f", raw_lon / 600000.0);
+
+    snprintf(kv, kv_sz,
+        "{\"signal_type\":\"AIS_ATON\","
+        "\"msg_type\":\"21\","
+        "\"mmsi\":\"%u\","
+        "\"name\":\"%s\","
+        "\"type_of_aton\":\"%d\","
+        "\"lat\":\"%s\","
+        "\"lon\":\"%s\"}",
+        mmsi, name, type_of_aton, slat, slon);
+
+    snprintf(payload, pay_sz,
+             "MMSI:%u Name:%s AtoN:%d Lat:%s Lon:%s",
+             mmsi, name, type_of_aton, slat, slon);
+}
+
 /* Type 8 (Binary Broadcast Message) */
 static void decode_bbm(const uint8_t* d, uint32_t bytes,
                         char* kv, size_t kv_sz,
@@ -276,6 +346,11 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         decode_position(frame_buf, data_bytes, msg_type,
                         kv, sizeof(kv), payload, sizeof(payload));
         break;
+    case 4:
+        if (data_bytes < 21) return;  /* 168 bits = 21 bytes */
+        decode_base_station(frame_buf, data_bytes,
+                            kv, sizeof(kv), payload, sizeof(payload));
+        break;
     case 5:
         if (data_bytes < 53) return;  /* 426 bits = 53.25 bytes */
         decode_voyage(frame_buf, data_bytes,
@@ -285,6 +360,11 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         if (data_bytes < 7) return;  /* 56 bits = 7 bytes minimum */
         decode_bbm(frame_buf, data_bytes,
                    kv, sizeof(kv), payload, sizeof(payload));
+        break;
+    case 21:
+        if (data_bytes < 34) return;  /* 272 bits = 34 bytes */
+        decode_aton(frame_buf, data_bytes,
+                    kv, sizeof(kv), payload, sizeof(payload));
         break;
     case 24:
         if (data_bytes < 20) return;
@@ -311,8 +391,10 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
     }
     }
 
-    const char* sig = (msg_type == 5)  ? "AIS_STAT"
+    const char* sig = (msg_type == 4)  ? "AIS_BSR"
+                    : (msg_type == 5)  ? "AIS_STAT"
                     : (msg_type == 8)  ? "AIS_BBM"
+                    : (msg_type == 21) ? "AIS_ATON"
                     : (msg_type == 24) ? "AIS_STAT24"
                     : "AIS_POS";
     if (emit_fn) emit_fn(sig, payload, freq_hz, unix_ms, kv, user_data);
