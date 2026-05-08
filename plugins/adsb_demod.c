@@ -218,6 +218,29 @@ static uint32_t me_bits(const uint8_t* me, uint32_t start, uint32_t len) {
   return val;
 }
 
+/* AC13-fält (DF4/DF20): bits 15-27 i 56/112-bitarsram */
+static uint32_t extract_ac13(const uint8_t* f) {
+  return ((f[1] & 0x01u) << 12) | ((uint32_t)f[2] << 4) | ((f[3] >> 4) & 0x0Fu);
+}
+
+/* Avkoda 13-bitars höjdkod (returnerar 1 vid lyckad avkodning) */
+static int decode_ac13(uint32_t ac, int* alt_ft) {
+  if ((ac >> 6u) & 1u) return 0;         /* M-bit = metrisk, ej hanterat */
+  if (!((ac >> 4u) & 1u)) return 0;      /* Q-bit = 0 → Gillham, ej hanterat */
+  int n = (int)(((ac & 0x1F80u) >> 2u) | ((ac & 0x0020u) >> 1u) | (ac & 0x000Fu));
+  *alt_ft = n * 25 - 1200;
+  return 1;
+}
+
+/* Avkoda 13-bitars squawk (Mode C identitetskod) → 4 oktala siffror */
+static uint32_t decode_squawk(uint32_t id) {
+  uint32_t c1=(id>>12)&1, a1=(id>>11)&1, c2=(id>>10)&1, a2=(id>>9)&1;
+  uint32_t c4=(id>>8)&1,  a4=(id>>7)&1,  b1=(id>>6)&1,  d1=(id>>5)&1;
+  uint32_t b2=(id>>4)&1,  d2=(id>>3)&1,  b4=(id>>2)&1,  d4=(id>>1)&1;
+  return (a4*4+a2*2+a1)*1000 + (b4*4+b2*2+b1)*100
+       + (c4*4+c2*2+c1)*10   + (d4*4+d2*2+d1);
+}
+
 static const char* df_name(uint32_t df) {
   switch (df) {
     case  0: return "ACAS";
@@ -390,8 +413,66 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                        "TC%u (%s)", tc, tc_type(tc));
     }
   } else {
-    /* Ej DF17/18 — visa meddelandetyp på klartext */
-    tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "%s", df_name(df));
+    /* Ej DF17/18 — avkoda standardformat, visa "DF-n okänt" för övriga */
+    switch (df) {
+
+      case 0:  /* Short Air-Air Surveillance (ACAS) */
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "ACAS");
+        break;
+
+      case 4:   /* Surveillance Altitude Reply */
+      case 20: { /* Comm-B Altitude Reply */
+        uint32_t ac = extract_ac13(frame);
+        int alt; int ok = decode_ac13(ac, &alt);
+        if (ok)
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           "%s: %d ft",
+                           df == 4 ? "H\xc3\xb6jdssvar" : "CommB-h\xc3\xb6jd", alt);
+        else
+          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                           "%s (h\xc3\xb6jd ej avkodbar)",
+                           df == 4 ? "H\xc3\xb6jdssvar" : "CommB-h\xc3\xb6jd");
+        break;
+      }
+
+      case 5:   /* Surveillance Identity Reply */
+      case 21: { /* Comm-B Identity Reply */
+        uint32_t id = extract_ac13(frame);  /* ID13 på samma position som AC13 */
+        uint32_t sq = decode_squawk(id);
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                         "%s: squawk %04u",
+                         df == 5 ? "Identitetssvar" : "CommB-identitet", sq);
+        break;
+      }
+
+      case 11: { /* All-Call Reply */
+        static const char* ca_desc[] = {
+          "nivå 1", "reserverad", "reserverad", "reserverad",
+          "ACAS (mark)", "ACAS (luft)", "ACAS (ok\xc3\xa4nd)", "full Mode-S"
+        };
+        uint32_t ca = frame[0] & 0x07u;
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                         "Rollkall: CA=%u (%s)", ca, ca_desc[ca]);
+        break;
+      }
+
+      case 16: /* Long Air-Air Surveillance (ACAS) */
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "ACAS-Long");
+        break;
+
+      case 19: /* Military Extended Squitter */
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "ADS-B/Milit\xc3\xa4r");
+        break;
+
+      case 24: /* Comm-D Extended Length Message */
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "CommD (ELM)");
+        break;
+
+      default:
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                         "Mode-S (DF%u, reserverad/ok\xc3\xa4nd)", df);
+        break;
+    }
   }
 
   snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, "}");
