@@ -21,6 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Mode S-konstanter                                                    */
@@ -122,6 +127,123 @@ static int try_fix_single_bit(uint8_t* frame, uint32_t n_bytes) {
 }
 
 /* ------------------------------------------------------------------ */
+/* ME-fältavkodning (DF17/18, TC 1–4, 9–18, 19)                       */
+/* ------------------------------------------------------------------ */
+
+/* ADS-B 6-bitars teckentabell (ICAO Annex 10) */
+static const char kAdsbCS[64] =
+    " ABCDEFGHIJKLMNOPQRSTUVWXYZ     "   /* index  0-31 */
+    "                0123456789      ";  /* index 32-63 */
+
+/* Extrahera len bitar med start (MSB-first) ur ME-fält */
+static uint32_t me_bits(const uint8_t* me, uint32_t start, uint32_t len) {
+  uint32_t val = 0;
+  for (uint32_t i = 0; i < len; ++i) {
+    uint32_t idx = start + i;
+    val = (val << 1u) | ((me[idx >> 3u] >> (7u - (idx & 7u))) & 1u);
+  }
+  return val;
+}
+
+/* Lägg till avkodade ME-fält i kv-bufferten; returnerar nya pos */
+static int decode_me(const uint8_t* me, char* kv, int pos, int sz) {
+  uint32_t tc = me_bits(me, 0, 5);
+  pos += snprintf(kv + pos, (size_t)(sz - pos), ",\"tc\":\"%u\"", tc);
+
+  if (tc >= 1u && tc <= 4u) {
+    /* ---- Identification ---- */
+    char cs[9];
+    for (int i = 0; i < 8; ++i)
+      cs[i] = kAdsbCS[me_bits(me, 8u + (uint32_t)i * 6u, 6u) & 0x3Fu];
+    /* Trimma avslutande mellanslag */
+    int end = 7;
+    while (end > 0 && cs[end] == ' ') --end;
+    cs[end + 1] = '\0';
+    pos += snprintf(kv + pos, (size_t)(sz - pos),
+                    ",\"callsign\":\"%s\"", cs);
+
+  } else if (tc >= 9u && tc <= 18u) {
+    /* ---- Airborne Position (barometrisk höjd) ---- */
+    uint32_t alt12 = me_bits(me, 8u, 12u);
+    uint32_t F     = me_bits(me, 21u, 1u);
+    uint32_t lat17 = me_bits(me, 22u, 17u);
+    uint32_t lon17 = me_bits(me, 39u, 17u);
+    /* Q-bit på position 4 räknat från LSB i 12-bitarsfältet */
+    if ((alt12 >> 4u) & 1u) {
+      int32_t N   = (int32_t)(((alt12 & 0xFE0u) >> 1u) | (alt12 & 0xFu));
+      int32_t alt = N * 25 - 1000;
+      pos += snprintf(kv + pos, (size_t)(sz - pos),
+                      ",\"alt_ft\":\"%d\"", alt);
+    }
+    pos += snprintf(kv + pos, (size_t)(sz - pos),
+                    ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
+                    F, lat17, lon17);
+
+  } else if (tc >= 20u && tc <= 22u) {
+    /* ---- Airborne Position (GNSS-höjd) ---- */
+    uint32_t F     = me_bits(me, 21u, 1u);
+    uint32_t lat17 = me_bits(me, 22u, 17u);
+    uint32_t lon17 = me_bits(me, 39u, 17u);
+    pos += snprintf(kv + pos, (size_t)(sz - pos),
+                    ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
+                    F, lat17, lon17);
+
+  } else if (tc == 19u) {
+    /* ---- Airborne Velocity ---- */
+    uint32_t st = me_bits(me, 5u, 3u);
+
+    if (st == 1u || st == 2u) {
+      /* Markhastighet */
+      uint32_t dew   = me_bits(me, 13u, 1u);
+      uint32_t vew_r = me_bits(me, 14u, 10u);
+      uint32_t dns   = me_bits(me, 24u, 1u);
+      uint32_t vns_r = me_bits(me, 25u, 10u);
+      uint32_t vrsgn = me_bits(me, 36u, 1u);
+      uint32_t vr_r  = me_bits(me, 37u, 9u);
+      double   mult  = (st == 2u) ? 4.0 : 1.0;
+      if (vew_r > 0u && vns_r > 0u) {
+        double vew = (double)(vew_r - 1u) * mult * (dew ? -1.0 : 1.0);
+        double vns = (double)(vns_r - 1u) * mult * (dns ? -1.0 : 1.0);
+        double spd = sqrt(vew * vew + vns * vns);
+        double hdg = atan2(vew, vns) * (180.0 / M_PI);
+        if (hdg < 0.0) hdg += 360.0;
+        pos += snprintf(kv + pos, (size_t)(sz - pos),
+                        ",\"spd_kt\":\"%.0f\",\"hdg_deg\":\"%.1f\"", spd, hdg);
+      }
+      if (vr_r > 0u) {
+        int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
+        pos += snprintf(kv + pos, (size_t)(sz - pos),
+                        ",\"vrate_fpm\":\"%d\"", vrate);
+      }
+
+    } else if (st == 3u || st == 4u) {
+      /* Lufthastighet */
+      uint32_t hdg_ok = me_bits(me, 13u, 1u);
+      uint32_t hdg_r  = me_bits(me, 14u, 10u);
+      uint32_t is_tas = me_bits(me, 24u, 1u);
+      uint32_t as_r   = me_bits(me, 25u, 10u);
+      uint32_t vrsgn  = me_bits(me, 36u, 1u);
+      uint32_t vr_r   = me_bits(me, 37u, 9u);
+      double   mult   = (st == 4u) ? 4.0 : 1.0;
+      if (hdg_ok)
+        pos += snprintf(kv + pos, (size_t)(sz - pos),
+                        ",\"hdg_deg\":\"%.1f\"", hdg_r * (360.0 / 1024.0));
+      if (as_r > 0u)
+        pos += snprintf(kv + pos, (size_t)(sz - pos),
+                        ",\"%s\":\"%d\"",
+                        is_tas ? "tas_kt" : "ias_kt",
+                        (int)((as_r - 1u) * mult));
+      if (vr_r > 0u) {
+        int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
+        pos += snprintf(kv + pos, (size_t)(sz - pos),
+                        ",\"vrate_fpm\":\"%d\"", vrate);
+      }
+    }
+  }
+  return pos;
+}
+
+/* ------------------------------------------------------------------ */
 /* Ramemission                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -138,10 +260,16 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                   ((uint32_t)frame[2] <<  8) |
                    (uint32_t)frame[3];
 
-  char kv[96];
-  snprintf(kv, sizeof(kv),
-           "{\"df\":\"%u\",\"icao\":\"%06X\",\"bits\":\"%u\"}",
-           df, icao, n_bytes * 8u);
+  char kv[512];
+  int pos = snprintf(kv, sizeof(kv),
+                     "{\"df\":\"%u\",\"icao\":\"%06X\",\"bits\":\"%u\"",
+                     df, icao, n_bytes * 8u);
+
+  /* Avkoda ME-fältet för DF17 (ADS-B ES) och DF18 (Non-transponder ADS-B) */
+  if ((df == 17u || df == 18u) && n_bytes == 14u)
+    pos = decode_me(frame + 4, kv, pos, (int)sizeof(kv) - 1);
+
+  snprintf(kv + pos, sizeof(kv) - (size_t)pos, "}");
 
   emit_fn("ADSB", hex, freq_hz, unix_ms, kv, user_data);
   free(hex);
