@@ -275,10 +275,9 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
     const uint8_t* me = frame + 4;
     uint32_t tc = me_bits(me, 0u, 5u);
     kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, ",\"tc\":\"%u\"", tc);
-    tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "TC%u", tc);
 
     if (tc >= 1u && tc <= 4u) {
-      /* ---- Identifiering ---- */
+      /* ---- Identifiering (anropssignal) ---- */
       char cs[9];
       for (int i = 0; i < 8; ++i)
         cs[i] = kAdsbCS[me_bits(me, 8u + (uint32_t)i * 6u, 6u) & 0x3Fu];
@@ -287,7 +286,8 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
       cs[end + 1] = '\0';
       kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                        ",\"callsign\":\"%s\"", cs);
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, " %s", cs);
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
+                       "Anrop: %s", cs);
 
     } else if (tc >= 9u && tc <= 18u) {
       /* ---- Luftläge (barometrisk höjd) ---- */
@@ -295,19 +295,21 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
       uint32_t F     = me_bits(me, 21u, 1u);
       uint32_t lat17 = me_bits(me, 22u, 17u);
       uint32_t lon17 = me_bits(me, 39u, 17u);
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "Luftläge:");
       if ((alt12 >> 4u) & 1u) {
         int32_t N   = (int32_t)(((alt12 & 0xFE0u) >> 1u) | (alt12 & 0xFu));
         int32_t alt = N * 25 - 1000;
         kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                          ",\"alt_ft\":\"%d\"", alt);
         tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                         " alt:%dft", alt);
+                         " %d ft,", alt);
       }
       kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                        ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
                        F, lat17, lon17);
       tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       " cpr:%u/%u/%u", F, lat17, lon17);
+                       " CPR %s lat %u lon %u",
+                       F ? "udda" : "j\xc3\xa4mn", lat17, lon17);
 
     } else if (tc >= 20u && tc <= 22u) {
       /* ---- Luftläge (GNSS-höjd) ---- */
@@ -318,7 +320,8 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                        ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
                        F, lat17, lon17);
       tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       " cpr:%u/%u/%u", F, lat17, lon17);
+                       "Luftläge(GNSS): CPR %s lat %u lon %u",
+                       F ? "udda" : "j\xc3\xa4mn", lat17, lon17);
 
     } else if (tc == 19u) {
       /* ---- Hastighet ---- */
@@ -331,6 +334,7 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
         uint32_t vrsgn = me_bits(me, 36u, 1u);
         uint32_t vr_r  = me_bits(me, 37u, 9u);
         double   mult  = (st == 2u) ? 4.0 : 1.0;
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "Hastighet:");
         if (vew_r > 0u && vns_r > 0u) {
           double vew = (double)(vew_r - 1u) * mult * (dew ? -1.0 :  1.0);
           double vns = (double)(vns_r - 1u) * mult * (dns ? -1.0 :  1.0);
@@ -340,14 +344,14 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
           kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                            ",\"spd_kt\":\"%.0f\",\"hdg_deg\":\"%.1f\"", spd, hdg);
           tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " %.0fkt hdg:%.0f\xc2\xb0", spd, hdg);
+                           " %.0f kt, kurs %.0f\xc2\xb0", spd, hdg);
         }
         if (vr_r > 0u) {
           int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
           kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                            ",\"vrate_fpm\":\"%d\"", vrate);
           tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " vrate:%dfpm", vrate);
+                           ", stig %+d fpm", vrate);
         }
       } else if (st == 3u || st == 4u) {
         uint32_t hdg_ok = me_bits(me, 13u, 1u);
@@ -357,35 +361,36 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
         uint32_t vrsgn  = me_bits(me, 36u, 1u);
         uint32_t vr_r   = me_bits(me, 37u, 9u);
         double   mult   = (st == 4u) ? 4.0 : 1.0;
+        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "Hastighet:");
         if (hdg_ok) {
           double hdg = hdg_r * (360.0 / 1024.0);
           kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                            ",\"hdg_deg\":\"%.1f\"", hdg);
           tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " hdg:%.0f\xc2\xb0", hdg);
+                           " kurs %.0f\xc2\xb0,", hdg);
         }
         if (as_r > 0u) {
           int spd = (int)((as_r - 1u) * mult);
           kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                            ",\"%s\":\"%d\"", is_tas ? "tas_kt" : "ias_kt", spd);
           tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " %s:%dkt", is_tas ? "TAS" : "IAS", spd);
+                           " %s %d kt", is_tas ? "TAS" : "IAS", spd);
         }
         if (vr_r > 0u) {
           int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
           kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                            ",\"vrate_fpm\":\"%d\"", vrate);
           tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " vrate:%dfpm", vrate);
+                           ", stig %+d fpm", vrate);
         }
       }
     } else {
-      /* TC utan specifik avkodning — visa typnamn */
+      /* TC utan specifik avkodning */
       tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       "(%s)", tc_type(tc));
+                       "TC%u (%s)", tc, tc_type(tc));
     }
   } else {
-    /* Ej DF17/18 — visa meddelandetyp */
+    /* Ej DF17/18 — visa meddelandetyp på klartext */
     tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "%s", df_name(df));
   }
 
