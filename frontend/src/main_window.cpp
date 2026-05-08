@@ -75,6 +75,7 @@ int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
     case v1::MODULATION_FSK:  return 12500;
     case v1::MODULATION_GMSK: return 12500;
     case v1::MODULATION_PPM:  return 500000;
+    case v1::MODULATION_ADSB: return 2000000;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return 12500;
@@ -88,6 +89,7 @@ QString ModulationLabel(v1::Modulation modulation) {
     case v1::MODULATION_FSK:  return "FSK";
     case v1::MODULATION_GMSK: return "GMSK";
     case v1::MODULATION_PPM:  return "PPM";
+    case v1::MODULATION_ADSB: return "ADS-B";
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return "NFM";
@@ -137,7 +139,8 @@ v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
   const auto modulation = static_cast<v1::Modulation>(modulation_value);
   if (modulation == v1::MODULATION_NFM  || modulation == v1::MODULATION_WFM  ||
       modulation == v1::MODULATION_AM   || modulation == v1::MODULATION_FSK  ||
-      modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_PPM) {
+      modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_PPM ||
+      modulation == v1::MODULATION_ADSB) {
     return modulation;
   }
   return v1::MODULATION_WFM;
@@ -1101,7 +1104,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_->addItem("AM",   QVariant::fromValue<int>(v1::MODULATION_AM));
   fixed_modulation_combo_->addItem("FSK",  QVariant::fromValue<int>(v1::MODULATION_FSK));
   fixed_modulation_combo_->addItem("GMSK", QVariant::fromValue<int>(v1::MODULATION_GMSK));
-  fixed_modulation_combo_->addItem("PPM",  QVariant::fromValue<int>(v1::MODULATION_PPM));
+  fixed_modulation_combo_->addItem("PPM",   QVariant::fromValue<int>(v1::MODULATION_PPM));
+  fixed_modulation_combo_->addItem("ADS-B", QVariant::fromValue<int>(v1::MODULATION_ADSB));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
   fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
@@ -1596,6 +1600,15 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       gmsk_params_widget_->setVisible(modulation == v1::MODULATION_GMSK);
     if (ppm_params_widget_ != nullptr)
       ppm_params_widget_->setVisible(modulation == v1::MODULATION_PPM);
+    /* ADS-B kräver exakt 2 Msps — lås samplerate-spinnern */
+    if (sample_rate_spin_ != nullptr) {
+      const bool is_adsb = (modulation == v1::MODULATION_ADSB);
+      if (is_adsb) {
+        const QSignalBlocker blocker(sample_rate_spin_);
+        sample_rate_spin_->setValue(2048000);
+      }
+      sample_rate_spin_->setEnabled(!is_adsb);
+    }
     const int suggested_bandwidth_hz = DefaultBandwidthHzForModulation(modulation);
     const int current_bandwidth_hz = channel_bandwidth_spin_->value();
     const bool can_auto_apply =
@@ -1823,14 +1836,26 @@ void MainWindow::RefreshReceivers() {
         }
         if (fixed_modulation != v1::MODULATION_NFM  && fixed_modulation != v1::MODULATION_WFM  &&
             fixed_modulation != v1::MODULATION_AM   && fixed_modulation != v1::MODULATION_FSK  &&
-            fixed_modulation != v1::MODULATION_GMSK && fixed_modulation != v1::MODULATION_PPM) {
+            fixed_modulation != v1::MODULATION_GMSK && fixed_modulation != v1::MODULATION_PPM &&
+            fixed_modulation != v1::MODULATION_ADSB) {
           fixed_modulation = v1::MODULATION_NFM;
         }
-        const QSignalBlocker blocker(fixed_modulation_combo_);
-        const int modulation_index =
-            fixed_modulation_combo_->findData(QVariant::fromValue<int>(static_cast<int>(fixed_modulation)));
-        if (modulation_index >= 0) {
-          fixed_modulation_combo_->setCurrentIndex(modulation_index);
+        {
+          const QSignalBlocker blocker(fixed_modulation_combo_);
+          const int modulation_index =
+              fixed_modulation_combo_->findData(QVariant::fromValue<int>(static_cast<int>(fixed_modulation)));
+          if (modulation_index >= 0) {
+            fixed_modulation_combo_->setCurrentIndex(modulation_index);
+          }
+        }
+        /* Synka samplerate-lås för ADS-B */
+        if (sample_rate_spin_ != nullptr) {
+          const bool is_adsb = (fixed_modulation == v1::MODULATION_ADSB);
+          if (is_adsb) {
+            const QSignalBlocker sr_blocker(sample_rate_spin_);
+            sample_rate_spin_->setValue(2048000);
+          }
+          sample_rate_spin_->setEnabled(!is_adsb);
         }
         const int fixed_bandwidth_hz = DefaultBandwidthHzForModulation(fixed_modulation);
         fixed_bandwidth_last_auto_hz_ = fixed_bandwidth_hz;
@@ -1995,7 +2020,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       const auto parsed = static_cast<v1::Modulation>(modulation_value);
       if (parsed == v1::MODULATION_NFM  || parsed == v1::MODULATION_WFM  ||
           parsed == v1::MODULATION_AM   || parsed == v1::MODULATION_FSK  ||
-          parsed == v1::MODULATION_GMSK || parsed == v1::MODULATION_PPM) {
+          parsed == v1::MODULATION_GMSK || parsed == v1::MODULATION_PPM ||
+          parsed == v1::MODULATION_ADSB) {
         fixed_modulation = parsed;
       }
     }
@@ -2562,6 +2588,26 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
               .arg(bit_part)
               .arg(payload));
     }
+    return;
+  }
+
+  // ADS-B / Mode S frame
+  if (plugin_type == "ADSB") {
+    const QString ts   = row.timestamp.toString("HH:mm:ss");
+    const QString df   = fields.value("df").toString();
+    const QString icao = fields.value("icao").toString();
+    const QString bits = fields.value("bits").toString();
+    AppendLog(QString("[%1] RX%2 ADS-B f=%3Hz DF=%4 ICAO=%5 bits=%6: %7")
+                  .arg(ts)
+                  .arg(receiver_id)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(df)
+                  .arg(icao)
+                  .arg(bits)
+                  .arg(payload));
+    if (fixed_hdlc_log_ != nullptr)
+      fixed_hdlc_log_->appendPlainText(
+          QString("[%1] DF%2 %3 %4").arg(ts).arg(df).arg(icao).arg(payload));
     return;
   }
 

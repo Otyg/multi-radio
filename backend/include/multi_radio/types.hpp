@@ -29,6 +29,7 @@ enum class Modulation {
   kFsk,
   kGmsk,
   kPpm,
+  kAdsbMod,
 };
 
 enum class EventKind {

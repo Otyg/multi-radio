@@ -63,9 +63,10 @@ std::string ToString(Modulation modulation) {
     case Modulation::kWfm:  return "WFM";
     case Modulation::kFsk:  return "FSK";
     case Modulation::kGmsk: return "GMSK";
-    case Modulation::kPpm:  return "PPM";
+    case Modulation::kPpm:     return "PPM";
+    case Modulation::kAdsbMod: return "ADSB";
     case Modulation::kNfm:
-    default:                return "NFM";
+    default:                   return "NFM";
   }
 }
 
@@ -79,6 +80,7 @@ Modulation ModulationFromString(const std::string& value) {
   if (upper == "FSK")  return Modulation::kFsk;
   if (upper == "GMSK") return Modulation::kGmsk;
   if (upper == "PPM")  return Modulation::kPpm;
+  if (upper == "ADSB") return Modulation::kAdsbMod;
   return Modulation::kNfm;
 }
 

@@ -25,6 +25,7 @@ enum Modulation {
   MODULATION_FSK = 4;
   MODULATION_GMSK = 5;
   MODULATION_PPM = 6;
+  MODULATION_ADSB = 7;
 }
 
 enum EventKind {

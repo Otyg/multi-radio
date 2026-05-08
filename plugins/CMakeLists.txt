@@ -59,6 +59,7 @@ file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/plugin_exports.ld"
 mr_add_plugin(fsk_demod      fsk_demod.c)
 mr_add_plugin(gmsk_demod     gmsk_demod.c)
 mr_add_plugin(ppm_demod      ppm_demod.c)
+mr_add_plugin(adsb_demod     adsb_demod.c)
 mr_add_plugin(nrzi_decoder   nrzi_decoder.c)
 mr_add_plugin(hdlc_postproc  hdlc_postproc.c)
 mr_add_plugin(ais_decoder    ais_decoder.c)

@@ -134,7 +134,8 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
       out.fixed_modulation != Modulation::kAm  &&
       out.fixed_modulation != Modulation::kFsk &&
       out.fixed_modulation != Modulation::kGmsk &&
-      out.fixed_modulation != Modulation::kPpm) {
+      out.fixed_modulation != Modulation::kPpm  &&
+      out.fixed_modulation != Modulation::kAdsbMod) {
     out.fixed_modulation = Modulation::kWfm;
   }
   return out;
@@ -506,7 +507,8 @@ void ReceiverWorker::PushPluginConfig() {
   std::string demod_name;
   if (cfg.fixed_modulation == Modulation::kFsk)  demod_name = "fsk_demod";
   if (cfg.fixed_modulation == Modulation::kGmsk) demod_name = "gmsk_demod";
-  if (cfg.fixed_modulation == Modulation::kPpm)  demod_name = "ppm_demod";
+  if (cfg.fixed_modulation == Modulation::kPpm)     demod_name = "ppm_demod";
+  if (cfg.fixed_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
   plugin_host_->SetActiveDemodulator(demod_name);
 }
 
@@ -543,10 +545,11 @@ void ReceiverWorker::IngestLoop() {
     const uint32_t hardware_tuned_frequency_hz = static_cast<uint32_t>(hardware_frequency_i64);
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
-    // GMSK and FSK processing is entirely in the plugin (libliquid gmskdem/fskdem).
-    // The WFM cap is irrelevant for these modes and would halve the available bandwidth.
+    // GMSK, FSK, PPM and ADS-B processing is entirely in plugins.
+    // The WFM cap is irrelevant for these modes.
     const bool is_digital_plugin_mode =
-        (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk);
+        (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
+         ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod);
     const uint32_t effective_sample_rate_hz =
         (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz
@@ -1345,7 +1348,8 @@ void ReceiverWorker::RunLoop() {
     const uint32_t audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
     const bool is_digital_plugin_mode =
-        (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk);
+        (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
+         ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod);
     const uint32_t effective_sample_rate_hz =
         (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz
