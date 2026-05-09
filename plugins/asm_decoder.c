@@ -1,11 +1,15 @@
 /**
- * asm_decoder.c — ASM (Application Specific Message) postprocessor
+ * asm_decoder.c — AIS message 8 (ASM payload) postprocessor
  *
  * Role: MR_PLUGIN_ROLE_POSTPROCESSING
  *
+ * IMPORTANT SCOPE:
+ *   This plugin decodes AIS/HDLC frames (ITU-R M.1371) and extracts
+ *   message type 8 (Binary Broadcast Message with DAC/FI payload).
+ *   It does NOT implement the VDES ASM physical layer (pi/4-DQPSK + FEC).
+ *
  * Expects NRZI-decoded HDLC bitstream (source_type typically NRZI_ASM_DATA),
- * extracts HDLC frames, validates CRC-16-CCITT, then decodes AIS message type 8
- * (Binary Broadcast Message / ASM envelope: DAC/FI + application data).
+ * validates CRC-16-CCITT, then decodes AIS message type 8.
  */
 
 #include "mr_plugin_api.h"
@@ -70,7 +74,7 @@ static uint64_t ais_bits(const uint8_t* data, uint32_t data_bytes, int start, in
     return r;
 }
 
-static void emit_asm(const uint8_t* frame_buf, uint32_t frame_len,
+static void emit_ais_msg8(const uint8_t* frame_buf, uint32_t frame_len,
                      double freq_hz, uint64_t unix_ms,
                      MrEmitFn emit_fn, void* user_data) {
     if (!emit_fn || frame_len < 5) return;
@@ -85,11 +89,11 @@ static void emit_asm(const uint8_t* frame_buf, uint32_t frame_len,
         const uint32_t app_off = 7u;
         const uint32_t app_bytes = (data_bytes > app_off) ? (data_bytes - app_off) : 0u;
 
-        char app_hex[512];
+        char app_hex[224];
         app_hex[0] = '\0';
         if (app_bytes > 0) {
             uint32_t i;
-            const uint32_t lim = (app_bytes > 200u) ? 200u : app_bytes;
+            const uint32_t lim = (app_bytes > 100u) ? 100u : app_bytes;
             for (i = 0; i < lim; ++i) {
                 snprintf(app_hex + i * 2u, 3, "%02X", (unsigned)frame_buf[app_off + i]);
             }
@@ -97,8 +101,9 @@ static void emit_asm(const uint8_t* frame_buf, uint32_t frame_len,
 
         char kv[640];
         snprintf(kv, sizeof(kv),
-                 "{\"signal_type\":\"ASM_MSG\","
+                 "{\"signal_type\":\"AIS_MSG8\","
                  "\"msg_type\":\"8\","
+                 "\"decoder_scope\":\"AIS_M1371_MSG8\","
                  "\"mmsi\":\"%u\","
                  "\"dac\":\"%d\","
                  "\"fi\":\"%d\","
@@ -108,9 +113,9 @@ static void emit_asm(const uint8_t* frame_buf, uint32_t frame_len,
 
         char payload[320];
         snprintf(payload, sizeof(payload),
-                 "MMSI:%u DAC:%d FI:%d Data:%s",
+                 "AIS-MSG8 MMSI:%u DAC:%d FI:%d Data:%s",
                  mmsi, dac, fi, app_hex[0] ? app_hex : "(none)");
-        emit_fn("ASM_MSG", payload, freq_hz, unix_ms, kv, user_data);
+        emit_fn("AIS_MSG8", payload, freq_hz, unix_ms, kv, user_data);
         return;
     }
 
@@ -118,13 +123,14 @@ static void emit_asm(const uint8_t* frame_buf, uint32_t frame_len,
         char kv[256];
         char payload[128];
         snprintf(kv, sizeof(kv),
-                 "{\"signal_type\":\"ASM_OTHER\","
+                 "{\"signal_type\":\"AIS_MSG8_OTHER\","
                  "\"msg_type\":\"%d\","
+                 "\"decoder_scope\":\"AIS_M1371_MSG8\","
                  "\"mmsi\":\"%u\","
                  "\"byte_count\":\"%u\"}",
                  msg_type, mmsi, data_bytes);
-        snprintf(payload, sizeof(payload), "MMSI:%u Type:%d", mmsi, msg_type);
-        emit_fn("ASM_OTHER", payload, freq_hz, unix_ms, kv, user_data);
+        snprintf(payload, sizeof(payload), "AIS frame MMSI:%u Type:%d", mmsi, msg_type);
+        emit_fn("AIS_MSG8_OTHER", payload, freq_hz, unix_ms, kv, user_data);
     }
 }
 
@@ -132,7 +138,7 @@ static const MrPluginMeta kMeta = {
     "asm_decoder",
     "1.0.0",
     MR_PLUGIN_API_VERSION,
-    "ASM decoder: HDLC framing + AIS type-8 (DAC/FI) extraction",
+    "AIS decoder (msg8): HDLC framing + DAC/FI extraction; not VDES ASM PHY",
     MR_PLUGIN_ROLE_POSTPROCESSING
 };
 
@@ -169,6 +175,15 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
     ASM_LOG("process_bits: bits=%u src=%s freq=%.3f MHz\n",
             bit_count, source_type ? source_type : "?", freq_hz / 1e6);
 
+    /* Handoff path from ais_decoder: byte-aligned AIS msg8 frame (+FCS). */
+    if (source_type && strcmp(source_type, "AIS_MSG8_RAW") == 0) {
+        const uint32_t frame_len = (bit_count + 7u) / 8u;
+        if (frame_len >= 5u) {
+            emit_ais_msg8(bit_bytes, frame_len, freq_hz, unix_ms, emit_fn, user_data);
+        }
+        return;
+    }
+
     for (i = 0; i < bit_count; ++i) {
         const int bit = (bit_bytes[i / 8] >> (7 - (i % 8))) & 1;
 
@@ -199,8 +214,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 if (ctx->in_frame && ctx->frame_len >= 5) {
                     const int crc_ok = hdlc_check_crc(ctx->frame_buf, ctx->frame_len);
                     if (crc_ok) {
-                        emit_asm(ctx->frame_buf, ctx->frame_len,
-                                 freq_hz, unix_ms, emit_fn, user_data);
+                        emit_ais_msg8(ctx->frame_buf, ctx->frame_len,
+                                      freq_hz, unix_ms, emit_fn, user_data);
                     }
                 }
                 ctx->in_frame = 1;

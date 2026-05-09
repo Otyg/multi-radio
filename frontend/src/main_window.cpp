@@ -1173,10 +1173,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_decoder_combo_->addItem("Ingen",              QVariant(QString("")));
   gmsk_decoder_combo_->addItem("NRZI",               QVariant(QString("nrzi_decoder:0")));
   gmsk_decoder_combo_->addItem("NRZ-S (AIS/HDLC)",  QVariant(QString("nrzi_decoder:1")));
+  gmsk_decoder_combo_->addItem("VDES ASM (skiss)",  QVariant(QString("vdes_asm_decoder:0")));
   gmsk_decoder_combo_->setToolTip(
       "Avkodare att kedja efter GMSK.\n"
       "NRZI: transition=1 (NRZ-Mark).\n"
-      "NRZ-S (AIS/HDLC): transition=0, no-transition=1 (ITU-R M.1371).");
+      "NRZ-S (AIS/HDLC): transition=0, no-transition=1 (ITU-R M.1371).\n"
+      "VDES ASM (skiss): scaffold for separat VDES ASM-kedja.");
   gmsk_row->addWidget(gmsk_decoder_combo_);
   gmsk_row->addSpacing(12);
   gmsk_row->addWidget(new QLabel("Postprocessing:", gmsk_params_widget_));
@@ -1184,11 +1186,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_postproc_combo_->addItem("Ingen postprocessing", QVariant(QString("")));
   gmsk_postproc_combo_->addItem("HDLC",                 QVariant(QString("hdlc_postproc")));
   gmsk_postproc_combo_->addItem("AIS (HDLC+M.1371)",    QVariant(QString("ais_decoder")));
-  gmsk_postproc_combo_->addItem("ASM (HDLC+DAC/FI)",    QVariant(QString("asm_decoder")));
+  gmsk_postproc_combo_->addItem("AIS Msg8 (HDLC+DAC/FI)", QVariant(QString("asm_decoder")));
+  gmsk_postproc_combo_->addItem("VDES ASM (skiss)",      QVariant(QString("vdes_asm_postproc")));
   gmsk_postproc_combo_->setToolTip(
       "Postprocessing att kedja efter avkodaren.\n"
       "AIS: avkodar HDLC-ramar som AIS-meddelanden (ITU-R M.1371-5).\n"
-      "ASM: avkodar HDLC-ramar med fokus pa ASM (AIS typ 8: DAC/FI).");
+      "AIS Msg8: avkodar AIS typ 8 (DAC/FI) over AIS/HDLC.\n"
+      "VDES ASM (skiss): separat experimentell kedja (ej full standard-implementation).\n"
+      "Obs: AIS Msg8-varianten ar inte VDES ASM-fysiklagret.");
   gmsk_row->addWidget(gmsk_postproc_combo_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
@@ -2588,7 +2593,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   // Log plugin-decoded digital frames (FSK, GMSK, NRZI, etc.)
   const QString plugin_type = fields.value("signal_type").toString();
   if (plugin_type == "FSK_DATA" || plugin_type == "GMSK_DATA" ||
-      plugin_type == "GMSK_ASM_DATA" ||
+      plugin_type == "GMSK_ASM_DATA" || plugin_type == "VDES_ASM_DATA" ||
       plugin_type == "NRZI_DATA" || plugin_type == "NRZI_ASM_DATA") {
     QString extra;
     if (plugin_type == "GMSK_DATA" || plugin_type == "GMSK_ASM_DATA") {
@@ -2597,6 +2602,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       if (!branch.isEmpty()) {
         extra += QString(" branch=%1").arg(branch);
       }
+    } else if (plugin_type == "VDES_ASM_DATA") {
+      extra = QString(" mode=%1").arg(fields.value("modulation").toString());
     } else if (plugin_type == "FSK_DATA") {
       extra = QString(" dev=%1Hz").arg(fields.value("deviation_hz").toString());
     } else if (plugin_type == "NRZI_DATA" || plugin_type == "NRZI_ASM_DATA") {
@@ -2679,13 +2686,25 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     return;
   }
 
-  if (plugin_type == "ASM_MSG" || plugin_type == "ASM_OTHER") {
+  if (plugin_type == "AIS_MSG8" || plugin_type == "AIS_MSG8_OTHER" ||
+      plugin_type == "ASM_MSG" || plugin_type == "ASM_OTHER") {
     const QString ts    = row.timestamp.toString("HH:mm:ss");
     const QString mtype = fields.value("msg_type").toString();
     if (fixed_hdlc_log_ != nullptr) {
       fixed_hdlc_log_->appendPlainText(
-          QString("[%1] ASM T%2 %3").arg(ts).arg(mtype).arg(payload));
+          QString("[%1] AIS-MSG8 T%2 %3").arg(ts).arg(mtype).arg(payload));
     }
+    AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
+                  .arg(ts)
+                  .arg(receiver_id)
+                  .arg(plugin_type)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(payload));
+    return;
+  }
+
+  if (plugin_type == "VDES_ASM_L2" || plugin_type == "VDES_ASM_TBD") {
+    const QString ts = row.timestamp.toString("HH:mm:ss");
     AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
                   .arg(ts)
                   .arg(receiver_id)

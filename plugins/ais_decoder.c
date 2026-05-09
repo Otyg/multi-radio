@@ -297,41 +297,32 @@ static void decode_aton(const uint8_t* d, uint32_t bytes,
              mmsi, name, type_of_aton, slat, slon);
 }
 
-/* Type 8 (Binary Broadcast Message) */
-static void decode_bbm(const uint8_t* d, uint32_t bytes,
-                        char* kv, size_t kv_sz,
-                        char* payload, size_t pay_sz) {
-    uint32_t mmsi = (uint32_t)ais_bits(d, bytes, 8, 30);
-    int      dac  = (int)ais_bits(d, bytes, 40, 10);
-    int      fi   = (int)ais_bits(d, bytes, 50,  6);
+/* Type 8 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
+static void emit_msg8_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
+                                   double freq_hz, uint64_t unix_ms,
+                                   MrEmitFn emit_fn, void* user_data) {
+    const uint32_t data_bytes = (frame_len >= 2u) ? (frame_len - 2u) : 0u;
+    const uint32_t mmsi = (data_bytes >= 5u)
+                              ? (uint32_t)ais_bits(frame_buf, data_bytes, 8, 30)
+                              : 0u;
+    uint32_t i;
+    char kv[256];
+    char* hex;
+    if (!emit_fn || frame_len == 0u) return;
 
-    /* Application data begins at byte 7 (bit 56).
-       With MSB-first storage, frame_buf[7..bytes-1] are the app data bytes. */
-    const uint32_t app_off   = 7u;
-    const uint32_t app_bytes = (bytes > app_off) ? (bytes - app_off) : 0u;
+    hex = (char*)malloc(frame_len * 2u + 1u);
+    if (!hex) return;
+    for (i = 0; i < frame_len; ++i)
+        snprintf(hex + i * 2u, 3, "%02X", (unsigned)frame_buf[i]);
 
-    /* Hex-encode app data (max AIS frame gives ≤14 bytes = 28 hex chars) */
-    char app_hex[64] = "";
-    if (app_bytes > 0) {
-        uint32_t i;
-        uint32_t lim = app_bytes < 28u ? app_bytes : 28u; /* safety cap */
-        for (i = 0; i < lim; ++i)
-            snprintf(app_hex + i * 2, 3, "%02X", (unsigned)d[app_off + i]);
-    }
-
-    snprintf(kv, kv_sz,
-        "{\"signal_type\":\"AIS_BBM\","
-        "\"msg_type\":\"8\","
-        "\"mmsi\":\"%u\","
-        "\"dac\":\"%d\","
-        "\"fi\":\"%d\","
-        "\"app_data_bytes\":\"%u\","
-        "\"app_data\":\"%s\"}",
-        mmsi, dac, fi, app_bytes, app_hex);
-
-    snprintf(payload, pay_sz,
-             "MMSI:%u DAC:%d FI:%d Data:%s",
-             mmsi, dac, fi, app_hex[0] ? app_hex : "(none)");
+    snprintf(kv, sizeof(kv),
+             "{\"signal_type\":\"AIS_MSG8_RAW\","
+             "\"msg_type\":\"8\","
+             "\"mmsi\":\"%u\","
+             "\"frame_bytes\":\"%u\"}",
+             mmsi, frame_len);
+    emit_fn("AIS_MSG8_RAW", hex, freq_hz, unix_ms, kv, user_data);
+    free(hex);
 }
 
 /* Dispatch to per-type decoder and emit. */
@@ -365,9 +356,8 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         break;
     case 8:
         if (data_bytes < 7) return;  /* 56 bits = 7 bytes minimum */
-        decode_bbm(frame_buf, data_bytes,
-                   kv, sizeof(kv), payload, sizeof(payload));
-        break;
+        emit_msg8_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data);
+        return;
     case 21:
         if (data_bytes < 34) return;  /* 272 bits = 34 bytes */
         decode_aton(frame_buf, data_bytes,
@@ -400,7 +390,6 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
 
     const char* sig = (msg_type == 4)  ? "AIS_BSR"
                     : (msg_type == 5)  ? "AIS_STAT"
-                    : (msg_type == 8)  ? "AIS_BBM"
                     : (msg_type == 21) ? "AIS_ATON"
                     : (msg_type == 24) ? "AIS_STAT24"
                     : "AIS_POS";

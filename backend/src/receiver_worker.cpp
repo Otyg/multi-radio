@@ -518,15 +518,28 @@ void ReceiverWorker::PushPluginConfig() {
     }
   }
 
+  const bool use_vdes_asm_sketch =
+      (cfg.gmsk_decoder == "vdes_asm_decoder") ||
+      (cfg.gmsk_postprocessor == "vdes_asm_postproc");
+  const bool use_ais_msg8_handoff =
+      (effective_modulation != Modulation::kAisDual) &&
+      (cfg.gmsk_postprocessor == "ais_decoder");
+
   if (effective_modulation == Modulation::kAisDual) {
     plugin_host_->SetActiveDecoder("nrzi_decoder");
     plugin_host_->SetParam("invert", "1");  /* AIS/HDLC: NRZ-S, transition=0 */
     plugin_host_->SetActivePostprocessor("ais_decoder");
     plugin_host_->SetActiveAsmPostprocessor("asm_decoder");
   } else {
-    plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
-    plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
-    plugin_host_->SetActiveAsmPostprocessor("");
+    if (use_vdes_asm_sketch) {
+      plugin_host_->SetActiveDecoder("vdes_asm_decoder");
+      plugin_host_->SetActivePostprocessor("vdes_asm_postproc");
+      plugin_host_->SetParam("invert", "0");
+    } else {
+      plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
+      plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
+    }
+    plugin_host_->SetActiveAsmPostprocessor(use_ais_msg8_handoff ? "asm_decoder" : "");
   }
 
   std::string demod_name;
@@ -535,6 +548,9 @@ void ReceiverWorker::PushPluginConfig() {
   if (effective_modulation == Modulation::kPpm)     demod_name = "ppm_demod";
   if (effective_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
   if (effective_modulation == Modulation::kAisDual) demod_name = "ais_dual_demod";
+  if (effective_modulation != Modulation::kAisDual && use_vdes_asm_sketch) {
+    demod_name = "vdes_asm_demod";
+  }
   plugin_host_->SetActiveDemodulator(demod_name);
   std::ostringstream plugin_cfg_msg;
   plugin_cfg_msg << "PLUGIN_CFG demod="
@@ -542,19 +558,25 @@ void ReceiverWorker::PushPluginConfig() {
                  << " decoder="
                  << ((effective_modulation == Modulation::kAisDual)
                          ? "nrzi_decoder"
-                         : cfg.gmsk_decoder)
+                         : (use_vdes_asm_sketch
+                                ? "vdes_asm_decoder"
+                                : cfg.gmsk_decoder))
                  << " postproc="
                  << ((effective_modulation == Modulation::kAisDual)
                          ? "ais_decoder"
-                         : cfg.gmsk_postprocessor)
+                         : (use_vdes_asm_sketch
+                                ? "vdes_asm_postproc"
+                                : cfg.gmsk_postprocessor))
                  << " asm_postproc="
                  << ((effective_modulation == Modulation::kAisDual)
                          ? "asm_decoder"
-                         : "(none)")
+                         : (use_ais_msg8_handoff ? "asm_decoder" : "(none)"))
                  << " invert="
                  << ((effective_modulation == Modulation::kAisDual)
                          ? "1"
-                         : (cfg.gmsk_nrzi_invert ? "1" : "0"))
+                         : (use_vdes_asm_sketch
+                                ? "0"
+                                : (cfg.gmsk_nrzi_invert ? "1" : "0")))
                  << " baud=" << cfg.gmsk_baud_rate;
   PublishEvent(EventKind::kInfo, plugin_cfg_msg.str());
   fprintf(stderr,
@@ -563,15 +585,21 @@ void ReceiverWorker::PushPluginConfig() {
           demod_name.empty() ? "(none/FM)" : demod_name.c_str(),
           (effective_modulation == Modulation::kAisDual)
               ? "nrzi_decoder"
-              : cfg.gmsk_decoder.c_str(),
+              : (use_vdes_asm_sketch
+                     ? "vdes_asm_decoder"
+                     : cfg.gmsk_decoder.c_str()),
           (effective_modulation == Modulation::kAisDual)
               ? "ais_decoder"
-              : cfg.gmsk_postprocessor.c_str(),
+              : (use_vdes_asm_sketch
+                     ? "vdes_asm_postproc"
+                     : cfg.gmsk_postprocessor.c_str()),
           (effective_modulation == Modulation::kAisDual)
               ? "asm_decoder"
-              : "(none)",
+              : (use_ais_msg8_handoff ? "asm_decoder" : "(none)"),
           (effective_modulation == Modulation::kAisDual) ? "1" :
-              (cfg.gmsk_nrzi_invert ? "1" : "0"),
+              (use_vdes_asm_sketch
+                   ? "0"
+                   : (cfg.gmsk_nrzi_invert ? "1" : "0")),
           cfg.gmsk_baud_rate);
 }
 

@@ -439,7 +439,8 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
   // Stage 1 → 2: chain decoder if set and this is raw bit data from a demodulator.
   if (state->decoder_fn && state->decoder_ctx && signal_type && payload && payload[0]) {
     const std::string sig(signal_type);
-    if (sig == "FSK_DATA" || sig == "GMSK_DATA" || sig == "GMSK_ASM_DATA") {
+    if (sig == "FSK_DATA" || sig == "GMSK_DATA" || sig == "GMSK_ASM_DATA" ||
+        sig == "VDES_ASM_DATA") {
       // Convert hex payload → bytes, then call decoder.
       const size_t hex_len = std::strlen(payload);
       const size_t byte_count = hex_len / 2;
@@ -482,7 +483,9 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
       payload && payload[0]) {
     decltype(state->postproc_fn) selected_postproc_fn = state->postproc_fn;
     MrPluginCtx* selected_postproc_ctx = state->postproc_ctx;
-    if (signal_type && std::strcmp(signal_type, "NRZI_ASM_DATA") == 0 &&
+    if (signal_type &&
+        (std::strcmp(signal_type, "NRZI_ASM_DATA") == 0 ||
+         std::strcmp(signal_type, "AIS_MSG8_RAW") == 0) &&
         state->asm_postproc_fn && state->asm_postproc_ctx) {
       selected_postproc_fn = state->asm_postproc_fn;
       selected_postproc_ctx = state->asm_postproc_ctx;
