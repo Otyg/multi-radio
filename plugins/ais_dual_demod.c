@@ -90,6 +90,7 @@ typedef struct {
     uint32_t samples_per_symbol;
     uint32_t sym_acc;
     float    sym_val;
+    float    sym_energy;
     uint32_t sym_n;
 
     MrSignalGate gate;
@@ -169,7 +170,7 @@ static void channel_reconfigure(ChannelCtx* ch, float offset_hz,
     memset(ch->gauss_d, 0, sizeof(float) * ch->gauss_len);
     ch->gauss_pos = 0;
 
-    ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_n = 0;
+    ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_energy = 0.0f; ch->sym_n = 0;
     ch->gate_was_open = 0;
 
     DLOG("configure ch%c: offset=%.0f Hz  sr=%u  sps=%u  gauss_len=%u  "
@@ -332,25 +333,30 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                 bi = (bi + 1) % ch->gauss_len;
             }
 
-            /* 5. Energy gate */
-            mr_signal_gate_update(&ch->gate, out * out, MR_GATE_HOLD_SYMS);
-            if (ais_dbg() && ch->gate.gate_open != ch->gate_was_open) {
-                fprintf(stderr,
-                        "[ais_dual] gate ch%c %s  freq=%.3f MHz  "
-                        "sig=%.2e  noise=%.2e\n",
-                        ci == 0 ? 'A' : 'B',
-                        ch->gate.gate_open ? "OPEN" : "CLOSED",
-                        (freq_hz + (double)ch->freq_offset_hz) / 1e6,
-                        (double)ch->gate.signal_energy,
-                        (double)ch->gate.noise_floor);
-                ch->gate_was_open = ch->gate.gate_open;
-            }
-
-            /* 6. Symbol accumulation */
+            /* 5. Symbol accumulation */
             ch->sym_val += out;
+            ch->sym_energy += out * out;
             ch->sym_n++;
             ch->sym_acc++;
             if (ch->sym_acc >= ch->samples_per_symbol) {
+                /* Gate must be updated per symbol, not per sample, so hold_syms
+                   and EMA constants match the intended time base. */
+                mr_signal_gate_update(&ch->gate,
+                                      ch->sym_energy / (float)ch->sym_n,
+                                      MR_GATE_HOLD_SYMS);
+                if (ais_dbg() && ch->gate.gate_open != ch->gate_was_open) {
+                    fprintf(stderr,
+                            "[ais_dual] gate ch%c %s  freq=%.3f MHz  "
+                            "sig=%.2e  noise=%.2e\n",
+                            ci == 0 ? 'A' : 'B',
+                            ch->gate.gate_open ? "OPEN" : "CLOSED",
+                            (freq_hz + (double)ch->freq_offset_hz) / 1e6,
+                            (double)ch->gate.signal_energy,
+                            (double)ch->gate.noise_floor);
+                    ch->gate_was_open = ch->gate.gate_open;
+                }
+
+                /* 6. Symbol decision / emission */
                 if (!ch->gate.gate_open) {
                     if (ch->bit_count >= AIS_MIN_BITS)
                         DLOG("emit(gate-close) ch%c: %u bits → GMSK_DATA\n",
@@ -381,7 +387,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                                      freq_actual, unix_ms, emit_fn, user_data);
                     }
                 }
-                ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_n = 0;
+                ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_energy = 0.0f; ch->sym_n = 0;
             }
         }
     }
