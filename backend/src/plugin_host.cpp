@@ -57,9 +57,11 @@ std::string JsonExtract(const char* json, const char* key) {
 SignalType SignalTypeFromPluginString(const char* s) {
   if (s == nullptr) return SignalType::kUnknown;
   if (std::strcmp(s, "AIS")       == 0) return SignalType::kAis;
+  /* All AIS sub-types from ais_decoder.c → kAis */
+  if (std::strncmp(s, "AIS_", 4)  == 0) return SignalType::kAis;
   if (std::strcmp(s, "ADSB")      == 0) return SignalType::kAdsb;
+  if (std::strncmp(s, "ADSB_", 5) == 0) return SignalType::kAdsb;
   if (std::strcmp(s, "DSC")       == 0) return SignalType::kDsc;
-  // Plugin-specific types (FSK_DATA, GMSK_DATA, …) → kUnknown for now.
   return SignalType::kUnknown;
 }
 
@@ -258,6 +260,12 @@ bool PluginHost::DisablePlugin(const std::string& plugin_name, std::string* erro
   return true;
 }
 
+static bool ph_dbg() {
+  static int v = -1;
+  if (v < 0) { const char* e = getenv("MR_AIS_DEBUG"); v = (e && e[0] != '0') ? 1 : 0; }
+  return v != 0;
+}
+
 void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callback) {
   if (iq.interleaved_iq.empty()) return;
 
@@ -298,6 +306,22 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
         postproc_ctx = p.ctx;
         break;
       }
+    }
+  }
+
+  if (ph_dbg()) {
+    static uint32_t call_count = 0;
+    if (++call_count % 200 == 1) {  /* print on first call and every 200th */
+      fprintf(stderr,
+              "[plugin_host] ProcessIq #%u  demod='%s'  decoder='%s'(%s)"
+              "  postproc='%s'(%s)  plugins=%zu\n",
+              call_count,
+              active_demodulator_name_.empty() ? "(none)" : active_demodulator_name_.c_str(),
+              active_decoder_name_.empty()      ? "(none)" : active_decoder_name_.c_str(),
+              decoder_fn  ? "found" : "NOT FOUND",
+              active_postprocessor_name_.empty() ? "(none)" : active_postprocessor_name_.c_str(),
+              postproc_fn ? "found" : "NOT FOUND",
+              plugins_.size());
     }
   }
 
@@ -376,6 +400,16 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
   // Also store the raw signal_type string in fields for consumers that care.
   if (signal_type != nullptr && signal_type[0] != '\0') {
     msg.normalized_fields["signal_type"] = signal_type;
+  }
+
+  if (ph_dbg()) {
+    fprintf(stderr,
+            "[plugin_host] emit: sig='%s'  decoder=%s  postproc=%s"
+            "  payload_len=%zu\n",
+            signal_type ? signal_type : "(null)",
+            state->decoder_fn  ? "set" : "null",
+            state->postproc_fn ? "set" : "null",
+            payload ? std::strlen(payload) : 0u);
   }
 
   // Stage 1 → 2: chain decoder if set and this is raw bit data from a demodulator.
