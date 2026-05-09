@@ -519,7 +519,7 @@ void ReceiverWorker::PushPluginConfig() {
 
   if (effective_modulation == Modulation::kAisDual) {
     plugin_host_->SetActiveDecoder("nrzi_decoder");
-    plugin_host_->SetParam("invert", "0");
+    plugin_host_->SetParam("invert", "1");  /* AIS/HDLC: NRZ-S, transition=0 */
     plugin_host_->SetActivePostprocessor("ais_decoder");
   } else {
     plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);

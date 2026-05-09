@@ -28,6 +28,7 @@
 #include "mr_plugin_api.h"
 #include "mr_signal_gate.h"
 #include "mr_bit_buf.h"
+#include "mr_afc.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -65,6 +66,7 @@ typedef struct {
     liquid_float_complex* resamp_out;
     uint32_t              resamp_out_cap;
     MrSignalGate          gate;
+    MrAfc                 afc;
     uint8_t               bit_buf[AIS_MAX_BITS / 8 + 1];
     uint32_t              bit_count;
 } ChannelCtx;
@@ -106,6 +108,7 @@ static int dual_configure(AisDualCtx* ctx, uint32_t sr) {
         ch->bit_count = 0;
         memset(ch->bit_buf, 0, sizeof(ch->bit_buf));
         mr_signal_gate_reset(&ch->gate);
+        mr_afc_init(&ch->afc);
 
         /* NCO: mix_down computes out = in · exp(−j·phi) and then steps phi.
            To bring channel at offsets[i] Hz to baseband, set freq = 2π·offsets[i]/sr
@@ -176,6 +179,8 @@ static void process_symbol(ChannelCtx* ch, uint32_t baud_rate, float bt,
         return;
     }
 
+    mr_afc_update(&ch->afc, ch->sym_buf, AIS_GMSK_K);
+
     unsigned int bit = 0;
     gmskdem_demodulate(ch->demodulator, ch->sym_buf, &bit);
     mr_push_bit(ch->bit_buf, &ch->bit_count, AIS_MAX_BITS, bit & 1u);
@@ -203,6 +208,7 @@ MrPluginCtx* mr_plugin_create(void) {
     for (int i = 0; i < 2; ++i) {
         mr_signal_gate_init(&ctx->ch[i].gate, MR_GATE_SQUELCH_RATIO);
         mr_iir_prefilter_init(&ctx->ch[i].lpf);
+        mr_afc_init(&ctx->ch[i].afc);
     }
     return (MrPluginCtx*)ctx;
 }
@@ -303,7 +309,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                               ch->resamp_out, &n_out);
 
         for (unsigned int j = 0; j < n_out; ++j) {
-            ch->sym_buf[ch->sym_buf_fill++] = ch->resamp_out[j];
+            liquid_float_complex corrected;
+            mr_afc_correct(&ch->afc, ch->resamp_out[j], &corrected);
+            ch->sym_buf[ch->sym_buf_fill++] = corrected;
             if (ch->sym_buf_fill < (uint32_t)AIS_GMSK_K) continue;
             ch->sym_buf_fill = 0;
             process_symbol(ch, ctx->baud_rate, ctx->bt,
