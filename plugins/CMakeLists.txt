@@ -23,6 +23,10 @@ if(NOT MR_PLUGIN_LIQUID_TARGET)
   endif()
 endif()
 
+if(NOT MR_PLUGIN_LIQUID_TARGET)
+  message(FATAL_ERROR "libliquid is required to build plugins. Install liquid-dsp development files.")
+endif()
+
 function(mr_add_plugin target source)
   add_library(${target} MODULE ${source})
   set_target_properties(${target} PROPERTIES
@@ -38,10 +42,8 @@ function(mr_add_plugin target source)
       -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/plugin_exports.ld
     )
   endif()
-  if(MR_PLUGIN_LIQUID_TARGET)
-    target_link_libraries(${target} PRIVATE ${MR_PLUGIN_LIQUID_TARGET})
-    target_compile_definitions(${target} PRIVATE MR_PLUGIN_HAS_LIQUID=1)
-  endif()
+  target_link_libraries(${target} PRIVATE ${MR_PLUGIN_LIQUID_TARGET})
+  target_compile_definitions(${target} PRIVATE MR_PLUGIN_HAS_LIQUID=1)
   install(TARGETS ${target} LIBRARY DESTINATION "${MR_PLUGIN_OUTPUT_DIR}")
 endfunction()
 

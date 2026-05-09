@@ -1,33 +1,24 @@
 /**
- * ais_dual_demod.c — Dual-channel AIS GMSK demodulator
+ * ais_dual_demod.c — Dual-channel AIS splitter + GMSK demod
  *
  * Role: MR_PLUGIN_ROLE_DEMODULATOR
  *
- * Receives one wideband IQ stream tuned near 162.000 MHz and simultaneously
- * demodulates both AIS channels:
- *   CH A  161.975 MHz  (centre − 25 kHz)
- *   CH B  162.025 MHz  (centre + 25 kHz)
+ * Receives one wideband IQ stream tuned near 162.000 MHz and demodulates
+ * both AIS channels in parallel by splitting to:
+ *   CH A = center - channel_offset_hz (default 25 kHz)
+ *   CH B = center + channel_offset_hz (default 25 kHz)
  *
- * Per channel:
- *   1. NCO frequency shift  →  baseband
- *   2. 2nd-order Butterworth IIR channel-select LP filter
- *   3. FM discriminator (differential phase)
- *   4. Gaussian FIR smoothing
- *   5. Energy gate + symbol decision at baud_rate
- *   6. Emit GMSK_DATA bits  →  downstream nrzi_decoder → ais_decoder
+ * Each branch reuses the same demodulation chain behavior as gmsk_demod:
+ *   NCO shift -> channel-select LP -> resample -> AFC -> gmskdem -> GMSK_DATA
  *
- * Minimum sample rate: 5 × channel_offset_hz (≥ 125 kHz recommended).
- *
- * Parameters (mr_plugin_set_param):
- *   channel_offset_hz  — half-spacing from centre (default 25000)
- *   baud_rate          — symbol rate (default 9600)
- *   bt                 — GMSK BT product (default 0.4, per ITU-R M.1371)
- *   squelch_db         — gate threshold above noise floor (dB)
+ * Downstream chain remains unchanged:
+ *   GMSK_DATA -> nrzi_decoder -> ais_decoder
  */
 
 #include "mr_plugin_api.h"
 #include "mr_signal_gate.h"
 #include "mr_bit_buf.h"
+#include "mr_afc.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -35,20 +26,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <liquid/liquid.h>
+#include "mr_iir_prefilter.h"
+
 #ifndef M_PI
 #  define M_PI 3.14159265358979323846
 #endif
 
-#define AIS_BAUD_RATE_DEFAULT   9600u
-#define AIS_BT_DEFAULT          0.4f
-#define AIS_CHANNEL_OFFSET_HZ   25000.0f
-#define AIS_MAX_BITS            1024
-#define AIS_MIN_BITS            8
-#define AIS_MAX_GAUSS_TAPS      512
+#define AIS_BAUD_RATE_DEFAULT 9600u
+#define AIS_BT_DEFAULT        0.4f
+#define AIS_CHANNEL_OFFSET_HZ 25000.0f
 
-/* ------------------------------------------------------------------ */
-/* Debug (set MR_AIS_DEBUG=1 to enable)                                */
-/* ------------------------------------------------------------------ */
+#define GMSK_K                 8
+#define GMSK_M                 5
+#define AIS_MAX_BITS           1024
+#define AIS_MIN_BITS           8
 
 static int ais_dbg(void) {
     static int v = -1;
@@ -58,172 +50,251 @@ static int ais_dbg(void) {
     }
     return v;
 }
+
 #define DLOG(...) do { if (ais_dbg()) fprintf(stderr, "[ais_dual] " __VA_ARGS__); } while (0)
 
-/* ------------------------------------------------------------------ */
-/* Per-channel state                                                    */
-/* ------------------------------------------------------------------ */
-
 typedef struct {
-    float    freq_offset_hz;
+    float freq_offset_hz;
 
-    /* NCO */
-    float    nco_phase;
-    float    nco_step;           /* radians/input-sample */
+    /* Per-branch frequency translation */
+    float nco_phase;
+    float nco_step;
 
-    /* Channel-select LP: 2nd-order Butterworth biquad, real coefficients
-       applied to I and Q independently. */
-    float    b0, b1, b2, a1, a2;
-    float    xi1, xi2, yi1, yi2; /* I delay */
-    float    xq1, xq2, yq1, yq2; /* Q delay */
+    msresamp_crcf  resampler;
+    gmskdem        demod;
+    MrIirPrefilter pre_filter;
 
-    /* FM discriminator */
-    float    prev_re, prev_im;
+    liquid_float_complex* sym_buf;
+    uint32_t              sym_fill;
 
-    /* Gaussian FIR on FM-disc output */
-    float    gauss_c[AIS_MAX_GAUSS_TAPS];
-    float    gauss_d[AIS_MAX_GAUSS_TAPS];
-    uint32_t gauss_len;
-    uint32_t gauss_pos;
-
-    /* Symbol accumulation */
-    uint32_t samples_per_symbol;
-    uint32_t sym_acc;
-    float    sym_val;
-    float    sym_energy;
-    uint32_t sym_n;
+    liquid_float_complex* resamp_out;
+    uint32_t              resamp_out_cap;
 
     MrSignalGate gate;
-    int      gate_was_open;   /* tracks gate transitions for debug */
+    MrAfc        afc;
+    int          gate_was_open;
+
     uint8_t  bit_buf[AIS_MAX_BITS / 8 + 1];
     uint32_t bit_count;
-} ChannelCtx;
+} AisBranch;
 
 typedef struct {
-    uint32_t   baud_rate;
-    float      bt;
-    float      channel_offset_hz;
-    int        needs_reconfigure;
-    uint32_t   sample_rate_hz;
-    uint32_t   block_count;   /* counts process_iq calls, for periodic stats */
-    ChannelCtx ch[2];   /* ch[0] = CH_A (−offset), ch[1] = CH_B (+offset) */
+    uint32_t baud_rate;
+    float    bt;
+    float    channel_offset_hz;
+
+    int      needs_reconfigure;
+    uint32_t sample_rate_hz;
+
+    uint32_t block_count;
+
+    AisBranch ch[2];
+    liquid_float_complex* mixed[2];
+    uint32_t mixed_cap;
 } AisDualCtx;
 
-/* ------------------------------------------------------------------ */
-/* Helpers                                                              */
-/* ------------------------------------------------------------------ */
-
-static uint32_t build_gauss(float* c, uint32_t max, uint32_t sps, float bt) {
-    if (!sps || bt <= 0.0f) { if (max) c[0] = 1.0f; return 1; }
-    const float    s    = 0.8325546f / (6.2831853f * bt) * (float)sps;
-    const uint32_t half = 3u * sps;
-    uint32_t       n    = 2u * half + 1u;
-    if (n > max) n = max;
-    float sum = 0.0f;
-    for (uint32_t k = 0; k < n; ++k) {
-        const float x = ((float)(int32_t)k - (float)half) / s;
-        c[k] = expf(-0.5f * x * x);
-        sum += c[k];
+static void emit_bits_branch(AisBranch* ch,
+                             MrEmitFn emit_fn, void* user_data,
+                             double freq_hz, uint64_t unix_ms,
+                             uint32_t baud_rate, float bt,
+                             const char* reason) {
+    if (ais_dbg() && reason != NULL) {
+        DLOG("emit(%s): %.3f MHz  bits=%u\n",
+             reason, freq_hz / 1e6, (ch->bit_count / 8u) * 8u);
     }
-    if (sum > 0.0f)
-        for (uint32_t k = 0; k < n; ++k) c[k] /= sum;
-    return n;
+
+    char kv[160];
+    snprintf(kv, sizeof(kv),
+             "{\"baud_rate\":\"%u\",\"bt\":\"%.3f\",\"bit_count\":\"%u\"}",
+             baud_rate, (double)bt, (ch->bit_count / 8u) * 8u);
+
+    mr_emit_bits(ch->bit_buf, &ch->bit_count, AIS_MIN_BITS,
+                 AIS_MAX_BITS / 8u + 1u,
+                 "GMSK_DATA", kv, freq_hz, unix_ms, emit_fn, user_data);
 }
 
-/* Bilinear-transform 2nd-order Butterworth LP. cutoff_norm = fc/fs ∈ (0, 0.5). */
-static void biquad_lp(ChannelCtx* ch, float cutoff_norm) {
-    const float K     = tanf((float)M_PI * cutoff_norm);
-    const float sqrt2 = 1.41421356f;
-    const float norm  = 1.0f / (1.0f + sqrt2 * K + K * K);
-    ch->b0 =  K * K * norm;
-    ch->b1 =  2.0f * ch->b0;
-    ch->b2 =  ch->b0;
-    ch->a1 =  2.0f * (K * K - 1.0f) * norm;
-    ch->a2 = (1.0f - sqrt2 * K + K * K) * norm;
+static void branch_teardown(AisBranch* ch) {
+    if (ch->resampler) { msresamp_crcf_destroy(ch->resampler); ch->resampler = NULL; }
+    if (ch->demod)     { gmskdem_destroy(ch->demod);           ch->demod = NULL; }
+    mr_iir_prefilter_destroy(&ch->pre_filter);
+    free(ch->sym_buf);    ch->sym_buf = NULL;
+    free(ch->resamp_out); ch->resamp_out = NULL;
+    ch->resamp_out_cap = 0;
+    ch->sym_fill = 0;
 }
 
-static void channel_reconfigure(ChannelCtx* ch, float offset_hz,
-                                uint32_t sr, uint32_t baud, float bt) {
+static int branch_configure(AisBranch* ch,
+                            float offset_hz,
+                            uint32_t sr,
+                            uint32_t baud_rate,
+                            float bt) {
+    branch_teardown(ch);
+
     ch->freq_offset_hz = offset_hz;
     ch->bit_count = 0;
     memset(ch->bit_buf, 0, sizeof(ch->bit_buf));
     mr_signal_gate_reset(&ch->gate);
+    mr_afc_init(&ch->afc);
 
-    /* NCO: rotation by nco_step/sample gives exp(j·nco_step·n).
-       To bring signal at offset_hz to baseband: nco_step = −2π·offset_hz/sr. */
+    /* Mix branch target to baseband */
     ch->nco_phase = 0.0f;
-    ch->nco_step  = -2.0f * (float)M_PI * offset_hz / (float)sr;
+    ch->nco_step = -2.0f * (float)M_PI * offset_hz / (float)sr;
 
-    /* Channel-select LP at 2·baud/sr */
-    biquad_lp(ch, 2.0f * (float)baud / (float)sr);
-    ch->xi1 = ch->xi2 = ch->yi1 = ch->yi2 = 0.0f;
-    ch->xq1 = ch->xq2 = ch->yq1 = ch->yq2 = 0.0f;
+    /* Same pre-filter setting as gmsk_demod */
+    mr_iir_prefilter_create(&ch->pre_filter, 2.0f * (float)baud_rate / (float)sr);
 
-    /* FM discriminator */
-    ch->prev_re = 1.0f; ch->prev_im = 0.0f;
+    const float rate = (float)baud_rate * (float)GMSK_K / (float)sr;
+    ch->resampler = msresamp_crcf_create(rate, 60.0f);
+    if (!ch->resampler) return 0;
 
-    /* Gaussian FIR */
-    ch->samples_per_symbol = sr / baud;
-    if (!ch->samples_per_symbol) ch->samples_per_symbol = 1;
-    ch->gauss_len = build_gauss(ch->gauss_c, AIS_MAX_GAUSS_TAPS,
-                                ch->samples_per_symbol, bt);
-    memset(ch->gauss_d, 0, sizeof(float) * ch->gauss_len);
-    ch->gauss_pos = 0;
+    ch->demod = gmskdem_create(GMSK_K, GMSK_M, bt);
+    if (!ch->demod) return 0;
 
-    ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_energy = 0.0f; ch->sym_n = 0;
+    ch->sym_buf = (liquid_float_complex*)calloc(GMSK_K, sizeof(liquid_float_complex));
+    if (!ch->sym_buf) return 0;
+
+    const uint32_t init_cap = (uint32_t)(2048.0f / rate) + 64u;
+    ch->resamp_out = (liquid_float_complex*)malloc(init_cap * sizeof(liquid_float_complex));
+    if (!ch->resamp_out) return 0;
+    ch->resamp_out_cap = init_cap;
+
+    ch->sym_fill = 0;
     ch->gate_was_open = 0;
 
-    DLOG("configure ch%c: offset=%.0f Hz  sr=%u  sps=%u  gauss_len=%u  "
-         "cutoff=%.4f  nco_step=%.6f rad/smp\n",
-         offset_hz < 0.0f ? 'A' : 'B',
-         (double)offset_hz, sr, ch->samples_per_symbol, ch->gauss_len,
-         2.0f * (float)baud / (float)sr, (double)ch->nco_step);
+    DLOG("configure ch%c: offset=%.0f Hz sr=%u nco_step=%.6f\n",
+         offset_hz < 0.0f ? 'A' : 'B', (double)offset_hz, sr, (double)ch->nco_step);
+    return 1;
 }
 
-static void dual_reconfigure(AisDualCtx* ctx, uint32_t sr) {
-    if (sr == ctx->sample_rate_hz && !ctx->needs_reconfigure) return;
+static int dual_reconfigure(AisDualCtx* ctx, uint32_t sr) {
+    if (sr == ctx->sample_rate_hz && !ctx->needs_reconfigure) return 1;
+
     ctx->needs_reconfigure = 0;
-    ctx->sample_rate_hz    = sr;
-    channel_reconfigure(&ctx->ch[0], -ctx->channel_offset_hz,
-                        sr, ctx->baud_rate, ctx->bt);
-    channel_reconfigure(&ctx->ch[1], +ctx->channel_offset_hz,
-                        sr, ctx->baud_rate, ctx->bt);
+    ctx->sample_rate_hz = sr;
+
+    if (!branch_configure(&ctx->ch[0], -ctx->channel_offset_hz, sr, ctx->baud_rate, ctx->bt)) {
+        DLOG("configure failed for channel A\n");
+        return 0;
+    }
+    if (!branch_configure(&ctx->ch[1], +ctx->channel_offset_hz, sr, ctx->baud_rate, ctx->bt)) {
+        DLOG("configure failed for channel B\n");
+        return 0;
+    }
+    return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* Plugin API                                                           */
-/* ------------------------------------------------------------------ */
+static int ensure_mixed_capacity(AisDualCtx* ctx, uint32_t num_pairs) {
+    if (num_pairs <= ctx->mixed_cap) return 1;
+
+    liquid_float_complex* a = (liquid_float_complex*)malloc(
+        (size_t)num_pairs * sizeof(liquid_float_complex));
+    liquid_float_complex* b = (liquid_float_complex*)malloc(
+        (size_t)num_pairs * sizeof(liquid_float_complex));
+    if (!a || !b) {
+        free(a);
+        free(b);
+        return 0;
+    }
+
+    free(ctx->mixed[0]);
+    free(ctx->mixed[1]);
+    ctx->mixed[0] = a;
+    ctx->mixed[1] = b;
+    ctx->mixed_cap = num_pairs;
+    return 1;
+}
+
+static void process_symbol(AisDualCtx* ctx,
+                           AisBranch* ch,
+                           liquid_float_complex* sym,
+                           double freq_hz,
+                           uint64_t unix_ms,
+                           MrEmitFn emit_fn,
+                           void* user_data) {
+    float energy = 0.0f;
+    for (int i = 0; i < GMSK_K; ++i) {
+        const float re = __real__ sym[i];
+        const float im = __imag__ sym[i];
+        energy += re * re + im * im;
+    }
+
+    const int falling = mr_signal_gate_update(&ch->gate,
+                                              energy / (float)GMSK_K,
+                                              MR_GATE_HOLD_SYMS);
+    if (ais_dbg() && ch->gate.gate_open != ch->gate_was_open) {
+        DLOG("gate %s ch%c %.3f MHz sig=%.2e noise=%.2e\n",
+             ch->gate.gate_open ? "OPEN" : "CLOSED",
+             ch->freq_offset_hz < 0.0f ? 'A' : 'B',
+             freq_hz / 1e6,
+             (double)ch->gate.signal_energy,
+             (double)ch->gate.noise_floor);
+        ch->gate_was_open = ch->gate.gate_open;
+    }
+
+    if (!ch->gate.gate_open) {
+        if (falling) {
+            emit_bits_branch(ch, emit_fn, user_data, freq_hz, unix_ms,
+                             ctx->baud_rate, ctx->bt, "gate-close");
+        } else {
+            ch->bit_count = 0;
+            memset(ch->bit_buf, 0, sizeof(ch->bit_buf));
+        }
+        return;
+    }
+
+    mr_afc_update(&ch->afc, sym, GMSK_K);
+
+    unsigned int bit = 0u;
+    gmskdem_demodulate(ch->demod, sym, &bit);
+    mr_push_bit(ch->bit_buf, &ch->bit_count, AIS_MAX_BITS, bit & 1u);
+
+    if (ch->bit_count >= AIS_MAX_BITS) {
+        emit_bits_branch(ch, emit_fn, user_data, freq_hz, unix_ms,
+                         ctx->baud_rate, ctx->bt, "buf-full");
+    }
+}
 
 static const MrPluginMeta kMeta = {
-    "ais_dual_demod", "2.0.0", MR_PLUGIN_API_VERSION,
-    "Dual-channel AIS demodulator: CH A (-25 kHz) + CH B (+25 kHz)",
+    "ais_dual_demod", "3.0.0", MR_PLUGIN_API_VERSION,
+    "Dual-channel AIS splitter + GMSK demod (libliquid path)",
     MR_PLUGIN_ROLE_DEMODULATOR
 };
+
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
 MrPluginCtx* mr_plugin_create(void) {
     AisDualCtx* ctx = (AisDualCtx*)calloc(1, sizeof(AisDualCtx));
     if (!ctx) return NULL;
+
     ctx->baud_rate         = AIS_BAUD_RATE_DEFAULT;
     ctx->bt                = AIS_BT_DEFAULT;
     ctx->channel_offset_hz = AIS_CHANNEL_OFFSET_HZ;
+
     for (int i = 0; i < 2; ++i) {
         mr_signal_gate_init(&ctx->ch[i].gate, MR_GATE_SQUELCH_RATIO);
-        ctx->ch[i].gauss_c[0] = 1.0f;
-        ctx->ch[i].gauss_len  = 1;
-        ctx->ch[i].prev_re    = 1.0f;
+        mr_afc_init(&ctx->ch[i].afc);
+        mr_iir_prefilter_init(&ctx->ch[i].pre_filter);
     }
-    DLOG("created  baud=%u  bt=%.2f  offset=%.0f Hz  squelch_ratio=%.1f\n",
-         ctx->baud_rate, (double)ctx->bt, (double)ctx->channel_offset_hz,
-         (double)ctx->ch[0].gate.squelch_ratio);
+
+    DLOG("created baud=%u bt=%.2f offset=%.0f\n",
+         ctx->baud_rate, (double)ctx->bt, (double)ctx->channel_offset_hz);
     return (MrPluginCtx*)ctx;
 }
 
-void mr_plugin_destroy(MrPluginCtx* raw) { free(raw); }
+void mr_plugin_destroy(MrPluginCtx* raw) {
+    if (!raw) return;
+    AisDualCtx* ctx = (AisDualCtx*)raw;
+
+    for (int i = 0; i < 2; ++i) branch_teardown(&ctx->ch[i]);
+    free(ctx->mixed[0]);
+    free(ctx->mixed[1]);
+    free(ctx);
+}
 
 int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
     if (!raw || !key || !value) return 0;
     AisDualCtx* ctx = (AisDualCtx*)raw;
+
     if (strcmp(key, "baud_rate") == 0) {
         const int v = atoi(value);
         if (v > 0) { ctx->baud_rate = (uint32_t)v; ctx->needs_reconfigure = 1; }
@@ -240,7 +311,7 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
         return 1;
     }
     if (strcmp(key, "squelch_db") == 0) {
-        const float db    = (float)atof(value);
+        const float db = (float)atof(value);
         const float ratio = (db <= 0.0f) ? 0.0f : powf(10.0f, db / 10.0f);
         ctx->ch[0].gate.squelch_ratio = ratio;
         ctx->ch[1].gate.squelch_ratio = ratio;
@@ -250,145 +321,98 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
 }
 
 void mr_plugin_process_bits(MrPluginCtx* ctx,
-                            const uint8_t* bit_bytes, uint32_t bit_count,
-                            double freq_hz, uint64_t unix_ms,
+                            const uint8_t* bit_bytes,
+                            uint32_t bit_count,
+                            double freq_hz,
+                            uint64_t unix_ms,
                             const char* source_type,
-                            MrEmitFn emit_fn, void* user_data) {
-    (void)ctx; (void)bit_bytes; (void)bit_count; (void)freq_hz;
-    (void)unix_ms; (void)source_type; (void)emit_fn; (void)user_data;
+                            MrEmitFn emit_fn,
+                            void* user_data) {
+    (void)ctx; (void)bit_bytes; (void)bit_count;
+    (void)freq_hz; (void)unix_ms; (void)source_type;
+    (void)emit_fn; (void)user_data;
 }
 
 void mr_plugin_process_iq(MrPluginCtx* raw,
-                          const int16_t* iq, uint32_t num_pairs,
-                          uint32_t sr, double freq_hz, uint64_t unix_ms,
-                          MrEmitFn emit_fn, void* user_data) {
+                          const int16_t* iq,
+                          uint32_t num_pairs,
+                          uint32_t sr,
+                          double freq_hz,
+                          uint64_t unix_ms,
+                          MrEmitFn emit_fn,
+                          void* user_data) {
     if (!raw || !iq || !num_pairs) return;
-    AisDualCtx* ctx = (AisDualCtx*)raw;
-    if (!sr) sr = 2048000;
-    dual_reconfigure(ctx, sr);
 
-    /* Periodic stats every 100 blocks (~3 s at 250 kHz / 8192 pairs per block) */
-    if (ais_dbg() && ++ctx->block_count % 100 == 0) {
+    AisDualCtx* ctx = (AisDualCtx*)raw;
+    if (!sr) sr = 2048000u;
+
+    if (!dual_reconfigure(ctx, sr)) return;
+    if (!ensure_mixed_capacity(ctx, num_pairs)) return;
+
+    if (ais_dbg() && ++ctx->block_count % 100u == 0u) {
         for (int ci = 0; ci < 2; ++ci) {
-            const ChannelCtx* ch = &ctx->ch[ci];
-            fprintf(stderr,
-                    "[ais_dual] stats ch%c: gate=%s  sig=%.2e  noise=%.2e"
-                    "  ratio=%.1f  bits_acc=%u\n",
-                    ci == 0 ? 'A' : 'B',
-                    ch->gate.gate_open ? "OPEN  " : "closed",
-                    (double)ch->gate.signal_energy,
-                    (double)ch->gate.noise_floor,
-                    ch->gate.noise_floor > 0.0f
-                        ? (double)(ch->gate.signal_energy / ch->gate.noise_floor) : 0.0,
-                    ch->bit_count);
+            const AisBranch* ch = &ctx->ch[ci];
+            DLOG("stats ch%c gate=%s sig=%.2e noise=%.2e bits=%u\n",
+                 ci == 0 ? 'A' : 'B',
+                 ch->gate.gate_open ? "OPEN" : "closed",
+                 (double)ch->gate.signal_energy,
+                 (double)ch->gate.noise_floor,
+                 ch->bit_count);
         }
     }
 
     const float norm = 1.0f / 32768.0f;
 
     for (uint32_t n = 0; n < num_pairs; ++n) {
-        const float is = (float)iq[n * 2]     * norm;
-        const float qs = (float)iq[n * 2 + 1] * norm;
+        const float is = (float)iq[n * 2u] * norm;
+        const float qs = (float)iq[n * 2u + 1u] * norm;
 
         for (int ci = 0; ci < 2; ++ci) {
-            ChannelCtx* ch          = &ctx->ch[ci];
-            const double freq_actual = freq_hz + (double)ch->freq_offset_hz;
+            AisBranch* ch = &ctx->ch[ci];
 
-            /* 1. NCO: rotate by nco_phase to shift channel to baseband */
-            const float cos_p = cosf(ch->nco_phase);
-            const float sin_p = sinf(ch->nco_phase);
-            float re_m = is * cos_p - qs * sin_p;
-            float im_m = is * sin_p + qs * cos_p;
+            const float c = cosf(ch->nco_phase);
+            const float s = sinf(ch->nco_phase);
+            liquid_float_complex mixed;
+            __real__ mixed = is * c - qs * s;
+            __imag__ mixed = is * s + qs * c;
+
             ch->nco_phase += ch->nco_step;
-            if      (ch->nco_phase >  (float)M_PI) ch->nco_phase -= 2.0f * (float)M_PI;
-            else if (ch->nco_phase < -(float)M_PI) ch->nco_phase += 2.0f * (float)M_PI;
+            if (ch->nco_phase >  (float)M_PI) ch->nco_phase -= 2.0f * (float)M_PI;
+            if (ch->nco_phase < -(float)M_PI) ch->nco_phase += 2.0f * (float)M_PI;
 
-            /* 2. Biquad LP — I */
-            const float re_f = ch->b0 * re_m + ch->b1 * ch->xi1 + ch->b2 * ch->xi2
-                             - ch->a1 * ch->yi1 - ch->a2 * ch->yi2;
-            ch->xi2 = ch->xi1; ch->xi1 = re_m;
-            ch->yi2 = ch->yi1; ch->yi1 = re_f;
+            mr_iir_prefilter_execute(&ch->pre_filter, mixed, &ctx->mixed[ci][n]);
+        }
+    }
 
-            /* 2. Biquad LP — Q */
-            const float im_f = ch->b0 * im_m + ch->b1 * ch->xq1 + ch->b2 * ch->xq2
-                             - ch->a1 * ch->yq1 - ch->a2 * ch->yq2;
-            ch->xq2 = ch->xq1; ch->xq1 = im_m;
-            ch->yq2 = ch->yq1; ch->yq1 = im_f;
+    for (int ci = 0; ci < 2; ++ci) {
+        AisBranch* ch = &ctx->ch[ci];
+        const float rate = (float)ctx->baud_rate * (float)GMSK_K / (float)sr;
+        const uint32_t needed = (uint32_t)((float)num_pairs * rate + 64.0f);
 
-            /* 3. FM discriminator: instantaneous phase difference */
-            const float cross = im_f * ch->prev_re - re_f * ch->prev_im;
-            const float dot   = re_f * ch->prev_re + im_f * ch->prev_im;
-            const float angle = (dot != 0.0f || cross != 0.0f)
-                              ? atan2f(cross, dot) : 0.0f;
-            ch->prev_re = re_f;
-            ch->prev_im = im_f;
+        if (needed > ch->resamp_out_cap) {
+            liquid_float_complex* nb = (liquid_float_complex*)realloc(
+                ch->resamp_out, (size_t)needed * sizeof(liquid_float_complex));
+            if (!nb) continue;
+            ch->resamp_out = nb;
+            ch->resamp_out_cap = needed;
+        }
 
-            /* 4. Gaussian FIR */
-            ch->gauss_d[ch->gauss_pos] = angle;
-            ch->gauss_pos = (ch->gauss_pos + 1) % ch->gauss_len;
-            float out = 0.0f;
-            uint32_t bi = ch->gauss_pos;
-            for (uint32_t t = 0; t < ch->gauss_len; ++t) {
-                out += ch->gauss_c[t] * ch->gauss_d[bi];
-                bi = (bi + 1) % ch->gauss_len;
-            }
+        unsigned int n_out = 0u;
+        msresamp_crcf_execute(ch->resampler, ctx->mixed[ci], num_pairs,
+                              ch->resamp_out, &n_out);
 
-            /* 5. Symbol accumulation */
-            ch->sym_val += out;
-            ch->sym_energy += out * out;
-            ch->sym_n++;
-            ch->sym_acc++;
-            if (ch->sym_acc >= ch->samples_per_symbol) {
-                /* Gate must be updated per symbol, not per sample, so hold_syms
-                   and EMA constants match the intended time base. */
-                mr_signal_gate_update(&ch->gate,
-                                      ch->sym_energy / (float)ch->sym_n,
-                                      MR_GATE_HOLD_SYMS);
-                if (ais_dbg() && ch->gate.gate_open != ch->gate_was_open) {
-                    fprintf(stderr,
-                            "[ais_dual] gate ch%c %s  freq=%.3f MHz  "
-                            "sig=%.2e  noise=%.2e\n",
-                            ci == 0 ? 'A' : 'B',
-                            ch->gate.gate_open ? "OPEN" : "CLOSED",
-                            (freq_hz + (double)ch->freq_offset_hz) / 1e6,
-                            (double)ch->gate.signal_energy,
-                            (double)ch->gate.noise_floor);
-                    ch->gate_was_open = ch->gate.gate_open;
-                }
+        const double branch_freq_hz = freq_hz + (double)ch->freq_offset_hz;
 
-                /* 6. Symbol decision / emission */
-                if (!ch->gate.gate_open) {
-                    if (ch->bit_count >= AIS_MIN_BITS)
-                        DLOG("emit(gate-close) ch%c: %u bits → GMSK_DATA\n",
-                             ci == 0 ? 'A' : 'B', (ch->bit_count / 8u) * 8u);
-                    char kv[128];
-                    snprintf(kv, sizeof(kv),
-                             "{\"baud_rate\":\"%u\",\"bt\":\"%.2f\","
-                             "\"bit_count\":\"%u\"}",
-                             ctx->baud_rate, (double)ctx->bt,
-                             (ch->bit_count / 8u) * 8u);
-                    mr_emit_bits(ch->bit_buf, &ch->bit_count, AIS_MIN_BITS,
-                                 sizeof(ch->bit_buf), "GMSK_DATA", kv,
-                                 freq_actual, unix_ms, emit_fn, user_data);
-                } else {
-                    mr_push_bit(ch->bit_buf, &ch->bit_count, AIS_MAX_BITS,
-                                ch->sym_val / (float)ch->sym_n > 0.0f ? 1u : 0u);
-                    if (ch->bit_count >= AIS_MAX_BITS) {
-                        DLOG("emit(buf-full) ch%c: %u bits → GMSK_DATA\n",
-                             ci == 0 ? 'A' : 'B', ch->bit_count);
-                        char kv[128];
-                        snprintf(kv, sizeof(kv),
-                                 "{\"baud_rate\":\"%u\",\"bt\":\"%.2f\","
-                                 "\"bit_count\":\"%u\"}",
-                                 ctx->baud_rate, (double)ctx->bt,
-                                 (ch->bit_count / 8u) * 8u);
-                        mr_emit_bits(ch->bit_buf, &ch->bit_count, AIS_MIN_BITS,
-                                     sizeof(ch->bit_buf), "GMSK_DATA", kv,
-                                     freq_actual, unix_ms, emit_fn, user_data);
-                    }
-                }
-                ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_energy = 0.0f; ch->sym_n = 0;
-            }
+        for (unsigned int i = 0; i < n_out; ++i) {
+            mr_afc_correct(&ch->afc,
+                           ch->resamp_out[i],
+                           &ch->sym_buf[ch->sym_fill]);
+            ch->sym_fill++;
+            if (ch->sym_fill < (uint32_t)GMSK_K) continue;
+            ch->sym_fill = 0;
+            process_symbol(ctx, ch, ch->sym_buf,
+                           branch_freq_hz, unix_ms,
+                           emit_fn, user_data);
         }
     }
 }

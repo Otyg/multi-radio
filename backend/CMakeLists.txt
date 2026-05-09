@@ -52,6 +52,10 @@ if(NOT MR_HAS_LIQUID)
   endif()
 endif()
 
+if(NOT MR_HAS_LIQUID)
+  message(FATAL_ERROR "libliquid is required to build backend. Install liquid-dsp development files.")
+endif()
+
 add_library(multi_radio_core
   src/types.cpp
   src/event_bus.cpp
@@ -84,14 +88,12 @@ if(MR_RTLSDR_LINK_TARGET)
   target_compile_definitions(multi_radio_core PRIVATE MR_HAS_RTLSDR=1)
 endif()
 
-if(MR_HAS_LIQUID)
-  target_compile_definitions(multi_radio_core PRIVATE MR_HAS_LIQUID=1)
-  if(MR_LIQUID_LINK_TARGET)
-    target_link_libraries(multi_radio_core PRIVATE ${MR_LIQUID_LINK_TARGET})
-  else()
-    target_include_directories(multi_radio_core PRIVATE ${MR_LIQUID_INCLUDE_DIR})
-    target_link_libraries(multi_radio_core PRIVATE ${MR_LIQUID_LIBRARY})
-  endif()
+target_compile_definitions(multi_radio_core PRIVATE MR_HAS_LIQUID=1)
+if(MR_LIQUID_LINK_TARGET)
+  target_link_libraries(multi_radio_core PRIVATE ${MR_LIQUID_LINK_TARGET})
+else()
+  target_include_directories(multi_radio_core PRIVATE ${MR_LIQUID_INCLUDE_DIR})
+  target_link_libraries(multi_radio_core PRIVATE ${MR_LIQUID_LIBRARY})
 endif()
 
 set(MR_HAS_RNNOISE 0)
