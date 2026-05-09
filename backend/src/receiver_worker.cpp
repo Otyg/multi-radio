@@ -135,7 +135,8 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
       out.fixed_modulation != Modulation::kFsk &&
       out.fixed_modulation != Modulation::kGmsk &&
       out.fixed_modulation != Modulation::kPpm  &&
-      out.fixed_modulation != Modulation::kAdsbMod) {
+      out.fixed_modulation != Modulation::kAdsbMod &&
+      out.fixed_modulation != Modulation::kAisDual) {
     out.fixed_modulation = Modulation::kWfm;
   }
   return out;
@@ -502,13 +503,35 @@ void ReceiverWorker::PushPluginConfig() {
   plugin_host_->SetParam("invert",           cfg.gmsk_nrzi_invert ? "1" : "0");
   plugin_host_->SetParam("bit_duration_us",  std::to_string(cfg.ppm_bit_duration_us));
   plugin_host_->SetParam("data_rate",        std::to_string(cfg.ppm_data_rate_bps));
-  plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
-  plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
+  /* For AIS Dual the decoder chain is always fixed: NRZI-S → HDLC → AIS.
+     Derive the effective modulation from fixed_modulation; fall back to
+     checking scan-list channels so the scanner can carry AIS Dual entries
+     without requiring the user to also set the Fixed tab combo. */
+  Modulation effective_modulation = cfg.fixed_modulation;
+  if (effective_modulation != Modulation::kAisDual) {
+    for (const auto& ch : cfg.scan_list_channels) {
+      if (ch.modulation == Modulation::kAisDual) {
+        effective_modulation = Modulation::kAisDual;
+        break;
+      }
+    }
+  }
+
+  if (effective_modulation == Modulation::kAisDual) {
+    plugin_host_->SetActiveDecoder("nrzi_decoder");
+    plugin_host_->SetParam("invert", "0");
+    plugin_host_->SetActivePostprocessor("ais_decoder");
+  } else {
+    plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
+    plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
+  }
+
   std::string demod_name;
-  if (cfg.fixed_modulation == Modulation::kFsk)  demod_name = "fsk_demod";
-  if (cfg.fixed_modulation == Modulation::kGmsk) demod_name = "gmsk_demod";
-  if (cfg.fixed_modulation == Modulation::kPpm)     demod_name = "ppm_demod";
-  if (cfg.fixed_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
+  if (effective_modulation == Modulation::kFsk)     demod_name = "fsk_demod";
+  if (effective_modulation == Modulation::kGmsk)    demod_name = "gmsk_demod";
+  if (effective_modulation == Modulation::kPpm)     demod_name = "ppm_demod";
+  if (effective_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
+  if (effective_modulation == Modulation::kAisDual) demod_name = "ais_dual_demod";
   plugin_host_->SetActiveDemodulator(demod_name);
 }
 
@@ -549,7 +572,8 @@ void ReceiverWorker::IngestLoop() {
     // The WFM cap is irrelevant for these modes.
     const bool is_digital_plugin_mode =
         (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
-         ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod);
+         ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod ||
+         ch.modulation == Modulation::kAisDual);
     const uint32_t effective_sample_rate_hz =
         (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz
@@ -1349,7 +1373,8 @@ void ReceiverWorker::RunLoop() {
     const uint32_t requested_sample_rate_hz = config.sample_rate_hz;
     const bool is_digital_plugin_mode =
         (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
-         ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod);
+         ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod ||
+         ch.modulation == Modulation::kAisDual);
     const uint32_t effective_sample_rate_hz =
         (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz

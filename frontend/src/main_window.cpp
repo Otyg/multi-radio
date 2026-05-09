@@ -75,7 +75,8 @@ int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
     case v1::MODULATION_FSK:  return 12500;
     case v1::MODULATION_GMSK: return 12500;
     case v1::MODULATION_PPM:  return 500000;
-    case v1::MODULATION_ADSB: return 2000000;
+    case v1::MODULATION_ADSB:     return 2000000;
+    case v1::MODULATION_AIS_DUAL: return 100000;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return 12500;
@@ -89,7 +90,8 @@ QString ModulationLabel(v1::Modulation modulation) {
     case v1::MODULATION_FSK:  return "FSK";
     case v1::MODULATION_GMSK: return "GMSK";
     case v1::MODULATION_PPM:  return "PPM";
-    case v1::MODULATION_ADSB: return "ADS-B";
+    case v1::MODULATION_ADSB:     return "ADS-B";
+    case v1::MODULATION_AIS_DUAL: return "AIS Dual";
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return "NFM";
@@ -103,6 +105,9 @@ v1::Modulation ModulationFromText(const QString& text) {
   }
   if (upper == "WFM") {
     return v1::MODULATION_WFM;
+  }
+  if (upper == "AIS DUAL" || upper == "AIS_DUAL" || upper == "AISDUAL") {
+    return v1::MODULATION_AIS_DUAL;
   }
   return v1::MODULATION_NFM;
 }
@@ -137,10 +142,10 @@ v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
     return v1::MODULATION_WFM;
   }
   const auto modulation = static_cast<v1::Modulation>(modulation_value);
-  if (modulation == v1::MODULATION_NFM  || modulation == v1::MODULATION_WFM  ||
-      modulation == v1::MODULATION_AM   || modulation == v1::MODULATION_FSK  ||
-      modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_PPM ||
-      modulation == v1::MODULATION_ADSB) {
+  if (modulation == v1::MODULATION_NFM      || modulation == v1::MODULATION_WFM  ||
+      modulation == v1::MODULATION_AM       || modulation == v1::MODULATION_FSK  ||
+      modulation == v1::MODULATION_GMSK     || modulation == v1::MODULATION_PPM  ||
+      modulation == v1::MODULATION_ADSB     || modulation == v1::MODULATION_AIS_DUAL) {
     return modulation;
   }
   return v1::MODULATION_WFM;
@@ -1105,7 +1110,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_->addItem("FSK",  QVariant::fromValue<int>(v1::MODULATION_FSK));
   fixed_modulation_combo_->addItem("GMSK", QVariant::fromValue<int>(v1::MODULATION_GMSK));
   fixed_modulation_combo_->addItem("PPM",   QVariant::fromValue<int>(v1::MODULATION_PPM));
-  fixed_modulation_combo_->addItem("ADS-B", QVariant::fromValue<int>(v1::MODULATION_ADSB));
+  fixed_modulation_combo_->addItem("ADS-B",    QVariant::fromValue<int>(v1::MODULATION_ADSB));
+  fixed_modulation_combo_->addItem("AIS Dual", QVariant::fromValue<int>(v1::MODULATION_AIS_DUAL));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
   fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
@@ -1605,8 +1611,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   });
   connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, fixed_layout]() {
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
-    const bool is_gmsk = (modulation == v1::MODULATION_GMSK);
-    const bool is_ppm  = (modulation == v1::MODULATION_PPM);
+    const bool is_gmsk     = (modulation == v1::MODULATION_GMSK);
+    const bool is_ppm      = (modulation == v1::MODULATION_PPM);
+    const bool is_ais_dual = (modulation == v1::MODULATION_AIS_DUAL);
     if (gmsk_params_widget_ != nullptr)
       gmsk_params_widget_->setVisible(is_gmsk);
     if (ppm_params_widget_ != nullptr)
@@ -1623,6 +1630,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       if (is_adsb) {
         const QSignalBlocker blocker(sample_rate_spin_);
         sample_rate_spin_->setValue(2048000);
+      }
+      /* AIS Dual rekommenderar minst 250 kSps för att täcka båda kanalerna (±25 kHz) */
+      if (is_ais_dual && sample_rate_spin_->value() < 250000) {
+        const QSignalBlocker blocker(sample_rate_spin_);
+        sample_rate_spin_->setValue(250000);
       }
       sample_rate_spin_->setEnabled(!is_adsb);
     }
@@ -2035,11 +2047,22 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     const int modulation_value = fixed_modulation_combo_->currentData().toInt(&value_ok);
     if (value_ok) {
       const auto parsed = static_cast<v1::Modulation>(modulation_value);
-      if (parsed == v1::MODULATION_NFM  || parsed == v1::MODULATION_WFM  ||
-          parsed == v1::MODULATION_AM   || parsed == v1::MODULATION_FSK  ||
-          parsed == v1::MODULATION_GMSK || parsed == v1::MODULATION_PPM ||
-          parsed == v1::MODULATION_ADSB) {
+      if (parsed == v1::MODULATION_NFM      || parsed == v1::MODULATION_WFM  ||
+          parsed == v1::MODULATION_AM       || parsed == v1::MODULATION_FSK  ||
+          parsed == v1::MODULATION_GMSK     || parsed == v1::MODULATION_PPM  ||
+          parsed == v1::MODULATION_ADSB     || parsed == v1::MODULATION_AIS_DUAL) {
         fixed_modulation = parsed;
+      }
+    }
+  }
+  /* In scan-list mode, if any channel uses AIS Dual let that take precedence
+     so the backend selects ais_dual_demod without requiring the user to also
+     set the Fixed tab's modulation combo. */
+  if (mode == v1::RADIO_MODE_SCAN_LIST && fixed_modulation != v1::MODULATION_AIS_DUAL) {
+    for (const auto& ch : scan_list_channels_) {
+      if (ch.modulation == v1::MODULATION_AIS_DUAL) {
+        fixed_modulation = v1::MODULATION_AIS_DUAL;
+        break;
       }
     }
   }
@@ -2983,6 +3006,7 @@ void MainWindow::ConfigureScanListChannel(int index) {
   modulation_combo->addItem("AM");
   modulation_combo->addItem("WFM");
   modulation_combo->addItem("NFM");
+  modulation_combo->addItem("AIS Dual");
   modulation_combo->setCurrentText(ModulationLabel(channel.modulation));
 
   auto* bandwidth_spin = new QSpinBox(&dialog);

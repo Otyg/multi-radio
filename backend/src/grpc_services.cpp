@@ -113,7 +113,8 @@ Modulation FromProto(v1::Modulation modulation) {
     case v1::MODULATION_FSK:  return Modulation::kFsk;
     case v1::MODULATION_GMSK: return Modulation::kGmsk;
     case v1::MODULATION_PPM:  return Modulation::kPpm;
-    case v1::MODULATION_ADSB: return Modulation::kAdsbMod;
+    case v1::MODULATION_ADSB:     return Modulation::kAdsbMod;
+    case v1::MODULATION_AIS_DUAL: return Modulation::kAisDual;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return Modulation::kNfm;
@@ -128,6 +129,7 @@ v1::Modulation ToProto(Modulation modulation) {
     case Modulation::kGmsk: return v1::MODULATION_GMSK;
     case Modulation::kPpm:     return v1::MODULATION_PPM;
     case Modulation::kAdsbMod: return v1::MODULATION_ADSB;
+    case Modulation::kAisDual: return v1::MODULATION_AIS_DUAL;
     case Modulation::kNfm:
     default:                   return v1::MODULATION_NFM;
   }
