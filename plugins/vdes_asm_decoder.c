@@ -27,6 +27,7 @@
 typedef struct {
     uint32_t candidate_bits;
     uint32_t sync_errors_max;
+    uint32_t diag_interval_blocks;
     uint8_t  sync_bits[64];
     uint8_t  sync_len;
 
@@ -210,6 +211,7 @@ MrPluginCtx* mr_plugin_create(void) {
 
     ctx->candidate_bits = VDES_CAND_DEFAULT_BITS;
     ctx->sync_errors_max = 1u;
+    ctx->diag_interval_blocks = 50u;
     set_default_sync(ctx);
     return (MrPluginCtx*)ctx;
 }
@@ -236,6 +238,14 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
         const int v = atoi(value);
         if (v >= 0 && v <= 8) ctx->sync_errors_max = (uint32_t)v;
         return 1;
+    }
+    if (strcmp(key, "diag_interval_blocks") == 0) {
+        const int v = atoi(value);
+        if (v >= 0 && v <= 10000) {
+            ctx->diag_interval_blocks = (uint32_t)v;
+            return 1;
+        }
+        return 0;
     }
     if (strcmp(key, "sync_bits") == 0) {
         uint8_t tmp[64];
@@ -288,21 +298,32 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
         }
     }
 
-    if (!emitted && (ctx->blocks_seen % 50u) == 0u) {
+    if (!emitted &&
+        ctx->diag_interval_blocks > 0u &&
+        (ctx->blocks_seen % ctx->diag_interval_blocks) == 0u) {
+        char payload[192];
         char kv[256];
+        snprintf(payload, sizeof(payload),
+                 "No sync (stream=%u bits, block=%u bits, sync_len=%u, max_err=%u)",
+                 ctx->stream_bits, bit_count,
+                 (unsigned)ctx->sync_len, (unsigned)ctx->sync_errors_max);
         snprintf(kv, sizeof(kv),
-                 "{\"signal_type\":\"VDES_ASM_L2\","
+                 "{\"signal_type\":\"VDES_ASM_DIAG\","
                  "\"source_type\":\"%s\","
                  "\"decoder_scope\":\"VDES_ASM_SYNC_CANDIDATE\","
                  "\"sync_found\":\"0\","
                  "\"sync_len\":\"%u\","
+                 "\"sync_errors_max\":\"%u\","
+                 "\"stream_bits\":\"%u\","
                  "\"bit_count\":\"%u\","
                  "\"blocks_seen\":\"%llu\"}",
                  source_type ? source_type : "",
                  (unsigned)ctx->sync_len,
+                 (unsigned)ctx->sync_errors_max,
+                 ctx->stream_bits,
                  bit_count,
                  (unsigned long long)ctx->blocks_seen);
-        emit_fn("VDES_ASM_L2", "", freq_hz, unix_ms, kv, user_data);
+        emit_fn("VDES_ASM_DIAG", payload, freq_hz, unix_ms, kv, user_data);
     }
 
     keep_stream_tail(ctx);
