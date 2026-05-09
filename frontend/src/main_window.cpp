@@ -1184,9 +1184,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_postproc_combo_->addItem("Ingen postprocessing", QVariant(QString("")));
   gmsk_postproc_combo_->addItem("HDLC",                 QVariant(QString("hdlc_postproc")));
   gmsk_postproc_combo_->addItem("AIS (HDLC+M.1371)",    QVariant(QString("ais_decoder")));
+  gmsk_postproc_combo_->addItem("ASM (HDLC+DAC/FI)",    QVariant(QString("asm_decoder")));
   gmsk_postproc_combo_->setToolTip(
       "Postprocessing att kedja efter avkodaren.\n"
-      "AIS: avkodar HDLC-ramar som AIS-meddelanden (ITU-R M.1371-5).");
+      "AIS: avkodar HDLC-ramar som AIS-meddelanden (ITU-R M.1371-5).\n"
+      "ASM: avkodar HDLC-ramar med fokus pa ASM (AIS typ 8: DAC/FI).");
   gmsk_row->addWidget(gmsk_postproc_combo_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
