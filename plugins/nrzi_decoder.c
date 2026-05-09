@@ -108,9 +108,14 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
            "{\"source_type\":\"%s\",\"invert\":\"%d\",\"bit_count\":\"%u\"}",
            source_type ? source_type : "", ctx->invert, bit_count);
 
-  NLOG("emit: %u bits → NRZI_DATA  freq=%.3f MHz\n",
-       bit_count, freq_hz / 1e6);
-  if (emit_fn) emit_fn("NRZI_DATA", hex, freq_hz, unix_ms, kv, user_data);
+  const char* out_type =
+      (source_type && strcmp(source_type, "GMSK_ASM_DATA") == 0)
+          ? "NRZI_ASM_DATA"
+          : "NRZI_DATA";
+
+  NLOG("emit: %u bits → %s  freq=%.3f MHz\n",
+       bit_count, out_type, freq_hz / 1e6);
+  if (emit_fn) emit_fn(out_type, hex, freq_hz, unix_ms, kv, user_data);
   free(hex);
 }
 

@@ -2585,13 +2585,19 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   // Log plugin-decoded digital frames (FSK, GMSK, NRZI, etc.)
   const QString plugin_type = fields.value("signal_type").toString();
-  if (plugin_type == "FSK_DATA" || plugin_type == "GMSK_DATA" || plugin_type == "NRZI_DATA") {
+  if (plugin_type == "FSK_DATA" || plugin_type == "GMSK_DATA" ||
+      plugin_type == "GMSK_ASM_DATA" ||
+      plugin_type == "NRZI_DATA" || plugin_type == "NRZI_ASM_DATA") {
     QString extra;
-    if (plugin_type == "GMSK_DATA") {
+    if (plugin_type == "GMSK_DATA" || plugin_type == "GMSK_ASM_DATA") {
       extra = QString(" BT=%1").arg(fields.value("bt").toString());
+      const QString branch = fields.value("branch").toString();
+      if (!branch.isEmpty()) {
+        extra += QString(" branch=%1").arg(branch);
+      }
     } else if (plugin_type == "FSK_DATA") {
       extra = QString(" dev=%1Hz").arg(fields.value("deviation_hz").toString());
-    } else if (plugin_type == "NRZI_DATA") {
+    } else if (plugin_type == "NRZI_DATA" || plugin_type == "NRZI_ASM_DATA") {
       const QString src = fields.value("source_type").toString();
       extra = src.isEmpty() ? QString() : QString(" src=%1").arg(src);
     }
@@ -2662,6 +2668,22 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     if (fixed_hdlc_log_ != nullptr)
       fixed_hdlc_log_->appendPlainText(
           QString("[%1] T%2 %3").arg(ts).arg(mtype).arg(payload));
+    AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
+                  .arg(ts)
+                  .arg(receiver_id)
+                  .arg(plugin_type)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(payload));
+    return;
+  }
+
+  if (plugin_type == "ASM_MSG" || plugin_type == "ASM_OTHER") {
+    const QString ts    = row.timestamp.toString("HH:mm:ss");
+    const QString mtype = fields.value("msg_type").toString();
+    if (fixed_hdlc_log_ != nullptr) {
+      fixed_hdlc_log_->appendPlainText(
+          QString("[%1] ASM T%2 %3").arg(ts).arg(mtype).arg(payload));
+    }
     AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
                   .arg(ts)
                   .arg(receiver_id)

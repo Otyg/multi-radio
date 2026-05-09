@@ -503,7 +503,8 @@ void ReceiverWorker::PushPluginConfig() {
   plugin_host_->SetParam("invert",           cfg.gmsk_nrzi_invert ? "1" : "0");
   plugin_host_->SetParam("bit_duration_us",  std::to_string(cfg.ppm_bit_duration_us));
   plugin_host_->SetParam("data_rate",        std::to_string(cfg.ppm_data_rate_bps));
-  /* For AIS Dual the decoder chain is always fixed: NRZI-S → HDLC → AIS.
+  /* For AIS Dual the decoder chain is fixed:
+     NRZI-S -> AIS postproc (AIS channels) + ASM postproc (ASM channels).
      Derive the effective modulation from fixed_modulation; fall back to
      checking scan-list channels so the scanner can carry AIS Dual entries
      without requiring the user to also set the Fixed tab combo. */
@@ -521,9 +522,11 @@ void ReceiverWorker::PushPluginConfig() {
     plugin_host_->SetActiveDecoder("nrzi_decoder");
     plugin_host_->SetParam("invert", "1");  /* AIS/HDLC: NRZ-S, transition=0 */
     plugin_host_->SetActivePostprocessor("ais_decoder");
+    plugin_host_->SetActiveAsmPostprocessor("asm_decoder");
   } else {
     plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
     plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
+    plugin_host_->SetActiveAsmPostprocessor("");
   }
 
   std::string demod_name;
@@ -544,6 +547,10 @@ void ReceiverWorker::PushPluginConfig() {
                  << ((effective_modulation == Modulation::kAisDual)
                          ? "ais_decoder"
                          : cfg.gmsk_postprocessor)
+                 << " asm_postproc="
+                 << ((effective_modulation == Modulation::kAisDual)
+                         ? "asm_decoder"
+                         : "(none)")
                  << " invert="
                  << ((effective_modulation == Modulation::kAisDual)
                          ? "1"
@@ -551,7 +558,7 @@ void ReceiverWorker::PushPluginConfig() {
                  << " baud=" << cfg.gmsk_baud_rate;
   PublishEvent(EventKind::kInfo, plugin_cfg_msg.str());
   fprintf(stderr,
-          "[plugin_cfg] demod='%s'  decoder='%s'  postproc='%s'"
+          "[plugin_cfg] demod='%s'  decoder='%s'  postproc='%s'  asm_postproc='%s'"
           "  invert=%s  baud=%u\n",
           demod_name.empty() ? "(none/FM)" : demod_name.c_str(),
           (effective_modulation == Modulation::kAisDual)
@@ -560,6 +567,9 @@ void ReceiverWorker::PushPluginConfig() {
           (effective_modulation == Modulation::kAisDual)
               ? "ais_decoder"
               : cfg.gmsk_postprocessor.c_str(),
+          (effective_modulation == Modulation::kAisDual)
+              ? "asm_decoder"
+              : "(none)",
           (effective_modulation == Modulation::kAisDual) ? "1" :
               (cfg.gmsk_nrzi_invert ? "1" : "0"),
           cfg.gmsk_baud_rate);

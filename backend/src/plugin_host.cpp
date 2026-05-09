@@ -37,6 +37,10 @@ struct EmitCallbackState {
   void (*postproc_fn)(MrPluginCtx*, const uint8_t*, uint32_t,
                       double, uint64_t, const char*, MrEmitFn, void*) = nullptr;
   MrPluginCtx* postproc_ctx = nullptr;
+  // Optional ASM postprocessor for NRZI_ASM_DATA path.
+  void (*asm_postproc_fn)(MrPluginCtx*, const uint8_t*, uint32_t,
+                          double, uint64_t, const char*, MrEmitFn, void*) = nullptr;
+  MrPluginCtx* asm_postproc_ctx = nullptr;
 };
 
 // Tiny JSON key=value parser: extract value for `key` from a flat object like
@@ -59,6 +63,7 @@ SignalType SignalTypeFromPluginString(const char* s) {
   if (std::strcmp(s, "AIS")       == 0) return SignalType::kAis;
   /* All AIS sub-types from ais_decoder.c → kAis */
   if (std::strncmp(s, "AIS_", 4)  == 0) return SignalType::kAis;
+  if (std::strncmp(s, "ASM_", 4)  == 0) return SignalType::kAis;
   if (std::strcmp(s, "ADSB")      == 0) return SignalType::kAdsb;
   if (std::strncmp(s, "ADSB_", 5) == 0) return SignalType::kAdsb;
   if (std::strcmp(s, "DSC")       == 0) return SignalType::kDsc;
@@ -309,18 +314,34 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
     }
   }
 
+  // Find optional ASM postprocessor plugin.
+  FnProcessBits asm_postproc_fn  = nullptr;
+  MrPluginCtx*  asm_postproc_ctx = nullptr;
+  if (!active_asm_postprocessor_name_.empty()) {
+    for (auto& p : plugins_) {
+      if (p.info.enabled && p.info.plugin_name == active_asm_postprocessor_name_ &&
+          p.fn_process_bits && p.ctx) {
+        asm_postproc_fn  = p.fn_process_bits;
+        asm_postproc_ctx = p.ctx;
+        break;
+      }
+    }
+  }
+
   if (ph_dbg()) {
     static uint32_t call_count = 0;
     if (++call_count % 200 == 1) {  /* print on first call and every 200th */
       fprintf(stderr,
               "[plugin_host] ProcessIq #%u  demod='%s'  decoder='%s'(%s)"
-              "  postproc='%s'(%s)  plugins=%zu\n",
+              "  postproc='%s'(%s)  asm_postproc='%s'(%s)  plugins=%zu\n",
               call_count,
               active_demodulator_name_.empty() ? "(none)" : active_demodulator_name_.c_str(),
               active_decoder_name_.empty()      ? "(none)" : active_decoder_name_.c_str(),
               decoder_fn  ? "found" : "NOT FOUND",
               active_postprocessor_name_.empty() ? "(none)" : active_postprocessor_name_.c_str(),
               postproc_fn ? "found" : "NOT FOUND",
+              active_asm_postprocessor_name_.empty() ? "(none)" : active_asm_postprocessor_name_.c_str(),
+              asm_postproc_fn ? "found" : "NOT FOUND",
               plugins_.size());
     }
   }
@@ -341,6 +362,8 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
     state.decoder_ctx   = decoder_ctx;
     state.postproc_fn   = postproc_fn;
     state.postproc_ctx  = postproc_ctx;
+    state.asm_postproc_fn  = asm_postproc_fn;
+    state.asm_postproc_ctx = asm_postproc_ctx;
 
     plugin.fn_process_iq(
         plugin.ctx,
@@ -404,18 +427,19 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
 
   if (ph_dbg()) {
     fprintf(stderr,
-            "[plugin_host] emit: sig='%s'  decoder=%s  postproc=%s"
+            "[plugin_host] emit: sig='%s'  decoder=%s  postproc=%s  asm_postproc=%s"
             "  payload_len=%zu\n",
             signal_type ? signal_type : "(null)",
             state->decoder_fn  ? "set" : "null",
             state->postproc_fn ? "set" : "null",
+            state->asm_postproc_fn ? "set" : "null",
             payload ? std::strlen(payload) : 0u);
   }
 
   // Stage 1 → 2: chain decoder if set and this is raw bit data from a demodulator.
   if (state->decoder_fn && state->decoder_ctx && signal_type && payload && payload[0]) {
     const std::string sig(signal_type);
-    if (sig == "FSK_DATA" || sig == "GMSK_DATA") {
+    if (sig == "FSK_DATA" || sig == "GMSK_DATA" || sig == "GMSK_ASM_DATA") {
       // Convert hex payload → bytes, then call decoder.
       const size_t hex_len = std::strlen(payload);
       const size_t byte_count = hex_len / 2;
@@ -437,6 +461,8 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
           nested_state.decoder_ctx  = nullptr;
           nested_state.postproc_fn  = state->postproc_fn;
           nested_state.postproc_ctx = state->postproc_ctx;
+          nested_state.asm_postproc_fn  = state->asm_postproc_fn;
+          nested_state.asm_postproc_ctx = state->asm_postproc_ctx;
           state->decoder_fn(state->decoder_ctx,
                             raw_bytes.data(), bit_count,
                             frequency_hz, unix_ms,
@@ -450,8 +476,22 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
 
   // Stage 2 → 3: chain postprocessor if set and no decoder is in play.
   // Applies to any signal type when decoder_fn is null and postproc_fn is set.
-  if (!state->decoder_fn && state->postproc_fn && state->postproc_ctx &&
+  if (!state->decoder_fn &&
+      ((state->postproc_fn && state->postproc_ctx) ||
+       (state->asm_postproc_fn && state->asm_postproc_ctx)) &&
       payload && payload[0]) {
+    decltype(state->postproc_fn) selected_postproc_fn = state->postproc_fn;
+    MrPluginCtx* selected_postproc_ctx = state->postproc_ctx;
+    if (signal_type && std::strcmp(signal_type, "NRZI_ASM_DATA") == 0 &&
+        state->asm_postproc_fn && state->asm_postproc_ctx) {
+      selected_postproc_fn = state->asm_postproc_fn;
+      selected_postproc_ctx = state->asm_postproc_ctx;
+    }
+    if (!selected_postproc_fn || !selected_postproc_ctx) {
+      (*state->callback)(msg);
+      return;
+    }
+
     const size_t hex_len = std::strlen(payload);
     const size_t byte_count = hex_len / 2;
     if (byte_count > 0) {
@@ -472,11 +512,13 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
         nested2_state.decoder_ctx  = nullptr;
         nested2_state.postproc_fn  = nullptr;
         nested2_state.postproc_ctx = nullptr;
-        state->postproc_fn(state->postproc_ctx,
-                           raw_bytes.data(), bit_count,
-                           frequency_hz, unix_ms,
-                           signal_type,
-                           &PluginHost::EmitFromPlugin, &nested2_state);
+        nested2_state.asm_postproc_fn  = nullptr;
+        nested2_state.asm_postproc_ctx = nullptr;
+        selected_postproc_fn(selected_postproc_ctx,
+                             raw_bytes.data(), bit_count,
+                             frequency_hz, unix_ms,
+                             signal_type,
+                             &PluginHost::EmitFromPlugin, &nested2_state);
         return;  // Postprocessor output replaces the decoder output.
       }
     }
@@ -498,6 +540,11 @@ void PluginHost::SetActiveDemodulator(const std::string& plugin_name) {
 void PluginHost::SetActivePostprocessor(const std::string& plugin_name) {
   std::lock_guard<std::mutex> lock(mu_);
   active_postprocessor_name_ = plugin_name;
+}
+
+void PluginHost::SetActiveAsmPostprocessor(const std::string& plugin_name) {
+  std::lock_guard<std::mutex> lock(mu_);
+  active_asm_postprocessor_name_ = plugin_name;
 }
 
 void PluginHost::SetParam(const std::string& key, const std::string& value) {
