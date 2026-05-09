@@ -454,6 +454,33 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
     if (!raw || !bit_bytes || !bit_count) return;
     ALOG("process_bits: %u bits  freq=%.3f MHz  src=%s\n",
          bit_count, freq_hz / 1e6, source_type ? source_type : "?");
+    if (ais_dec_dbg()) {
+        /* Print first 16 bytes as hex so we can see the raw bit pattern. */
+        uint32_t print_bytes = bit_count / 8u;
+        if (print_bytes > 16u) print_bytes = 16u;
+        fprintf(stderr, "[ais_dec] hex: ");
+        for (uint32_t b = 0; b < print_bytes; ++b)
+            fprintf(stderr, "%02X ", bit_bytes[b]);
+        fprintf(stderr, "\n");
+
+        /* Find longest run of consecutive 1-bits.
+           An HDLC flag (01111110) contains exactly 6 consecutive ones.
+           If max_ones < 6 the bit stream is definitely wrong (inverted or noise).
+           If max_ones == 6 and flags_count == 0 the flag boundary aligns wrong. */
+        int max_ones = 0, cur_ones = 0, flags_count = 0;
+        for (uint32_t bi = 0; bi < bit_count; ++bi) {
+            const int b = (bit_bytes[bi / 8] >> (7 - (bi % 8))) & 1;
+            if (b) {
+                ++cur_ones;
+                if (cur_ones > max_ones) max_ones = cur_ones;
+            } else {
+                if (cur_ones >= 6) ++flags_count;
+                cur_ones = 0;
+            }
+        }
+        fprintf(stderr, "[ais_dec] max-ones-run=%d  flag-candidates(>=6)=%d\n",
+                max_ones, flags_count);
+    }
     AisCtx* ctx = (AisCtx*)raw;
 
     uint32_t i;
