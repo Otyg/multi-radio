@@ -1866,7 +1866,7 @@ void MainWindow::RefreshReceivers() {
         if (fixed_modulation != v1::MODULATION_NFM  && fixed_modulation != v1::MODULATION_WFM  &&
             fixed_modulation != v1::MODULATION_AM   && fixed_modulation != v1::MODULATION_FSK  &&
             fixed_modulation != v1::MODULATION_GMSK && fixed_modulation != v1::MODULATION_PPM &&
-            fixed_modulation != v1::MODULATION_ADSB) {
+            fixed_modulation != v1::MODULATION_ADSB && fixed_modulation != v1::MODULATION_AIS_DUAL) {
           fixed_modulation = v1::MODULATION_NFM;
         }
         {
@@ -2003,9 +2003,9 @@ void MainWindow::ApplyModeAndConfig() {
   }
 
   const QString fixed_demod_label =
-      (fixed_modulation_combo_ != nullptr && fixed_modulation_combo_->currentText().trimmed().toUpper() == "NFM")
-          ? "NFM"
-          : "WFM";
+      (fixed_modulation_combo_ != nullptr)
+          ? fixed_modulation_combo_->currentText().trimmed()
+          : QString("unknown");
   AppendLog(QString("Applied mode/config to receiver %1 (fixed-demod=%2, sample-rate=%3 Hz, channel-bw=%4 Hz, hw-bw=%5 Hz, dc=%6@%7 Hz, notch=%8@%9 Hz, lo-offset=%10@%11 Hz)")
                 .arg(receiver_id)
                 .arg(fixed_demod_label)

@@ -533,6 +533,23 @@ void ReceiverWorker::PushPluginConfig() {
   if (effective_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
   if (effective_modulation == Modulation::kAisDual) demod_name = "ais_dual_demod";
   plugin_host_->SetActiveDemodulator(demod_name);
+  std::ostringstream plugin_cfg_msg;
+  plugin_cfg_msg << "PLUGIN_CFG demod="
+                 << (demod_name.empty() ? "(none/FM)" : demod_name)
+                 << " decoder="
+                 << ((effective_modulation == Modulation::kAisDual)
+                         ? "nrzi_decoder"
+                         : cfg.gmsk_decoder)
+                 << " postproc="
+                 << ((effective_modulation == Modulation::kAisDual)
+                         ? "ais_decoder"
+                         : cfg.gmsk_postprocessor)
+                 << " invert="
+                 << ((effective_modulation == Modulation::kAisDual)
+                         ? "1"
+                         : (cfg.gmsk_nrzi_invert ? "1" : "0"))
+                 << " baud=" << cfg.gmsk_baud_rate;
+  PublishEvent(EventKind::kInfo, plugin_cfg_msg.str());
   fprintf(stderr,
           "[plugin_cfg] demod='%s'  decoder='%s'  postproc='%s'"
           "  invert=%s  baud=%u\n",
