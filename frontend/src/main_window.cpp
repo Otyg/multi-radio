@@ -2834,10 +2834,18 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
 
   const bool is_scan_range = (mode_tabs_ != nullptr &&
                                mode_tabs_->currentIndex() == kScanRangeModeTabIndex);
+  const bool is_fixed_mode = (mode_tabs_ != nullptr &&
+                              mode_tabs_->currentIndex() == kFixedModeTabIndex);
 
   const double half_rate_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
-  const double frame_frequency_start_hz = tuned_frequency_hz - half_rate_hz;
-  const double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
+  double frame_frequency_start_hz = tuned_frequency_hz - half_rate_hz;
+  double frame_frequency_end_hz = tuned_frequency_hz + half_rate_hz;
+  if (is_fixed_mode && fixed_channel_bandwidth_spin_ != nullptr &&
+      fixed_channel_bandwidth_spin_->value() > 0) {
+    const double half_bw_hz = std::max(1.0, static_cast<double>(fixed_channel_bandwidth_spin_->value()) * 0.5);
+    frame_frequency_start_hz = tuned_frequency_hz - half_bw_hz;
+    frame_frequency_end_hz = tuned_frequency_hz + half_bw_hz;
+  }
 
   if (is_scan_range && scan_range_viz_ != nullptr) {
     // Use a fixed absolute dB scale so noise stays dark and real signals stand out.
@@ -2970,7 +2978,14 @@ void MainWindow::OnAudioFrame(uint32_t receiver_id, int sample_rate_hz, const QB
   std::vector<double> spectrum;
   BuildDemodVisualizationFrame(pcm_s16le, signal_visualization_->FftSize() / 2, &waveform, &spectrum);
   if (!spectrum.empty()) {
-    const double nyquist_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
+    double nyquist_hz = std::max(1.0, static_cast<double>(sample_rate_hz) * 0.5);
+    const bool is_fixed_mode = (mode_tabs_ != nullptr &&
+                                mode_tabs_->currentIndex() == kFixedModeTabIndex);
+    if (is_fixed_mode && fixed_channel_bandwidth_spin_ != nullptr &&
+        fixed_channel_bandwidth_spin_->value() > 0) {
+      nyquist_hz = std::min(nyquist_hz,
+                            std::max(1.0, static_cast<double>(fixed_channel_bandwidth_spin_->value())));
+    }
     signal_visualization_->PushVisualizationFrame(
         receiver_id, waveform, spectrum, 0.0, 1.0, SignalVisualizationWidget::SpectrumSource::kDemodulated,
         0.0, nyquist_hz);

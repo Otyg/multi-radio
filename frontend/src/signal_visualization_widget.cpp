@@ -290,15 +290,26 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
 
   const QRect content = rect().adjusted(10, 10, -10, -10);
   const int gap = 10;
-  const int panel_w = (content.width() - 2 * gap) / 3;
-  const int remaining_w = content.width() - 2 * panel_w - 2 * gap;
+  const int min_panel_w = 220;
+  QRect waveform_rect;
+  QRect spectrogram_rect;
+  QRect waterfall_rect;
 
-  const QRect waveform_rect(content.left(), content.top(),
-                             panel_w, content.height());
-  const QRect spectrogram_rect(content.left() + panel_w + gap, content.top(),
-                                panel_w, content.height());
-  const QRect waterfall_rect(content.left() + 2 * (panel_w + gap), content.top(),
-                              panel_w + remaining_w, content.height());
+  if (content.width() >= (min_panel_w * 3 + gap * 2)) {
+    const int panel_w = (content.width() - 2 * gap) / 3;
+    const int remaining_w = content.width() - 2 * panel_w - 2 * gap;
+    waveform_rect = QRect(content.left(), content.top(), panel_w, content.height());
+    spectrogram_rect = QRect(content.left() + panel_w + gap, content.top(), panel_w, content.height());
+    waterfall_rect = QRect(content.left() + 2 * (panel_w + gap), content.top(),
+                           panel_w + remaining_w, content.height());
+  } else {
+    const int row_h = std::max(100, (content.height() - 2 * gap) / 3);
+    waveform_rect = QRect(content.left(), content.top(), content.width(), row_h);
+    spectrogram_rect = QRect(content.left(), waveform_rect.bottom() + 1 + gap, content.width(), row_h);
+    const int bottom_y = spectrogram_rect.bottom() + 1 + gap;
+    const int waterfall_h = std::max(100, content.bottom() - bottom_y + 1);
+    waterfall_rect = QRect(content.left(), bottom_y, content.width(), waterfall_h);
+  }
 
   auto draw_panel = [&painter](const QRect& panel_rect, const QString& title) {
     painter.setPen(QPen(QColor(66, 79, 102), 1));
