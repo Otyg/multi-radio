@@ -76,7 +76,7 @@ int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
     case v1::MODULATION_GMSK: return 12500;
     case v1::MODULATION_PPM:  return 500000;
     case v1::MODULATION_ADSB:     return 2000000;
-    case v1::MODULATION_AIS_DUAL: return 100000;
+    case v1::MODULATION_AIS_DUAL: return 200000;
     case v1::MODULATION_NFM:
     case v1::MODULATION_UNSPECIFIED:
     default:                  return 12500;
