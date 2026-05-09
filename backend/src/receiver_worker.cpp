@@ -535,6 +535,11 @@ void ReceiverWorker::PushPluginConfig() {
       plugin_host_->SetActiveDecoder("vdes_asm_decoder");
       plugin_host_->SetActivePostprocessor("vdes_asm_postproc");
       plugin_host_->SetParam("invert", "0");
+      plugin_host_->SetParam("bit_rate_bps",
+                             std::to_string(std::max<uint32_t>(2400u, cfg.gmsk_baud_rate * 2u)));
+      plugin_host_->SetParam("pll_bw", "0.01");
+      plugin_host_->SetParam("candidate_bits", "1056");
+      plugin_host_->SetParam("sync_errors_max", "1");
     } else {
       plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
       plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
