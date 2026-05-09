@@ -13,7 +13,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 add_subdirectory(proto)
 add_subdirectory(backend)
-add_subdirectory(plugins)
+if(MR_BUILD_SERVER)
+  add_subdirectory(plugins)
+endif()
 
 if(MR_BUILD_FRONTEND)
   add_subdirectory(frontend)
