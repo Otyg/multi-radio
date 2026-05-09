@@ -19,16 +19,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define VDES_MAX_SYNC_BITS       64u
 #define VDES_CAND_DEFAULT_BITS  1056u
 #define VDES_CAND_MIN_BITS        96u
 #define VDES_MAX_STREAM_BITS   16384u
 #define VDES_TAIL_KEEP_BITS      512u
+#define VDES_AUTOTUNE_INTERVAL_DEFAULT 32u
+#define VDES_AUTOTUNE_STRIDE_DEFAULT    2u
+#define VDES_AUTOTUNE_SCAN_BITS      4096u
+#define VDES_AUTOTUNE_ERR_CAP           4u
+#define VDES_AUTOTUNE_MIN_SCORE         8u
 
 typedef struct {
     uint32_t candidate_bits;
     uint32_t sync_errors_max;
     uint32_t diag_interval_blocks;
-    uint8_t  sync_bits[64];
+    uint32_t sync_autotune_enabled;
+    uint32_t sync_autotune_interval_blocks;
+    uint32_t sync_autotune_stride_bits;
+    uint32_t sync_autotune_pattern_lock;
+    uint32_t sync_autotune_error_lock;
+    uint8_t  sync_bits[VDES_MAX_SYNC_BITS];
     uint8_t  sync_len;
 
     uint8_t* stream;
@@ -37,7 +48,14 @@ typedef struct {
 
     uint64_t blocks_seen;
     uint64_t candidates_emitted;
+    uint64_t autotune_updates;
 } VdesAsmDecCtx;
+
+typedef struct {
+    const char* name;
+    const uint8_t* bits;
+    uint8_t len;
+} SyncPatternDef;
 
 static const MrPluginMeta kMeta = {
     "vdes_asm_decoder",
@@ -80,16 +98,61 @@ static int ensure_stream_capacity(VdesAsmDecCtx* ctx, uint32_t need_bits) {
     return 1;
 }
 
+/* 28-bit ASM style sync candidate used as default/reference. */
+static const uint8_t kSync28[28] = {
+    1,
+    1,1,1,1,1,0,0,1,1,0,1,0,1,
+    0,
+    0,0,0,0,0,1,1,0,0,1,0,1,0
+};
+
+/* 13-bit Barker (binary form) and derivatives are used by autotune candidates. */
+static const uint8_t kBarker13[13] = {
+    1,1,1,1,1,0,0,1,1,0,1,0,1
+};
+
+static void reverse_bits_seq(uint8_t* dst, const uint8_t* src, uint8_t len) {
+    uint8_t i;
+    for (i = 0; i < len; ++i) dst[i] = src[len - 1u - i];
+}
+
+static void set_sync_pattern(VdesAsmDecCtx* ctx, const uint8_t* bits, uint8_t len) {
+    if (!ctx || !bits || len < 8u || len > VDES_MAX_SYNC_BITS) return;
+    memcpy(ctx->sync_bits, bits, len);
+    ctx->sync_len = len;
+}
+
 static void set_default_sync(VdesAsmDecCtx* ctx) {
-    /* Default: 28-bit ASM-TER style double Barker sync candidate. */
-    static const uint8_t kSync28[28] = {
-        1,
-        1,1,1,1,1,0,0,1,1,0,1,0,1,
-        0,
-        0,0,0,0,0,1,1,0,0,1,0,1,0
-    };
-    memcpy(ctx->sync_bits, kSync28, sizeof(kSync28));
-    ctx->sync_len = 28u;
+    set_sync_pattern(ctx, kSync28, (uint8_t)sizeof(kSync28));
+}
+
+static uint32_t score_hits(const uint32_t* hits, uint32_t cap) {
+    uint32_t s = 0u;
+    if (!hits) return 0u;
+    for (uint32_t e = 0; e <= cap; ++e) {
+        uint32_t w = 1u;
+        if (e == 0u) w = 16u;
+        else if (e == 1u) w = 8u;
+        else if (e == 2u) w = 4u;
+        else if (e == 3u) w = 2u;
+        s += hits[e] * w;
+    }
+    return s;
+}
+
+static uint32_t choose_error_limit(const uint32_t* hits, uint32_t cap, uint32_t offsets) {
+    uint32_t cum = 0u;
+    uint32_t min_hits;
+
+    if (!hits || cap == 0u) return 0u;
+    min_hits = offsets / 320u;
+    if (min_hits < 1u) min_hits = 1u;
+
+    for (uint32_t e = 0; e <= cap; ++e) {
+        cum += hits[e];
+        if (cum >= min_hits) return e;
+    }
+    return cap;
 }
 
 static int parse_sync_bits(const char* value, uint8_t* out, uint8_t* out_len) {
@@ -120,6 +183,126 @@ static int sync_errors(const uint8_t* bits, uint32_t bit_count, uint32_t start,
         if (b != s) err++;
     }
     return err;
+}
+
+static void maybe_autotune_sync(VdesAsmDecCtx* ctx,
+                                double freq_hz, uint64_t unix_ms,
+                                const char* source_type,
+                                MrEmitFn emit_fn, void* user_data) {
+    uint8_t rev_sync28[sizeof(kSync28)];
+    uint8_t rev_b13[sizeof(kBarker13)];
+    uint8_t b13x2[26];
+    const SyncPatternDef patterns[] = {
+        {"sync28",     kSync28,      (uint8_t)sizeof(kSync28)},
+        {"sync28_rev", rev_sync28,   (uint8_t)sizeof(rev_sync28)},
+        {"b13",        kBarker13,    (uint8_t)sizeof(kBarker13)},
+        {"b13_rev",    rev_b13,      (uint8_t)sizeof(rev_b13)},
+        {"b13_x2",     b13x2,        (uint8_t)sizeof(b13x2)}
+    };
+    enum { kNumPatterns = (int)(sizeof(patterns) / sizeof(patterns[0])) };
+    uint32_t hits[kNumPatterns][VDES_AUTOTUNE_ERR_CAP + 1u];
+    uint32_t offsets[kNumPatterns];
+    uint32_t scores[kNumPatterns];
+    uint32_t desired_err[kNumPatterns];
+    uint32_t start_bit;
+    uint32_t scan_bits;
+    uint32_t best_score = 0u;
+    int best_idx = -1;
+    int current_idx = -1;
+
+    if (!ctx || !ctx->sync_autotune_enabled || ctx->stream_bits < 128u) return;
+    if (ctx->sync_autotune_interval_blocks == 0u) return;
+    if ((ctx->blocks_seen % ctx->sync_autotune_interval_blocks) != 0u) return;
+
+    reverse_bits_seq(rev_sync28, kSync28, (uint8_t)sizeof(kSync28));
+    reverse_bits_seq(rev_b13, kBarker13, (uint8_t)sizeof(kBarker13));
+    memcpy(b13x2, kBarker13, sizeof(kBarker13));
+    memcpy(b13x2 + sizeof(kBarker13), kBarker13, sizeof(kBarker13));
+
+    memset(hits, 0, sizeof(hits));
+    memset(offsets, 0, sizeof(offsets));
+    memset(scores, 0, sizeof(scores));
+    memset(desired_err, 0, sizeof(desired_err));
+
+    scan_bits = ctx->stream_bits;
+    if (scan_bits > VDES_AUTOTUNE_SCAN_BITS) scan_bits = VDES_AUTOTUNE_SCAN_BITS;
+    start_bit = ctx->stream_bits - scan_bits;
+
+    for (int p = 0; p < kNumPatterns; ++p) {
+        const uint8_t len = patterns[p].len;
+        if (len < 8u || scan_bits <= len) continue;
+
+        for (uint32_t rel = 0u; rel + len <= scan_bits; rel += ctx->sync_autotune_stride_bits) {
+            const uint32_t pos = start_bit + rel;
+            const int e0 = sync_errors(ctx->stream, ctx->stream_bits, pos,
+                                       patterns[p].bits, len, 0);
+            const int e1 = sync_errors(ctx->stream, ctx->stream_bits, pos,
+                                       patterns[p].bits, len, 1);
+            const int em = (e0 < e1) ? e0 : e1;
+            if (em >= 0 && em <= (int)VDES_AUTOTUNE_ERR_CAP) {
+                hits[p][(uint32_t)em]++;
+            }
+            offsets[p]++;
+        }
+
+        scores[p] = score_hits(hits[p], VDES_AUTOTUNE_ERR_CAP);
+        desired_err[p] = choose_error_limit(hits[p], VDES_AUTOTUNE_ERR_CAP, offsets[p]);
+
+        if (len == ctx->sync_len && memcmp(patterns[p].bits, ctx->sync_bits, len) == 0) {
+            current_idx = p;
+        }
+        if (scores[p] > best_score) {
+            best_score = scores[p];
+            best_idx = p;
+        }
+    }
+
+    if (best_idx < 0 || best_score < VDES_AUTOTUNE_MIN_SCORE) return;
+
+    if (!ctx->sync_autotune_pattern_lock) {
+        uint32_t cur_score = 0u;
+        if (current_idx >= 0) cur_score = scores[current_idx];
+        if (current_idx < 0 || best_idx != current_idx) {
+            if (cur_score == 0u || best_score * 100u >= cur_score * 120u) {
+                set_sync_pattern(ctx, patterns[best_idx].bits, patterns[best_idx].len);
+                ctx->autotune_updates++;
+                if (emit_fn) {
+                    char payload[192];
+                    char kv[320];
+                    snprintf(payload, sizeof(payload),
+                             "Autotune sync_bits -> %s (%u bits, score=%u)",
+                             patterns[best_idx].name, (unsigned)patterns[best_idx].len, best_score);
+                    snprintf(kv, sizeof(kv),
+                             "{\"signal_type\":\"VDES_ASM_DIAG\","
+                             "\"source_type\":\"%s\","
+                             "\"decoder_scope\":\"VDES_ASM_AUTOTUNE\","
+                             "\"update\":\"sync_bits\","
+                             "\"sync_name\":\"%s\","
+                             "\"sync_len\":\"%u\","
+                             "\"score\":\"%u\","
+                             "\"autotune_updates\":\"%llu\"}",
+                             source_type ? source_type : "",
+                             patterns[best_idx].name,
+                             (unsigned)patterns[best_idx].len,
+                             best_score,
+                             (unsigned long long)ctx->autotune_updates);
+                    emit_fn("VDES_ASM_DIAG", payload, freq_hz, unix_ms, kv, user_data);
+                }
+            }
+        }
+    }
+
+    if (!ctx->sync_autotune_error_lock) {
+        uint32_t target_err = desired_err[best_idx];
+        if (target_err > 8u) target_err = 8u;
+        if (target_err > ctx->sync_errors_max + 1u) {
+            ctx->sync_errors_max++;
+        } else if (ctx->sync_errors_max > target_err + 1u) {
+            ctx->sync_errors_max--;
+        } else {
+            ctx->sync_errors_max = target_err;
+        }
+    }
 }
 
 static void emit_candidate(VdesAsmDecCtx* ctx,
@@ -212,6 +395,11 @@ MrPluginCtx* mr_plugin_create(void) {
     ctx->candidate_bits = VDES_CAND_DEFAULT_BITS;
     ctx->sync_errors_max = 1u;
     ctx->diag_interval_blocks = 50u;
+    ctx->sync_autotune_enabled = 1u;
+    ctx->sync_autotune_interval_blocks = VDES_AUTOTUNE_INTERVAL_DEFAULT;
+    ctx->sync_autotune_stride_bits = VDES_AUTOTUNE_STRIDE_DEFAULT;
+    ctx->sync_autotune_pattern_lock = 0u;
+    ctx->sync_autotune_error_lock = 0u;
     set_default_sync(ctx);
     return (MrPluginCtx*)ctx;
 }
@@ -237,6 +425,34 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
     if (strcmp(key, "sync_errors_max") == 0) {
         const int v = atoi(value);
         if (v >= 0 && v <= 8) ctx->sync_errors_max = (uint32_t)v;
+        return 1;
+    }
+    if (strcmp(key, "sync_autotune") == 0) {
+        ctx->sync_autotune_enabled = (atoi(value) != 0) ? 1u : 0u;
+        return 1;
+    }
+    if (strcmp(key, "sync_autotune_interval_blocks") == 0) {
+        const int v = atoi(value);
+        if (v >= 1 && v <= 2000) {
+            ctx->sync_autotune_interval_blocks = (uint32_t)v;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "sync_autotune_stride_bits") == 0) {
+        const int v = atoi(value);
+        if (v >= 1 && v <= 64) {
+            ctx->sync_autotune_stride_bits = (uint32_t)v;
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "sync_autotune_pattern_lock") == 0) {
+        ctx->sync_autotune_pattern_lock = (atoi(value) != 0) ? 1u : 0u;
+        return 1;
+    }
+    if (strcmp(key, "sync_autotune_error_lock") == 0) {
+        ctx->sync_autotune_error_lock = (atoi(value) != 0) ? 1u : 0u;
         return 1;
     }
     if (strcmp(key, "diag_interval_blocks") == 0) {
@@ -273,6 +489,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
     ctx->blocks_seen++;
 
     append_bits(ctx, bit_bytes, bit_count);
+    maybe_autotune_sync(ctx, freq_hz, unix_ms, source_type, emit_fn, user_data);
 
     if (ctx->stream_bits >= ctx->sync_len) {
         for (i = 0; i + ctx->sync_len <= ctx->stream_bits; ++i) {

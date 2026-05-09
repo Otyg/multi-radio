@@ -74,6 +74,7 @@ int DefaultBandwidthHzForModulation(v1::Modulation modulation) {
     case v1::MODULATION_WFM:  return 180000;
     case v1::MODULATION_FSK:  return 12500;
     case v1::MODULATION_GMSK: return 12500;
+    case v1::MODULATION_VDES_ASM: return 25000;
     case v1::MODULATION_PPM:  return 500000;
     case v1::MODULATION_ADSB:     return 2000000;
     case v1::MODULATION_AIS_DUAL: return 200000;
@@ -89,6 +90,7 @@ QString ModulationLabel(v1::Modulation modulation) {
     case v1::MODULATION_WFM:  return "WFM";
     case v1::MODULATION_FSK:  return "FSK";
     case v1::MODULATION_GMSK: return "GMSK";
+    case v1::MODULATION_VDES_ASM: return "VDES ASM";
     case v1::MODULATION_PPM:  return "PPM";
     case v1::MODULATION_ADSB:     return "ADS-B";
     case v1::MODULATION_AIS_DUAL: return "AIS Dual";
@@ -108,6 +110,9 @@ v1::Modulation ModulationFromText(const QString& text) {
   }
   if (upper == "AIS DUAL" || upper == "AIS_DUAL" || upper == "AISDUAL") {
     return v1::MODULATION_AIS_DUAL;
+  }
+  if (upper == "VDES ASM" || upper == "VDES_ASM" || upper == "VDESASM" || upper == "VDES") {
+    return v1::MODULATION_VDES_ASM;
   }
   return v1::MODULATION_NFM;
 }
@@ -129,6 +134,10 @@ bool TryParseCsvModulation(const QString& text, v1::Modulation* out) {
     *out = v1::MODULATION_NFM;
     return true;
   }
+  if (upper == "VDES" || upper == "VDES_ASM" || upper == "VDES ASM") {
+    *out = v1::MODULATION_VDES_ASM;
+    return true;
+  }
   return false;
 }
 
@@ -145,7 +154,8 @@ v1::Modulation FixedModulationFromCombo(const QComboBox* combo) {
   if (modulation == v1::MODULATION_NFM      || modulation == v1::MODULATION_WFM  ||
       modulation == v1::MODULATION_AM       || modulation == v1::MODULATION_FSK  ||
       modulation == v1::MODULATION_GMSK     || modulation == v1::MODULATION_PPM  ||
-      modulation == v1::MODULATION_ADSB     || modulation == v1::MODULATION_AIS_DUAL) {
+      modulation == v1::MODULATION_ADSB     || modulation == v1::MODULATION_AIS_DUAL ||
+      modulation == v1::MODULATION_VDES_ASM) {
     return modulation;
   }
   return v1::MODULATION_WFM;
@@ -1109,6 +1119,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_->addItem("AM",   QVariant::fromValue<int>(v1::MODULATION_AM));
   fixed_modulation_combo_->addItem("FSK",  QVariant::fromValue<int>(v1::MODULATION_FSK));
   fixed_modulation_combo_->addItem("GMSK", QVariant::fromValue<int>(v1::MODULATION_GMSK));
+  fixed_modulation_combo_->addItem("VDES ASM", QVariant::fromValue<int>(v1::MODULATION_VDES_ASM));
   fixed_modulation_combo_->addItem("PPM",   QVariant::fromValue<int>(v1::MODULATION_PPM));
   fixed_modulation_combo_->addItem("ADS-B",    QVariant::fromValue<int>(v1::MODULATION_ADSB));
   fixed_modulation_combo_->addItem("AIS Dual", QVariant::fromValue<int>(v1::MODULATION_AIS_DUAL));
@@ -1469,7 +1480,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     const v1::Modulation mod = static_cast<v1::Modulation>(
         fixed_modulation_combo_->currentData().toInt(&ok));
     if (!ok) return;
-    const bool digital_like = (mod == v1::MODULATION_GMSK || mod == v1::MODULATION_AIS_DUAL ||
+    const bool digital_like = (mod == v1::MODULATION_GMSK ||
+                               mod == v1::MODULATION_VDES_ASM ||
+                               mod == v1::MODULATION_AIS_DUAL ||
                                mod == v1::MODULATION_FSK);
     const bool warn = digital_like && (sample_rate_spin_->value() != 2048000);
     fixed_sample_rate_warning_label_->setVisible(warn);
@@ -1479,7 +1492,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
         ? gmsk_decoder_combo_->currentData().toString() : QString();
     const QString postproc = gmsk_postproc_combo_
         ? gmsk_postproc_combo_->currentData().toString() : QString();
-    const bool use_vdes = decoder.startsWith("vdes_asm_decoder") || postproc == "vdes_asm_postproc";
+    const v1::Modulation mod = FixedModulationFromCombo(fixed_modulation_combo_);
+    const bool use_vdes = (mod == v1::MODULATION_VDES_ASM) ||
+                          decoder.startsWith("vdes_asm_decoder") ||
+                          postproc == "vdes_asm_postproc";
     if (vdes_bit_rate_spin_ != nullptr) vdes_bit_rate_spin_->setEnabled(use_vdes);
     if (vdes_pll_bw_spin_ != nullptr) vdes_pll_bw_spin_->setEnabled(use_vdes);
     if (vdes_candidate_bits_spin_ != nullptr) vdes_candidate_bits_spin_->setEnabled(use_vdes);
@@ -1720,17 +1736,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       fixed_channel_bandwidth_spin_->setValue(value);
     }
   });
-  connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, fixed_layout]() {
+  connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this, fixed_layout, update_vdes_controls]() {
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
-    const bool is_gmsk     = (modulation == v1::MODULATION_GMSK);
+    const bool is_gmsk_like = (modulation == v1::MODULATION_GMSK ||
+                               modulation == v1::MODULATION_VDES_ASM);
     const bool is_ppm      = (modulation == v1::MODULATION_PPM);
     const bool is_ais_dual = (modulation == v1::MODULATION_AIS_DUAL);
     if (gmsk_params_widget_ != nullptr)
-      gmsk_params_widget_->setVisible(is_gmsk);
+      gmsk_params_widget_->setVisible(is_gmsk_like);
+    update_vdes_controls();
     if (ppm_params_widget_ != nullptr)
       ppm_params_widget_->setVisible(is_ppm);
     if (fixed_plugin_params_widget_ != nullptr) {
-      const bool show = is_gmsk || is_ppm;
+      const bool show = is_gmsk_like || is_ppm;
       fixed_plugin_params_widget_->setVisible(show);
       if (auto* lbl = fixed_layout->labelForField(fixed_plugin_params_widget_))
         lbl->setVisible(show);
@@ -1759,7 +1778,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     fixed_bandwidth_last_auto_hz_ = suggested_bandwidth_hz;
     if (!can_auto_apply) {
       if (fixed_sample_rate_warning_label_ != nullptr && sample_rate_spin_ != nullptr) {
-        const bool digital_like = (modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_AIS_DUAL ||
+        const bool digital_like = (modulation == v1::MODULATION_GMSK ||
+                                   modulation == v1::MODULATION_VDES_ASM ||
+                                   modulation == v1::MODULATION_AIS_DUAL ||
                                    modulation == v1::MODULATION_FSK);
         fixed_sample_rate_warning_label_->setVisible(
             digital_like && (sample_rate_spin_->value() != 2048000));
@@ -1778,7 +1799,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     fixed_bandwidth_sync_in_progress_ = false;
     fixed_bandwidth_manual_override_ = false;
     if (fixed_sample_rate_warning_label_ != nullptr && sample_rate_spin_ != nullptr) {
-      const bool digital_like = (modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_AIS_DUAL ||
+      const bool digital_like = (modulation == v1::MODULATION_GMSK ||
+                                 modulation == v1::MODULATION_VDES_ASM ||
+                                 modulation == v1::MODULATION_AIS_DUAL ||
                                  modulation == v1::MODULATION_FSK);
       fixed_sample_rate_warning_label_->setVisible(
           digital_like && (sample_rate_spin_->value() != 2048000));
@@ -1994,7 +2017,8 @@ void MainWindow::RefreshReceivers() {
         if (fixed_modulation != v1::MODULATION_NFM  && fixed_modulation != v1::MODULATION_WFM  &&
             fixed_modulation != v1::MODULATION_AM   && fixed_modulation != v1::MODULATION_FSK  &&
             fixed_modulation != v1::MODULATION_GMSK && fixed_modulation != v1::MODULATION_PPM &&
-            fixed_modulation != v1::MODULATION_ADSB && fixed_modulation != v1::MODULATION_AIS_DUAL) {
+            fixed_modulation != v1::MODULATION_ADSB && fixed_modulation != v1::MODULATION_AIS_DUAL &&
+            fixed_modulation != v1::MODULATION_VDES_ASM) {
           fixed_modulation = v1::MODULATION_NFM;
         }
         {
@@ -2029,6 +2053,7 @@ void MainWindow::RefreshReceivers() {
         }
         if (fixed_sample_rate_warning_label_ != nullptr && sample_rate_spin_ != nullptr) {
           const bool digital_like = (fixed_modulation == v1::MODULATION_GMSK ||
+                                     fixed_modulation == v1::MODULATION_VDES_ASM ||
                                      fixed_modulation == v1::MODULATION_AIS_DUAL ||
                                      fixed_modulation == v1::MODULATION_FSK);
           fixed_sample_rate_warning_label_->setVisible(
@@ -2086,9 +2111,14 @@ void MainWindow::RefreshReceivers() {
             static_cast<int>(receiver.mode_config().vdes_asm_sync_errors_max()));
       }
       {
+        v1::Modulation fixed_modulation = receiver.mode_config().fixed_modulation();
+        if (fixed_modulation == v1::MODULATION_UNSPECIFIED) {
+          fixed_modulation = v1::MODULATION_WFM;
+        }
         const QString dec = QString::fromStdString(receiver.mode_config().gmsk_decoder());
         const QString pp = QString::fromStdString(receiver.mode_config().gmsk_postprocessor());
-        const bool use_vdes = (dec == "vdes_asm_decoder" || pp == "vdes_asm_postproc");
+        const bool use_vdes = (fixed_modulation == v1::MODULATION_VDES_ASM ||
+                               dec == "vdes_asm_decoder" || pp == "vdes_asm_postproc");
         if (vdes_bit_rate_spin_ != nullptr) vdes_bit_rate_spin_->setEnabled(use_vdes);
         if (vdes_pll_bw_spin_ != nullptr) vdes_pll_bw_spin_->setEnabled(use_vdes);
         if (vdes_candidate_bits_spin_ != nullptr) vdes_candidate_bits_spin_->setEnabled(use_vdes);
@@ -2251,7 +2281,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       if (parsed == v1::MODULATION_NFM      || parsed == v1::MODULATION_WFM  ||
           parsed == v1::MODULATION_AM       || parsed == v1::MODULATION_FSK  ||
           parsed == v1::MODULATION_GMSK     || parsed == v1::MODULATION_PPM  ||
-          parsed == v1::MODULATION_ADSB     || parsed == v1::MODULATION_AIS_DUAL) {
+          parsed == v1::MODULATION_ADSB     || parsed == v1::MODULATION_AIS_DUAL ||
+          parsed == v1::MODULATION_VDES_ASM) {
         fixed_modulation = parsed;
       }
     }
@@ -3251,6 +3282,7 @@ void MainWindow::ConfigureScanListChannel(int index) {
   modulation_combo->addItem("WFM");
   modulation_combo->addItem("NFM");
   modulation_combo->addItem("AIS Dual");
+  modulation_combo->addItem("VDES ASM");
   modulation_combo->setCurrentText(ModulationLabel(channel.modulation));
 
   auto* bandwidth_spin = new QSpinBox(&dialog);
@@ -3980,6 +4012,24 @@ void MainWindow::LoadScanListConfigFromSettings() {
 
     const int modulation = settings.value("modulation", static_cast<int>(channel.modulation)).toInt();
     switch (modulation) {
+      case v1::MODULATION_AIS_DUAL:
+        channel.modulation = v1::MODULATION_AIS_DUAL;
+        break;
+      case v1::MODULATION_VDES_ASM:
+        channel.modulation = v1::MODULATION_VDES_ASM;
+        break;
+      case v1::MODULATION_ADSB:
+        channel.modulation = v1::MODULATION_ADSB;
+        break;
+      case v1::MODULATION_PPM:
+        channel.modulation = v1::MODULATION_PPM;
+        break;
+      case v1::MODULATION_GMSK:
+        channel.modulation = v1::MODULATION_GMSK;
+        break;
+      case v1::MODULATION_FSK:
+        channel.modulation = v1::MODULATION_FSK;
+        break;
       case v1::MODULATION_AM:
         channel.modulation = v1::MODULATION_AM;
         break;

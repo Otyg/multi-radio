@@ -136,7 +136,8 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
       out.fixed_modulation != Modulation::kGmsk &&
       out.fixed_modulation != Modulation::kPpm  &&
       out.fixed_modulation != Modulation::kAdsbMod &&
-      out.fixed_modulation != Modulation::kAisDual) {
+      out.fixed_modulation != Modulation::kAisDual &&
+      out.fixed_modulation != Modulation::kVdesAsm) {
     out.fixed_modulation = Modulation::kWfm;
   }
   return out;
@@ -152,6 +153,8 @@ const char* ModulationToken(Modulation modulation) {
       return "AM";
     case Modulation::kWfm:
       return "WFM";
+    case Modulation::kVdesAsm:
+      return "VDES_ASM";
     case Modulation::kNfm:
     default:
       return "NFM";
@@ -520,6 +523,7 @@ void ReceiverWorker::PushPluginConfig() {
   }
 
   const bool use_vdes_asm_sketch =
+      (effective_modulation == Modulation::kVdesAsm) ||
       (cfg.gmsk_decoder == "vdes_asm_decoder") ||
       (cfg.gmsk_postprocessor == "vdes_asm_postproc");
   const bool use_ais_msg8_handoff =
@@ -561,7 +565,8 @@ void ReceiverWorker::PushPluginConfig() {
   if (effective_modulation == Modulation::kPpm)     demod_name = "ppm_demod";
   if (effective_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
   if (effective_modulation == Modulation::kAisDual) demod_name = "ais_dual_demod";
-  if (effective_modulation != Modulation::kAisDual && use_vdes_asm_sketch) {
+  if (effective_modulation == Modulation::kVdesAsm ||
+      (effective_modulation != Modulation::kAisDual && use_vdes_asm_sketch)) {
     demod_name = "vdes_asm_demod";
   }
   plugin_host_->SetActiveDemodulator(demod_name);
@@ -673,7 +678,7 @@ void ReceiverWorker::IngestLoop() {
     const bool is_digital_plugin_mode =
         (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
          ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod ||
-         ch.modulation == Modulation::kAisDual);
+         ch.modulation == Modulation::kAisDual || ch.modulation == Modulation::kVdesAsm);
     const uint32_t effective_sample_rate_hz =
         (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz
@@ -1474,7 +1479,7 @@ void ReceiverWorker::RunLoop() {
     const bool is_digital_plugin_mode =
         (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
          ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod ||
-         ch.modulation == Modulation::kAisDual);
+         ch.modulation == Modulation::kAisDual || ch.modulation == Modulation::kVdesAsm);
     const uint32_t effective_sample_rate_hz =
         (mode == RadioMode::kScanRange || is_digital_plugin_mode)
             ? requested_sample_rate_hz

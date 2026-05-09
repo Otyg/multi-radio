@@ -27,6 +27,7 @@ enum Modulation {
   MODULATION_PPM = 6;
   MODULATION_ADSB = 7;
   MODULATION_AIS_DUAL = 8;
+  MODULATION_VDES_ASM = 9;
 }
 
 enum EventKind {

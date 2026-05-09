@@ -31,6 +31,7 @@ enum class Modulation {
   kPpm,
   kAdsbMod,
   kAisDual,
+  kVdesAsm,
 };
 
 enum class EventKind {
