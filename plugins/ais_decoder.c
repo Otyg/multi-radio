@@ -28,6 +28,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int ais_dec_dbg(void) {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("MR_AIS_DEBUG"); v = (e && e[0] != '0') ? 1 : 0; }
+    return v;
+}
+#define ALOG(...) do { if (ais_dec_dbg()) fprintf(stderr, "[ais_dec] " __VA_ARGS__); } while (0)
+
 /* ------------------------------------------------------------------ */
 /* CRC-16-CCITT (poly 0x8408 reflected, init 0xFFFF, residue 0xF0B8)  */
 /* ------------------------------------------------------------------ */
@@ -445,6 +452,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                             MrEmitFn emit_fn, void* user_data) {
     (void)source_type;
     if (!raw || !bit_bytes || !bit_count) return;
+    ALOG("process_bits: %u bits  freq=%.3f MHz  src=%s\n",
+         bit_count, freq_hz / 1e6, source_type ? source_type : "?");
     AisCtx* ctx = (AisCtx*)raw;
 
     uint32_t i;
@@ -474,11 +483,18 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 continue; /* bit stuffing — discard */
             } else if (ctx->consecutive_ones == 6) {
                 ctx->consecutive_ones = 0;
-                if (ctx->in_frame && ctx->frame_len >= 5 &&
-                    hdlc_check_crc(ctx->frame_buf, ctx->frame_len)) {
-                    decode_and_emit(ctx->frame_buf, ctx->frame_len,
-                                    freq_hz, unix_ms, emit_fn, user_data);
+                if (ctx->in_frame && ctx->frame_len >= 5) {
+                    const int crc_ok = hdlc_check_crc(ctx->frame_buf, ctx->frame_len);
+                    ALOG("frame: %u bytes  CRC %s  freq=%.3f MHz\n",
+                         ctx->frame_len, crc_ok ? "OK" : "FAIL", freq_hz / 1e6);
+                    if (crc_ok) {
+                        decode_and_emit(ctx->frame_buf, ctx->frame_len,
+                                        freq_hz, unix_ms, emit_fn, user_data);
+                    }
+                } else if (ctx->in_frame) {
+                    ALOG("frame: too short (%u bytes) — discarded\n", ctx->frame_len);
                 }
+                ALOG("HDLC flag  freq=%.3f MHz\n", freq_hz / 1e6);
                 ctx->in_frame  = 1;
                 ctx->frame_len = 0;
                 ctx->bit_pos   = 0;

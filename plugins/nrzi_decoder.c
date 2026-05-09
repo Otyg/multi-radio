@@ -20,6 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int nrzi_dbg(void) {
+  static int v = -1;
+  if (v < 0) { const char* e = getenv("MR_AIS_DEBUG"); v = (e && e[0] != '0') ? 1 : 0; }
+  return v;
+}
+#define NLOG(...) do { if (nrzi_dbg()) fprintf(stderr, "[nrzi] " __VA_ARGS__); } while (0)
+
 typedef struct {
   int invert;      /* 0: transition=1 (standard), 1: transition=0 */
   int last_bit;    /* last input bit seen, for differential decode */
@@ -43,6 +50,8 @@ MrPluginCtx* mr_plugin_create(void) {
   const char* inv = getenv("MR_NRZI_INVERT");
   ctx->invert   = (inv && atoi(inv)) ? 1 : 0;
   ctx->last_bit = 0;
+  NLOG("created  invert=%d  (convention: transition=%d)\n",
+       ctx->invert, ctx->invert ? 0 : 1);
   return (MrPluginCtx*)ctx;
 }
 
@@ -53,7 +62,11 @@ const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   if (!raw || !key || !value) return 0;
   NrziCtx* ctx = (NrziCtx*)raw;
-  if (strcmp(key, "invert") == 0) { ctx->invert = atoi(value) ? 1 : 0; return 1; }
+  if (strcmp(key, "invert") == 0) {
+    ctx->invert = atoi(value) ? 1 : 0;
+    NLOG("set invert=%d\n", ctx->invert);
+    return 1;
+  }
   return 0;
 }
 
@@ -63,6 +76,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                             const char* source_type,
                             MrEmitFn emit_fn, void* user_data) {
   if (!raw || !bit_bytes || bit_count == 0) return;
+  NLOG("process_bits: %u bits in  src=%s  invert=%d\n",
+       bit_count, source_type ? source_type : "?", ((NrziCtx*)raw)->invert);
   NrziCtx* ctx = (NrziCtx*)raw;
 
   const uint32_t byte_count = (bit_count + 7) / 8;
@@ -93,6 +108,8 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
            "{\"source_type\":\"%s\",\"invert\":\"%d\",\"bit_count\":\"%u\"}",
            source_type ? source_type : "", ctx->invert, bit_count);
 
+  NLOG("emit: %u bits → NRZI_DATA  freq=%.3f MHz\n",
+       bit_count, freq_hz / 1e6);
   if (emit_fn) emit_fn("NRZI_DATA", hex, freq_hz, unix_ms, kv, user_data);
   free(hex);
 }

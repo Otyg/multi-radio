@@ -47,6 +47,20 @@
 #define AIS_MAX_GAUSS_TAPS      512
 
 /* ------------------------------------------------------------------ */
+/* Debug (set MR_AIS_DEBUG=1 to enable)                                */
+/* ------------------------------------------------------------------ */
+
+static int ais_dbg(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = getenv("MR_AIS_DEBUG");
+        v = (e && e[0] != '0') ? 1 : 0;
+    }
+    return v;
+}
+#define DLOG(...) do { if (ais_dbg()) fprintf(stderr, "[ais_dual] " __VA_ARGS__); } while (0)
+
+/* ------------------------------------------------------------------ */
 /* Per-channel state                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -79,6 +93,7 @@ typedef struct {
     uint32_t sym_n;
 
     MrSignalGate gate;
+    int      gate_was_open;   /* tracks gate transitions for debug */
     uint8_t  bit_buf[AIS_MAX_BITS / 8 + 1];
     uint32_t bit_count;
 } ChannelCtx;
@@ -89,6 +104,7 @@ typedef struct {
     float      channel_offset_hz;
     int        needs_reconfigure;
     uint32_t   sample_rate_hz;
+    uint32_t   block_count;   /* counts process_iq calls, for periodic stats */
     ChannelCtx ch[2];   /* ch[0] = CH_A (−offset), ch[1] = CH_B (+offset) */
 } AisDualCtx;
 
@@ -154,6 +170,13 @@ static void channel_reconfigure(ChannelCtx* ch, float offset_hz,
     ch->gauss_pos = 0;
 
     ch->sym_acc = 0; ch->sym_val = 0.0f; ch->sym_n = 0;
+    ch->gate_was_open = 0;
+
+    DLOG("configure ch%c: offset=%.0f Hz  sr=%u  sps=%u  gauss_len=%u  "
+         "cutoff=%.4f  nco_step=%.6f rad/smp\n",
+         offset_hz < 0.0f ? 'A' : 'B',
+         (double)offset_hz, sr, ch->samples_per_symbol, ch->gauss_len,
+         2.0f * (float)baud / (float)sr, (double)ch->nco_step);
 }
 
 static void dual_reconfigure(AisDualCtx* ctx, uint32_t sr) {
@@ -189,6 +212,9 @@ MrPluginCtx* mr_plugin_create(void) {
         ctx->ch[i].gauss_len  = 1;
         ctx->ch[i].prev_re    = 1.0f;
     }
+    DLOG("created  baud=%u  bt=%.2f  offset=%.0f Hz  squelch_ratio=%.1f\n",
+         ctx->baud_rate, (double)ctx->bt, (double)ctx->channel_offset_hz,
+         (double)ctx->ch[0].gate.squelch_ratio);
     return (MrPluginCtx*)ctx;
 }
 
@@ -239,6 +265,23 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     AisDualCtx* ctx = (AisDualCtx*)raw;
     if (!sr) sr = 2048000;
     dual_reconfigure(ctx, sr);
+
+    /* Periodic stats every 100 blocks (~3 s at 250 kHz / 8192 pairs per block) */
+    if (ais_dbg() && ++ctx->block_count % 100 == 0) {
+        for (int ci = 0; ci < 2; ++ci) {
+            const ChannelCtx* ch = &ctx->ch[ci];
+            fprintf(stderr,
+                    "[ais_dual] stats ch%c: gate=%s  sig=%.2e  noise=%.2e"
+                    "  ratio=%.1f  bits_acc=%u\n",
+                    ci == 0 ? 'A' : 'B',
+                    ch->gate.gate_open ? "OPEN  " : "closed",
+                    (double)ch->gate.signal_energy,
+                    (double)ch->gate.noise_floor,
+                    ch->gate.noise_floor > 0.0f
+                        ? (double)(ch->gate.signal_energy / ch->gate.noise_floor) : 0.0,
+                    ch->bit_count);
+        }
+    }
 
     const float norm = 1.0f / 32768.0f;
 
@@ -291,6 +334,17 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
             /* 5. Energy gate */
             mr_signal_gate_update(&ch->gate, out * out, MR_GATE_HOLD_SYMS);
+            if (ais_dbg() && ch->gate.gate_open != ch->gate_was_open) {
+                fprintf(stderr,
+                        "[ais_dual] gate ch%c %s  freq=%.3f MHz  "
+                        "sig=%.2e  noise=%.2e\n",
+                        ci == 0 ? 'A' : 'B',
+                        ch->gate.gate_open ? "OPEN" : "CLOSED",
+                        (freq_hz + (double)ch->freq_offset_hz) / 1e6,
+                        (double)ch->gate.signal_energy,
+                        (double)ch->gate.noise_floor);
+                ch->gate_was_open = ch->gate.gate_open;
+            }
 
             /* 6. Symbol accumulation */
             ch->sym_val += out;
@@ -298,6 +352,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
             ch->sym_acc++;
             if (ch->sym_acc >= ch->samples_per_symbol) {
                 if (!ch->gate.gate_open) {
+                    if (ch->bit_count >= AIS_MIN_BITS)
+                        DLOG("emit(gate-close) ch%c: %u bits → GMSK_DATA\n",
+                             ci == 0 ? 'A' : 'B', (ch->bit_count / 8u) * 8u);
                     char kv[128];
                     snprintf(kv, sizeof(kv),
                              "{\"baud_rate\":\"%u\",\"bt\":\"%.2f\","
@@ -311,6 +368,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                     mr_push_bit(ch->bit_buf, &ch->bit_count, AIS_MAX_BITS,
                                 ch->sym_val / (float)ch->sym_n > 0.0f ? 1u : 0u);
                     if (ch->bit_count >= AIS_MAX_BITS) {
+                        DLOG("emit(buf-full) ch%c: %u bits → GMSK_DATA\n",
+                             ci == 0 ? 'A' : 'B', ch->bit_count);
                         char kv[128];
                         snprintf(kv, sizeof(kv),
                                  "{\"baud_rate\":\"%u\",\"bt\":\"%.2f\","
