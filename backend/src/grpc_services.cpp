@@ -202,6 +202,10 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   out.ppm_correction      = config.ppm_correction();
   if (config.ppm_bit_duration_us() > 0) out.ppm_bit_duration_us = config.ppm_bit_duration_us();
   if (config.ppm_data_rate_bps() > 0)   out.ppm_data_rate_bps   = config.ppm_data_rate_bps();
+  if (config.vdes_asm_bit_rate_bps() > 0) out.vdes_asm_bit_rate_bps = config.vdes_asm_bit_rate_bps();
+  if (config.vdes_asm_pll_bw() > 0.0f) out.vdes_asm_pll_bw = config.vdes_asm_pll_bw();
+  if (config.vdes_asm_candidate_bits() > 0) out.vdes_asm_candidate_bits = config.vdes_asm_candidate_bits();
+  out.vdes_asm_sync_errors_max = config.vdes_asm_sync_errors_max();
   out.rnnoise_enabled = config.rnnoise_enabled();
   out.rnnoise_strength = config.rnnoise_strength();
   return out;
@@ -241,6 +245,10 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_ppm_correction(config.ppm_correction);
   out->set_ppm_bit_duration_us(config.ppm_bit_duration_us);
   out->set_ppm_data_rate_bps(config.ppm_data_rate_bps);
+  out->set_vdes_asm_bit_rate_bps(config.vdes_asm_bit_rate_bps);
+  out->set_vdes_asm_pll_bw(config.vdes_asm_pll_bw);
+  out->set_vdes_asm_candidate_bits(config.vdes_asm_candidate_bits);
+  out->set_vdes_asm_sync_errors_max(config.vdes_asm_sync_errors_max);
   out->set_rnnoise_enabled(config.rnnoise_enabled);
   out->set_rnnoise_strength(config.rnnoise_strength);
   out->clear_frequency_list_hz();

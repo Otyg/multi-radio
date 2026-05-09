@@ -1114,6 +1114,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   fixed_modulation_combo_->addItem("AIS Dual", QVariant::fromValue<int>(v1::MODULATION_AIS_DUAL));
   fixed_modulation_combo_->setCurrentIndex(
       fixed_modulation_combo_->findData(QVariant::fromValue<int>(v1::MODULATION_WFM)));
+  fixed_channel_bandwidth_spin_ = new QSpinBox(fixed_tab);
+  fixed_channel_bandwidth_spin_->setRange(0, 500000);
+  fixed_channel_bandwidth_spin_->setSingleStep(1000);
+  fixed_channel_bandwidth_spin_->setValue(30000);
+  fixed_channel_bandwidth_spin_->setSuffix(" Hz");
+  fixed_channel_bandwidth_spin_->setSpecialValueText("Off");
+  fixed_sample_rate_warning_label_ = new QLabel(fixed_tab);
+  fixed_sample_rate_warning_label_->setText(
+      "Varning: sample-rate bor vara 2048000 Hz for stabil GMSK/VDES mottagning.");
+  fixed_sample_rate_warning_label_->setStyleSheet("color: #F57C00; font-weight: 600;");
+  fixed_sample_rate_warning_label_->setVisible(false);
   fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
   fixed_audio_lpf3k5_checkbox_   = new QCheckBox("LP 3.5 kHz",  fixed_tab);
   fixed_audio_lpf4k5_checkbox_   = new QCheckBox("LP 4.5 kHz",  fixed_tab);
@@ -1159,6 +1170,28 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   gmsk_mod_index_spin_->setDecimals(2);
   gmsk_mod_index_spin_->setValue(0.5);
   gmsk_mod_index_spin_->setToolTip("Modulation index h. Standard GMSK: 0.5");
+  vdes_bit_rate_spin_ = new QSpinBox(gmsk_params_widget_);
+  vdes_bit_rate_spin_->setRange(2400, 76800);
+  vdes_bit_rate_spin_->setSingleStep(1200);
+  vdes_bit_rate_spin_->setValue(19200);
+  vdes_bit_rate_spin_->setSuffix(" bps");
+  vdes_bit_rate_spin_->setToolTip("VDES ASM bitrate for vdes_asm_demod.");
+  vdes_pll_bw_spin_ = new QDoubleSpinBox(gmsk_params_widget_);
+  vdes_pll_bw_spin_->setRange(0.0001, 0.2);
+  vdes_pll_bw_spin_->setSingleStep(0.001);
+  vdes_pll_bw_spin_->setDecimals(4);
+  vdes_pll_bw_spin_->setValue(0.01);
+  vdes_pll_bw_spin_->setToolTip("VDES ASM PLL bandwidth (carrier tracking loop).");
+  vdes_candidate_bits_spin_ = new QSpinBox(gmsk_params_widget_);
+  vdes_candidate_bits_spin_->setRange(96, 4096);
+  vdes_candidate_bits_spin_->setSingleStep(16);
+  vdes_candidate_bits_spin_->setValue(1056);
+  vdes_candidate_bits_spin_->setToolTip("VDES ASM candidate burst length in bits.");
+  vdes_sync_errors_spin_ = new QSpinBox(gmsk_params_widget_);
+  vdes_sync_errors_spin_->setRange(0, 8);
+  vdes_sync_errors_spin_->setSingleStep(1);
+  vdes_sync_errors_spin_->setValue(1);
+  vdes_sync_errors_spin_->setToolTip("Allowed sync bit errors for candidate detection.");
   gmsk_row->addWidget(new QLabel("Baudrate:", gmsk_params_widget_));
   gmsk_row->addWidget(gmsk_baud_rate_spin_);
   gmsk_row->addSpacing(8);
@@ -1195,6 +1228,18 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       "VDES ASM (skiss): separat experimentell kedja (ej full standard-implementation).\n"
       "Obs: AIS Msg8-varianten ar inte VDES ASM-fysiklagret.");
   gmsk_row->addWidget(gmsk_postproc_combo_);
+  gmsk_row->addSpacing(12);
+  gmsk_row->addWidget(new QLabel("VDES bps:", gmsk_params_widget_));
+  gmsk_row->addWidget(vdes_bit_rate_spin_);
+  gmsk_row->addSpacing(8);
+  gmsk_row->addWidget(new QLabel("PLL BW:", gmsk_params_widget_));
+  gmsk_row->addWidget(vdes_pll_bw_spin_);
+  gmsk_row->addSpacing(8);
+  gmsk_row->addWidget(new QLabel("Cand bits:", gmsk_params_widget_));
+  gmsk_row->addWidget(vdes_candidate_bits_spin_);
+  gmsk_row->addSpacing(8);
+  gmsk_row->addWidget(new QLabel("Sync err:", gmsk_params_widget_));
+  gmsk_row->addWidget(vdes_sync_errors_spin_);
   gmsk_row->addStretch(1);
   gmsk_params_widget_->setVisible(false);
 
@@ -1239,7 +1284,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
+  fixed_layout->addRow("Kanalbandbredd", fixed_channel_bandwidth_spin_);
   fixed_layout->addRow("Plugin", fixed_plugin_params_widget_);
+  fixed_layout->addRow(QString(), fixed_sample_rate_warning_label_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
 
   fixed_hdlc_log_ = new QPlainTextEdit(fixed_tab);
@@ -1413,17 +1460,69 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(audio_bpf_voice_checkbox_, &QCheckBox::toggled, this, apply_on_toggle);
   auto apply_on_spin = [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); };
   auto apply_on_dspin = [this](double) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); };
+  auto update_sample_rate_warning = [this]() {
+    if (fixed_sample_rate_warning_label_ == nullptr || fixed_modulation_combo_ == nullptr ||
+        sample_rate_spin_ == nullptr) {
+      return;
+    }
+    bool ok = false;
+    const v1::Modulation mod = static_cast<v1::Modulation>(
+        fixed_modulation_combo_->currentData().toInt(&ok));
+    if (!ok) return;
+    const bool digital_like = (mod == v1::MODULATION_GMSK || mod == v1::MODULATION_AIS_DUAL ||
+                               mod == v1::MODULATION_FSK);
+    const bool warn = digital_like && (sample_rate_spin_->value() != 2048000);
+    fixed_sample_rate_warning_label_->setVisible(warn);
+  };
+  auto update_vdes_controls = [this]() {
+    const QString decoder = gmsk_decoder_combo_
+        ? gmsk_decoder_combo_->currentData().toString() : QString();
+    const QString postproc = gmsk_postproc_combo_
+        ? gmsk_postproc_combo_->currentData().toString() : QString();
+    const bool use_vdes = decoder.startsWith("vdes_asm_decoder") || postproc == "vdes_asm_postproc";
+    if (vdes_bit_rate_spin_ != nullptr) vdes_bit_rate_spin_->setEnabled(use_vdes);
+    if (vdes_pll_bw_spin_ != nullptr) vdes_pll_bw_spin_->setEnabled(use_vdes);
+    if (vdes_candidate_bits_spin_ != nullptr) vdes_candidate_bits_spin_->setEnabled(use_vdes);
+    if (vdes_sync_errors_spin_ != nullptr) vdes_sync_errors_spin_->setEnabled(use_vdes);
+  };
   connect(gmsk_baud_rate_spin_,  QOverload<int>::of(&QSpinBox::valueChanged),       this, apply_on_spin);
   connect(gmsk_bt_spin_,         QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
   connect(gmsk_mod_index_spin_,  QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
+  connect(vdes_bit_rate_spin_,   QOverload<int>::of(&QSpinBox::valueChanged),       this, apply_on_spin);
+  connect(vdes_pll_bw_spin_,     QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
+  connect(vdes_candidate_bits_spin_, QOverload<int>::of(&QSpinBox::valueChanged),   this, apply_on_spin);
+  connect(vdes_sync_errors_spin_, QOverload<int>::of(&QSpinBox::valueChanged),      this, apply_on_spin);
+  connect(fixed_channel_bandwidth_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int value) {
+            if (fixed_bandwidth_sync_in_progress_) return;
+            fixed_bandwidth_manual_override_ = (value != fixed_bandwidth_last_auto_hz_);
+            {
+              const QSignalBlocker blocker(channel_bandwidth_spin_);
+              channel_bandwidth_spin_->setValue(value);
+            }
+            if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+          });
   connect(gmsk_decoder_combo_,   QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-          [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
+          [this, update_vdes_controls](int) {
+            update_vdes_controls();
+            if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+          });
   connect(gmsk_postproc_combo_,  QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-          [this](int) { if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig(); });
+          [this, update_vdes_controls](int) {
+            update_vdes_controls();
+            if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+          });
   connect(ppm_bit_duration_us_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
           this, apply_on_spin);
   connect(ppm_data_rate_mbit_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
           this, apply_on_dspin);
+  update_vdes_controls();
+  connect(sample_rate_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this, update_sample_rate_warning](int) {
+            update_sample_rate_warning();
+            if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+          });
+  update_sample_rate_warning();
   connect(fixed_audio_hpf300_checkbox_,    &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf3k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
   connect(fixed_audio_lpf4k5_checkbox_,   &QCheckBox::toggled, this, apply_on_toggle);
@@ -1615,6 +1714,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       return;
     }
     fixed_bandwidth_manual_override_ = (value != fixed_bandwidth_last_auto_hz_);
+    if (fixed_channel_bandwidth_spin_ != nullptr &&
+        fixed_channel_bandwidth_spin_->value() != value) {
+      const QSignalBlocker blocker(fixed_channel_bandwidth_spin_);
+      fixed_channel_bandwidth_spin_->setValue(value);
+    }
   });
   connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, fixed_layout]() {
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
@@ -1646,12 +1750,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       sample_rate_spin_->setEnabled(!is_adsb);
     }
     const int suggested_bandwidth_hz = DefaultBandwidthHzForModulation(modulation);
-    const int current_bandwidth_hz = channel_bandwidth_spin_->value();
+    const int current_bandwidth_hz = fixed_channel_bandwidth_spin_ != nullptr
+        ? fixed_channel_bandwidth_spin_->value()
+        : channel_bandwidth_spin_->value();
     const bool can_auto_apply =
         !fixed_bandwidth_manual_override_ || current_bandwidth_hz == fixed_bandwidth_last_auto_hz_;
 
     fixed_bandwidth_last_auto_hz_ = suggested_bandwidth_hz;
     if (!can_auto_apply) {
+      if (fixed_sample_rate_warning_label_ != nullptr && sample_rate_spin_ != nullptr) {
+        const bool digital_like = (modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_AIS_DUAL ||
+                                   modulation == v1::MODULATION_FSK);
+        fixed_sample_rate_warning_label_->setVisible(
+            digital_like && (sample_rate_spin_->value() != 2048000));
+      }
       AppendLog(QString("Fixed demod %1 selected; keeping manual bandwidth %2 Hz")
                     .arg(ModulationLabel(modulation))
                     .arg(current_bandwidth_hz));
@@ -1659,9 +1771,18 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     }
 
     fixed_bandwidth_sync_in_progress_ = true;
+    if (fixed_channel_bandwidth_spin_ != nullptr) {
+      fixed_channel_bandwidth_spin_->setValue(suggested_bandwidth_hz);
+    }
     channel_bandwidth_spin_->setValue(suggested_bandwidth_hz);
     fixed_bandwidth_sync_in_progress_ = false;
     fixed_bandwidth_manual_override_ = false;
+    if (fixed_sample_rate_warning_label_ != nullptr && sample_rate_spin_ != nullptr) {
+      const bool digital_like = (modulation == v1::MODULATION_GMSK || modulation == v1::MODULATION_AIS_DUAL ||
+                                 modulation == v1::MODULATION_FSK);
+      fixed_sample_rate_warning_label_->setVisible(
+          digital_like && (sample_rate_spin_->value() != 2048000));
+    }
     AppendLog(QString("Fixed demod %1 selected; bandwidth auto-set to %2 Hz")
                   .arg(ModulationLabel(modulation))
                   .arg(suggested_bandwidth_hz));
@@ -1893,17 +2014,86 @@ void MainWindow::RefreshReceivers() {
           }
           sample_rate_spin_->setEnabled(!is_adsb);
         }
-        const int fixed_bandwidth_hz = DefaultBandwidthHzForModulation(fixed_modulation);
+        const int fixed_bandwidth_hz = receiver.mode_config().channel_bandwidth_hz() > 0
+            ? static_cast<int>(receiver.mode_config().channel_bandwidth_hz())
+            : DefaultBandwidthHzForModulation(fixed_modulation);
         fixed_bandwidth_last_auto_hz_ = fixed_bandwidth_hz;
         fixed_bandwidth_manual_override_ = false;
         if (receiver.mode() == v1::RADIO_MODE_FIXED && channel_bandwidth_spin_ != nullptr) {
           fixed_bandwidth_sync_in_progress_ = true;
           channel_bandwidth_spin_->setValue(fixed_bandwidth_hz);
+          if (fixed_channel_bandwidth_spin_ != nullptr) {
+            fixed_channel_bandwidth_spin_->setValue(fixed_bandwidth_hz);
+          }
           fixed_bandwidth_sync_in_progress_ = false;
+        }
+        if (fixed_sample_rate_warning_label_ != nullptr && sample_rate_spin_ != nullptr) {
+          const bool digital_like = (fixed_modulation == v1::MODULATION_GMSK ||
+                                     fixed_modulation == v1::MODULATION_AIS_DUAL ||
+                                     fixed_modulation == v1::MODULATION_FSK);
+          fixed_sample_rate_warning_label_->setVisible(
+              digital_like && (sample_rate_spin_->value() != 2048000));
         }
       }
       const double receiver_default_squelch_db =
           std::clamp(receiver.mode_config().scan_list_default_squelch_db(), -120.0, 0.0);
+      if (gmsk_baud_rate_spin_ != nullptr) {
+        const QSignalBlocker blocker(gmsk_baud_rate_spin_);
+        gmsk_baud_rate_spin_->setValue(static_cast<int>(receiver.mode_config().gmsk_baud_rate()));
+      }
+      if (gmsk_bt_spin_ != nullptr) {
+        const QSignalBlocker blocker(gmsk_bt_spin_);
+        gmsk_bt_spin_->setValue(receiver.mode_config().gmsk_bt());
+      }
+      if (gmsk_mod_index_spin_ != nullptr) {
+        const QSignalBlocker blocker(gmsk_mod_index_spin_);
+        gmsk_mod_index_spin_->setValue(receiver.mode_config().gmsk_modulation_index());
+      }
+      if (gmsk_decoder_combo_ != nullptr) {
+        const QString decoder_value = QString("%1:%2")
+                                          .arg(QString::fromStdString(receiver.mode_config().gmsk_decoder()))
+                                          .arg(receiver.mode_config().gmsk_nrzi_invert() ? 1 : 0);
+        const int decoder_idx = gmsk_decoder_combo_->findData(QVariant(decoder_value));
+        if (decoder_idx >= 0) {
+          const QSignalBlocker blocker(gmsk_decoder_combo_);
+          gmsk_decoder_combo_->setCurrentIndex(decoder_idx);
+        }
+      }
+      if (gmsk_postproc_combo_ != nullptr) {
+        const QString postproc_value = QString::fromStdString(receiver.mode_config().gmsk_postprocessor());
+        const int postproc_idx = gmsk_postproc_combo_->findData(QVariant(postproc_value));
+        if (postproc_idx >= 0) {
+          const QSignalBlocker blocker(gmsk_postproc_combo_);
+          gmsk_postproc_combo_->setCurrentIndex(postproc_idx);
+        }
+      }
+      if (vdes_bit_rate_spin_ != nullptr) {
+        const QSignalBlocker blocker(vdes_bit_rate_spin_);
+        vdes_bit_rate_spin_->setValue(static_cast<int>(receiver.mode_config().vdes_asm_bit_rate_bps()));
+      }
+      if (vdes_pll_bw_spin_ != nullptr) {
+        const QSignalBlocker blocker(vdes_pll_bw_spin_);
+        vdes_pll_bw_spin_->setValue(receiver.mode_config().vdes_asm_pll_bw());
+      }
+      if (vdes_candidate_bits_spin_ != nullptr) {
+        const QSignalBlocker blocker(vdes_candidate_bits_spin_);
+        vdes_candidate_bits_spin_->setValue(
+            static_cast<int>(receiver.mode_config().vdes_asm_candidate_bits()));
+      }
+      if (vdes_sync_errors_spin_ != nullptr) {
+        const QSignalBlocker blocker(vdes_sync_errors_spin_);
+        vdes_sync_errors_spin_->setValue(
+            static_cast<int>(receiver.mode_config().vdes_asm_sync_errors_max()));
+      }
+      {
+        const QString dec = QString::fromStdString(receiver.mode_config().gmsk_decoder());
+        const QString pp = QString::fromStdString(receiver.mode_config().gmsk_postprocessor());
+        const bool use_vdes = (dec == "vdes_asm_decoder" || pp == "vdes_asm_postproc");
+        if (vdes_bit_rate_spin_ != nullptr) vdes_bit_rate_spin_->setEnabled(use_vdes);
+        if (vdes_pll_bw_spin_ != nullptr) vdes_pll_bw_spin_->setEnabled(use_vdes);
+        if (vdes_candidate_bits_spin_ != nullptr) vdes_candidate_bits_spin_->setEnabled(use_vdes);
+        if (vdes_sync_errors_spin_ != nullptr) vdes_sync_errors_spin_->setEnabled(use_vdes);
+      }
       if (scan_list_default_squelch_spin_ != nullptr) {
         const QSignalBlocker blocker(scan_list_default_squelch_spin_);
         scan_list_default_squelch_spin_->setValue(receiver_default_squelch_db);
@@ -2013,11 +2203,15 @@ void MainWindow::ApplyModeAndConfig() {
       (fixed_modulation_combo_ != nullptr)
           ? fixed_modulation_combo_->currentText().trimmed()
           : QString("unknown");
+  int log_channel_bw = channel_bandwidth_spin_ ? channel_bandwidth_spin_->value() : 0;
+  if (mode_tabs_->currentIndex() == kFixedModeTabIndex && fixed_channel_bandwidth_spin_ != nullptr) {
+    log_channel_bw = fixed_channel_bandwidth_spin_->value();
+  }
   AppendLog(QString("Applied mode/config to receiver %1 (fixed-demod=%2, sample-rate=%3 Hz, channel-bw=%4 Hz, hw-bw=%5 Hz, dc=%6@%7 Hz, notch=%8@%9 Hz, lo-offset=%10@%11 Hz)")
                 .arg(receiver_id)
                 .arg(fixed_demod_label)
                 .arg(sample_rate_spin_->value())
-                .arg(channel_bandwidth_spin_->value())
+                .arg(log_channel_bw)
                 .arg(hardware_bandwidth_spin_->value())
                 .arg(dc_blocker_checkbox_->isChecked() ? "on" : "off")
                 .arg(dc_blocker_cutoff_spin_->value())
@@ -2080,15 +2274,13 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_dwell_ms(static_cast<uint32_t>(dwell_ms_spin_->value()));
   config.set_sample_rate_hz(static_cast<uint32_t>(sample_rate_spin_->value()));
   int channel_bandwidth_hz = channel_bandwidth_spin_->value();
-  if (mode == v1::RADIO_MODE_FIXED) {
-    channel_bandwidth_hz = DefaultBandwidthHzForModulation(fixed_modulation);
+  if (mode == v1::RADIO_MODE_FIXED && fixed_channel_bandwidth_spin_ != nullptr) {
+    channel_bandwidth_hz = fixed_channel_bandwidth_spin_->value();
     if (channel_bandwidth_spin_ != nullptr && channel_bandwidth_spin_->value() != channel_bandwidth_hz) {
       fixed_bandwidth_sync_in_progress_ = true;
       channel_bandwidth_spin_->setValue(channel_bandwidth_hz);
       fixed_bandwidth_sync_in_progress_ = false;
     }
-    fixed_bandwidth_last_auto_hz_ = channel_bandwidth_hz;
-    fixed_bandwidth_manual_override_ = false;
   }
   config.set_channel_bandwidth_hz(static_cast<uint32_t>(channel_bandwidth_hz));
   config.set_hardware_bandwidth_hz(static_cast<uint32_t>(hardware_bandwidth_spin_->value()));
@@ -2113,6 +2305,14 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   }
   config.set_gmsk_postprocessor(gmsk_postproc_combo_
       ? gmsk_postproc_combo_->currentData().toString().toStdString() : "");
+  config.set_vdes_asm_bit_rate_bps(
+      vdes_bit_rate_spin_ ? static_cast<uint32_t>(vdes_bit_rate_spin_->value()) : 19200u);
+  config.set_vdes_asm_pll_bw(
+      vdes_pll_bw_spin_ ? static_cast<float>(vdes_pll_bw_spin_->value()) : 0.01f);
+  config.set_vdes_asm_candidate_bits(
+      vdes_candidate_bits_spin_ ? static_cast<uint32_t>(vdes_candidate_bits_spin_->value()) : 1056u);
+  config.set_vdes_asm_sync_errors_max(
+      vdes_sync_errors_spin_ ? static_cast<uint32_t>(vdes_sync_errors_spin_->value()) : 1u);
   config.set_ppm_bit_duration_us(
       ppm_bit_duration_us_spin_ ? static_cast<uint32_t>(ppm_bit_duration_us_spin_->value()) : 10u);
   {

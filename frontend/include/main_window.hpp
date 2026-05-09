@@ -24,6 +24,7 @@
 
 class QIODevice;
 class QGridLayout;
+class QLabel;
 class QScrollArea;
 class QTimer;
 #if !defined(MR_HAS_QT_MULTIMEDIA)
@@ -137,6 +138,10 @@ class MainWindow : public QMainWindow {
   QSpinBox*       gmsk_baud_rate_spin_   = nullptr;
   QDoubleSpinBox* gmsk_bt_spin_          = nullptr;
   QDoubleSpinBox* gmsk_mod_index_spin_   = nullptr;
+  QSpinBox*       vdes_bit_rate_spin_    = nullptr;
+  QDoubleSpinBox* vdes_pll_bw_spin_      = nullptr;
+  QSpinBox*       vdes_candidate_bits_spin_ = nullptr;
+  QSpinBox*       vdes_sync_errors_spin_ = nullptr;
   QWidget*        gmsk_params_widget_    = nullptr;
   QComboBox*      gmsk_decoder_combo_    = nullptr;
   QComboBox*      gmsk_postproc_combo_   = nullptr;
@@ -155,6 +160,8 @@ class MainWindow : public QMainWindow {
   QSpinBox*  fixed_audio_rnnoise_strength_spin_ = nullptr;
   QLineEdit* fixed_frequency_edit_ = nullptr;
   QComboBox* fixed_modulation_combo_ = nullptr;
+  QSpinBox* fixed_channel_bandwidth_spin_ = nullptr;
+  QLabel* fixed_sample_rate_warning_label_ = nullptr;
   QLineEdit* range_start_edit_ = nullptr;
   QLineEdit* range_end_edit_ = nullptr;
   QComboBox* range_fft_size_combo_ = nullptr;

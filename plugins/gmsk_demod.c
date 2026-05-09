@@ -39,11 +39,12 @@
 static void emit_bits(uint8_t* bit_buf, uint32_t* bit_count,
                       MrEmitFn emit_fn, void* user_data,
                       double freq_hz, uint64_t unix_ms,
-                      unsigned int baud_rate, float bt) {
-  char kv[160];
+                      unsigned int baud_rate, float bt,
+                      uint32_t channel_bandwidth_hz) {
+  char kv[200];
   snprintf(kv, sizeof(kv),
-           "{\"baud_rate\":\"%u\",\"bt\":\"%.3f\",\"bit_count\":\"%u\"}",
-           baud_rate, (double)bt, (*bit_count / 8u) * 8u);
+           "{\"baud_rate\":\"%u\",\"bt\":\"%.3f\",\"channel_bw_hz\":\"%u\",\"bit_count\":\"%u\"}",
+           baud_rate, (double)bt, channel_bandwidth_hz, (*bit_count / 8u) * 8u);
   mr_emit_bits(bit_buf, bit_count, GMSK_MIN_BITS, GMSK_MAX_BITS / 8u + 1u,
                "GMSK_DATA", kv, freq_hz, unix_ms, emit_fn, user_data);
 }
@@ -60,6 +61,7 @@ typedef struct {
   uint32_t baud_rate;
   float    bt;
   float    modulation_index;
+  uint32_t channel_bandwidth_hz;
   int      needs_reconfigure;
 
   uint32_t sample_rate_hz;
@@ -102,8 +104,13 @@ static int gmsk_configure(GmskCtx* ctx, uint32_t sr) {
   mr_signal_gate_reset(&ctx->gate);
   mr_afc_init(&ctx->afc);
 
-  /* Channel-select pre-filter: 4th-order Butterworth LP at 2×baud_rate */
-  const float cutoff = 2.0f * (float)ctx->baud_rate / (float)sr;
+  /* Channel-select pre-filter:
+     - if channel bandwidth is set, use half-bandwidth as LP cutoff
+     - otherwise fall back to 2×baud_rate */
+  float cutoff_hz = 2.0f * (float)ctx->baud_rate;
+  if (ctx->channel_bandwidth_hz > 0u) cutoff_hz = 0.5f * (float)ctx->channel_bandwidth_hz;
+  float cutoff = cutoff_hz / (float)sr;
+  if (cutoff > 0.44f) cutoff = 0.44f;
   mr_iir_prefilter_create(&ctx->pre_filter, cutoff);
 
   const float rate = (float)ctx->baud_rate * GMSK_K / (float)sr;
@@ -133,6 +140,7 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->baud_rate        = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
   ctx->bt               = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
   ctx->modulation_index = 0.5f;
+  ctx->channel_bandwidth_hz = 0u;
   mr_signal_gate_init(&ctx->gate, MR_GATE_SQUELCH_RATIO);
   mr_afc_init(&ctx->afc);
   mr_iir_prefilter_init(&ctx->pre_filter);
@@ -162,6 +170,11 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   if (strcmp(key, "modulation_index") == 0) {
     const float v = (float)atof(value);
     if (v > 0.0f) ctx->modulation_index = v;
+    return 1;
+  }
+  if (strcmp(key, "channel_bandwidth_hz") == 0) {
+    const int v = atoi(value);
+    if (v >= 0) { ctx->channel_bandwidth_hz = (uint32_t)v; ctx->needs_reconfigure = 1; }
     return 1;
   }
   if (strcmp(key, "squelch_db") == 0) {
@@ -200,7 +213,7 @@ static void process_symbol(GmskCtx* ctx, liquid_float_complex* sym,
   if (!ctx->gate.gate_open) {
     if (falling)
       emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+                freq_hz, unix_ms, ctx->baud_rate, ctx->bt, ctx->channel_bandwidth_hz);
     else {
       ctx->bit_count = 0;
       memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
@@ -215,7 +228,7 @@ static void process_symbol(GmskCtx* ctx, liquid_float_complex* sym,
   mr_push_bit(ctx->bit_buf, &ctx->bit_count, GMSK_MAX_BITS, bit & 1u);
   if (ctx->bit_count >= GMSK_MAX_BITS)
     emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-              freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+              freq_hz, unix_ms, ctx->baud_rate, ctx->bt, ctx->channel_bandwidth_hz);
 }
 
 void mr_plugin_process_iq(MrPluginCtx* raw,
@@ -274,6 +287,7 @@ typedef struct {
   uint32_t baud_rate;
   float    bt;
   float    modulation_index;
+  uint32_t channel_bandwidth_hz;
   int      needs_reconfigure;
   float prev_i, prev_q;
   float    gauss_c[GMSK_MAX_FILTER_TAPS];
@@ -326,6 +340,7 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->baud_rate        = (b  && atoi(b)  > 0)   ? (uint32_t)atoi(b) : GMSK_DEFAULT_BAUD_RATE;
   ctx->bt               = (bt && atof(bt) > 0.0) ? (float)atof(bt)   : GMSK_DEFAULT_BT;
   ctx->modulation_index = 0.5f;
+  ctx->channel_bandwidth_hz = 0u;
   ctx->gauss_len = 1; ctx->gauss_c[0] = 1.0f;
   mr_signal_gate_init(&ctx->gate, MR_GATE_SQUELCH_RATIO);
   return (MrPluginCtx*)ctx;
@@ -349,6 +364,11 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   if (strcmp(key, "modulation_index") == 0) {
     const float v = (float)atof(value);
     if (v > 0.0f) ctx->modulation_index = v;
+    return 1;
+  }
+  if (strcmp(key, "channel_bandwidth_hz") == 0) {
+    const int v = atoi(value);
+    if (v >= 0) { ctx->channel_bandwidth_hz = (uint32_t)v; }
     return 1;
   }
   if (strcmp(key, "squelch_db") == 0) {
@@ -398,7 +418,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     if (ctx->sym_acc >= ctx->samples_per_symbol) {
       if (!ctx->gate.gate_open) {
         emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                  freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+                  freq_hz, unix_ms, ctx->baud_rate, ctx->bt, ctx->channel_bandwidth_hz);
         ctx->bit_count = 0;
         memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
       } else {
@@ -406,7 +426,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                     ctx->sym_val / (float)ctx->sym_n > 0.0f ? 1 : 0);
         if (ctx->bit_count >= GMSK_MAX_BITS)
           emit_bits(ctx->bit_buf, &ctx->bit_count, emit_fn, user_data,
-                    freq_hz, unix_ms, ctx->baud_rate, ctx->bt);
+                    freq_hz, unix_ms, ctx->baud_rate, ctx->bt, ctx->channel_bandwidth_hz);
       }
       ctx->sym_acc = 0; ctx->sym_val = 0.0f; ctx->sym_n = 0;
     }

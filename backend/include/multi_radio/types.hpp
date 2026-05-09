@@ -87,6 +87,10 @@ struct ModeConfig {
   int32_t ppm_correction = 0;
   uint32_t ppm_bit_duration_us = 10;
   uint32_t ppm_data_rate_bps   = 100000;
+  uint32_t vdes_asm_bit_rate_bps = 19200;
+  float vdes_asm_pll_bw = 0.01f;
+  uint32_t vdes_asm_candidate_bits = 1056;
+  uint32_t vdes_asm_sync_errors_max = 1;
   bool rnnoise_enabled = false;
   float rnnoise_strength = 100.0f;
 };

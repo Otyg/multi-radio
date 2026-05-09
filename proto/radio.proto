@@ -74,6 +74,10 @@ message ModeConfig {
   int32  ppm_correction   = 36;
   uint32 ppm_bit_duration_us = 37;
   uint32 ppm_data_rate_bps   = 38;
+  uint32 vdes_asm_bit_rate_bps = 39;
+  float  vdes_asm_pll_bw = 40;
+  uint32 vdes_asm_candidate_bits = 41;
+  uint32 vdes_asm_sync_errors_max = 42;
   bool rnnoise_enabled = 28;
   float rnnoise_strength = 29;
 }

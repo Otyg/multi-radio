@@ -500,6 +500,7 @@ void ReceiverWorker::PushPluginConfig() {
   plugin_host_->SetParam("baud_rate",        std::to_string(cfg.gmsk_baud_rate));
   plugin_host_->SetParam("bt",               std::to_string(cfg.gmsk_bt));
   plugin_host_->SetParam("modulation_index", std::to_string(cfg.gmsk_modulation_index));
+  plugin_host_->SetParam("channel_bandwidth_hz", std::to_string(cfg.channel_bandwidth_hz));
   plugin_host_->SetParam("invert",           cfg.gmsk_nrzi_invert ? "1" : "0");
   plugin_host_->SetParam("bit_duration_us",  std::to_string(cfg.ppm_bit_duration_us));
   plugin_host_->SetParam("data_rate",        std::to_string(cfg.ppm_data_rate_bps));
@@ -536,10 +537,17 @@ void ReceiverWorker::PushPluginConfig() {
       plugin_host_->SetActivePostprocessor("vdes_asm_postproc");
       plugin_host_->SetParam("invert", "0");
       plugin_host_->SetParam("bit_rate_bps",
-                             std::to_string(std::max<uint32_t>(2400u, cfg.gmsk_baud_rate * 2u)));
-      plugin_host_->SetParam("pll_bw", "0.01");
-      plugin_host_->SetParam("candidate_bits", "1056");
-      plugin_host_->SetParam("sync_errors_max", "1");
+                             std::to_string(std::max<uint32_t>(
+                                 2400u,
+                                 cfg.vdes_asm_bit_rate_bps > 0
+                                     ? cfg.vdes_asm_bit_rate_bps
+                                     : cfg.gmsk_baud_rate * 2u)));
+      plugin_host_->SetParam("pll_bw",
+                             std::to_string(std::max(0.0001f, cfg.vdes_asm_pll_bw)));
+      plugin_host_->SetParam("candidate_bits",
+                             std::to_string(std::max<uint32_t>(96u, cfg.vdes_asm_candidate_bits)));
+      plugin_host_->SetParam("sync_errors_max",
+                             std::to_string(std::min<uint32_t>(8u, cfg.vdes_asm_sync_errors_max)));
     } else {
       plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
       plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
@@ -583,10 +591,20 @@ void ReceiverWorker::PushPluginConfig() {
                                 ? "0"
                                 : (cfg.gmsk_nrzi_invert ? "1" : "0")))
                  << " baud=" << cfg.gmsk_baud_rate;
+  if (use_vdes_asm_sketch) {
+    plugin_cfg_msg << " vdes_bps="
+                   << std::max<uint32_t>(
+                          2400u,
+                          cfg.vdes_asm_bit_rate_bps > 0 ? cfg.vdes_asm_bit_rate_bps
+                                                        : cfg.gmsk_baud_rate * 2u)
+                   << " vdes_pll_bw=" << std::max(0.0001f, cfg.vdes_asm_pll_bw)
+                   << " vdes_cand_bits=" << std::max<uint32_t>(96u, cfg.vdes_asm_candidate_bits)
+                   << " vdes_sync_err=" << std::min<uint32_t>(8u, cfg.vdes_asm_sync_errors_max);
+  }
   PublishEvent(EventKind::kInfo, plugin_cfg_msg.str());
   fprintf(stderr,
           "[plugin_cfg] demod='%s'  decoder='%s'  postproc='%s'  asm_postproc='%s'"
-          "  invert=%s  baud=%u\n",
+          "  invert=%s  baud=%u  vdes_bps=%u  vdes_pll_bw=%.4f  vdes_cand_bits=%u  vdes_sync_err=%u\n",
           demod_name.empty() ? "(none/FM)" : demod_name.c_str(),
           (effective_modulation == Modulation::kAisDual)
               ? "nrzi_decoder"
@@ -605,7 +623,16 @@ void ReceiverWorker::PushPluginConfig() {
               (use_vdes_asm_sketch
                    ? "0"
                    : (cfg.gmsk_nrzi_invert ? "1" : "0")),
-          cfg.gmsk_baud_rate);
+          cfg.gmsk_baud_rate,
+          use_vdes_asm_sketch
+              ? std::max<uint32_t>(
+                    2400u,
+                    cfg.vdes_asm_bit_rate_bps > 0 ? cfg.vdes_asm_bit_rate_bps
+                                                  : cfg.gmsk_baud_rate * 2u)
+              : 0u,
+          use_vdes_asm_sketch ? std::max(0.0001f, cfg.vdes_asm_pll_bw) : 0.0f,
+          use_vdes_asm_sketch ? std::max<uint32_t>(96u, cfg.vdes_asm_candidate_bits) : 0u,
+          use_vdes_asm_sketch ? std::min<uint32_t>(8u, cfg.vdes_asm_sync_errors_max) : 0u);
 }
 
 void ReceiverWorker::IngestLoop() {
