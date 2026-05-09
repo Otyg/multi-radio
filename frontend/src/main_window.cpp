@@ -1293,10 +1293,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   }
   fixed_plugin_params_widget_->setVisible(false);
 
+  auto* fixed_plugin_settings_button = new QPushButton("Plugin settings...", fixed_tab);
+  fixed_plugin_settings_button->setToolTip(
+      "Öppna plugin-parametrar för GMSK/VDES/PPM utan att visa alla fält i huvudvyn.");
+
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
   fixed_layout->addRow("Kanalbandbredd", fixed_channel_bandwidth_spin_);
-  fixed_layout->addRow("Plugin", fixed_plugin_params_widget_);
+  fixed_layout->addRow("Plugin", fixed_plugin_settings_button);
   fixed_layout->addRow(QString(), fixed_sample_rate_warning_label_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
 
@@ -1737,23 +1741,30 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     }
   });
   connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-          [this, fixed_layout, update_vdes_controls]() {
+          [this, update_vdes_controls]() {
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
     const bool is_gmsk_like = (modulation == v1::MODULATION_GMSK ||
                                modulation == v1::MODULATION_VDES_ASM);
     const bool is_ppm      = (modulation == v1::MODULATION_PPM);
     const bool is_ais_dual = (modulation == v1::MODULATION_AIS_DUAL);
-    if (gmsk_params_widget_ != nullptr)
-      gmsk_params_widget_->setVisible(is_gmsk_like);
-    update_vdes_controls();
-    if (ppm_params_widget_ != nullptr)
-      ppm_params_widget_->setVisible(is_ppm);
-    if (fixed_plugin_params_widget_ != nullptr) {
-      const bool show = is_gmsk_like || is_ppm;
-      fixed_plugin_params_widget_->setVisible(show);
-      if (auto* lbl = fixed_layout->labelForField(fixed_plugin_params_widget_))
-        lbl->setVisible(show);
+    /* Keep parameter widgets hidden from the main Fixed layout. */
+    if (gmsk_params_widget_ != nullptr) gmsk_params_widget_->setVisible(false);
+    if (ppm_params_widget_ != nullptr) ppm_params_widget_->setVisible(false);
+    if (fixed_plugin_params_widget_ != nullptr) fixed_plugin_params_widget_->setVisible(false);
+
+    if (modulation == v1::MODULATION_VDES_ASM) {
+      if (gmsk_decoder_combo_ != nullptr) {
+        const QSignalBlocker blocker(gmsk_decoder_combo_);
+        const int idx = gmsk_decoder_combo_->findData(QVariant(QString("vdes_asm_decoder:0")));
+        if (idx >= 0) gmsk_decoder_combo_->setCurrentIndex(idx);
+      }
+      if (gmsk_postproc_combo_ != nullptr) {
+        const QSignalBlocker blocker(gmsk_postproc_combo_);
+        const int idx = gmsk_postproc_combo_->findData(QVariant(QString("vdes_asm_postproc")));
+        if (idx >= 0) gmsk_postproc_combo_->setCurrentIndex(idx);
+      }
     }
+    update_vdes_controls();
     /* ADS-B kräver exakt 2 Msps — lås samplerate-spinnern */
     if (sample_rate_spin_ != nullptr) {
       const bool is_adsb = (modulation == v1::MODULATION_ADSB);
@@ -1809,6 +1820,168 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     AppendLog(QString("Fixed demod %1 selected; bandwidth auto-set to %2 Hz")
                   .arg(ModulationLabel(modulation))
                   .arg(suggested_bandwidth_hz));
+  });
+
+  connect(fixed_plugin_settings_button, &QPushButton::clicked, this,
+          [this, update_vdes_controls]() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Plugin settings");
+    auto* layout = new QFormLayout(&dialog);
+
+    auto* gmsk_baud = new QSpinBox(&dialog);
+    gmsk_baud->setRange(300, 1000000);
+    gmsk_baud->setSingleStep(100);
+    gmsk_baud->setSuffix(" bit/s");
+    gmsk_baud->setValue(gmsk_baud_rate_spin_ ? gmsk_baud_rate_spin_->value() : 9600);
+
+    auto* gmsk_bt = new QDoubleSpinBox(&dialog);
+    gmsk_bt->setRange(0.1, 1.0);
+    gmsk_bt->setSingleStep(0.05);
+    gmsk_bt->setDecimals(2);
+    gmsk_bt->setValue(gmsk_bt_spin_ ? gmsk_bt_spin_->value() : 0.4);
+
+    auto* gmsk_mod_idx = new QDoubleSpinBox(&dialog);
+    gmsk_mod_idx->setRange(0.1, 2.0);
+    gmsk_mod_idx->setSingleStep(0.05);
+    gmsk_mod_idx->setDecimals(2);
+    gmsk_mod_idx->setValue(gmsk_mod_index_spin_ ? gmsk_mod_index_spin_->value() : 0.5);
+
+    auto* decoder_combo = new QComboBox(&dialog);
+    auto* postproc_combo = new QComboBox(&dialog);
+    if (gmsk_decoder_combo_ != nullptr) {
+      for (int i = 0; i < gmsk_decoder_combo_->count(); ++i) {
+        decoder_combo->addItem(gmsk_decoder_combo_->itemText(i), gmsk_decoder_combo_->itemData(i));
+      }
+      const int idx = decoder_combo->findData(gmsk_decoder_combo_->currentData());
+      if (idx >= 0) decoder_combo->setCurrentIndex(idx);
+    }
+    if (gmsk_postproc_combo_ != nullptr) {
+      for (int i = 0; i < gmsk_postproc_combo_->count(); ++i) {
+        postproc_combo->addItem(gmsk_postproc_combo_->itemText(i), gmsk_postproc_combo_->itemData(i));
+      }
+      const int idx = postproc_combo->findData(gmsk_postproc_combo_->currentData());
+      if (idx >= 0) postproc_combo->setCurrentIndex(idx);
+    }
+
+    auto* vdes_bps = new QSpinBox(&dialog);
+    vdes_bps->setRange(2400, 76800);
+    vdes_bps->setSingleStep(1200);
+    vdes_bps->setSuffix(" bps");
+    vdes_bps->setValue(vdes_bit_rate_spin_ ? vdes_bit_rate_spin_->value() : 19200);
+
+    auto* vdes_pll = new QDoubleSpinBox(&dialog);
+    vdes_pll->setRange(0.0001, 0.2);
+    vdes_pll->setSingleStep(0.001);
+    vdes_pll->setDecimals(4);
+    vdes_pll->setValue(vdes_pll_bw_spin_ ? vdes_pll_bw_spin_->value() : 0.01);
+
+    auto* vdes_cand = new QSpinBox(&dialog);
+    vdes_cand->setRange(96, 4096);
+    vdes_cand->setSingleStep(16);
+    vdes_cand->setValue(vdes_candidate_bits_spin_ ? vdes_candidate_bits_spin_->value() : 1056);
+
+    auto* vdes_sync_err = new QSpinBox(&dialog);
+    vdes_sync_err->setRange(0, 8);
+    vdes_sync_err->setSingleStep(1);
+    vdes_sync_err->setValue(vdes_sync_errors_spin_ ? vdes_sync_errors_spin_->value() : 1);
+
+    auto* ppm_bit_us = new QSpinBox(&dialog);
+    ppm_bit_us->setRange(1, 100000);
+    ppm_bit_us->setSingleStep(1);
+    ppm_bit_us->setSuffix(" us");
+    ppm_bit_us->setValue(ppm_bit_duration_us_spin_ ? ppm_bit_duration_us_spin_->value() : 10);
+
+    auto* ppm_rate = new QDoubleSpinBox(&dialog);
+    ppm_rate->setRange(0.001, 100.0);
+    ppm_rate->setSingleStep(0.1);
+    ppm_rate->setDecimals(3);
+    ppm_rate->setSuffix(" MBit/s");
+    ppm_rate->setValue(ppm_data_rate_mbit_spin_ ? ppm_data_rate_mbit_spin_->value() : 0.1);
+
+    auto update_vdes_enabled = [this, decoder_combo, postproc_combo, vdes_bps, vdes_pll, vdes_cand, vdes_sync_err]() {
+      const v1::Modulation mod = FixedModulationFromCombo(fixed_modulation_combo_);
+      const bool use_vdes = (mod == v1::MODULATION_VDES_ASM) ||
+                            decoder_combo->currentData().toString().startsWith("vdes_asm_decoder") ||
+                            postproc_combo->currentData().toString() == "vdes_asm_postproc";
+      vdes_bps->setEnabled(use_vdes);
+      vdes_pll->setEnabled(use_vdes);
+      vdes_cand->setEnabled(use_vdes);
+      vdes_sync_err->setEnabled(use_vdes);
+    };
+    connect(decoder_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+            [update_vdes_enabled](int) { update_vdes_enabled(); });
+    connect(postproc_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+            [update_vdes_enabled](int) { update_vdes_enabled(); });
+    update_vdes_enabled();
+
+    layout->addRow("GMSK baudrate", gmsk_baud);
+    layout->addRow("GMSK BT", gmsk_bt);
+    layout->addRow("GMSK mod.index", gmsk_mod_idx);
+    layout->addRow("Decoder", decoder_combo);
+    layout->addRow("Postprocessing", postproc_combo);
+    layout->addRow("VDES bitrate", vdes_bps);
+    layout->addRow("VDES PLL BW", vdes_pll);
+    layout->addRow("VDES candidate bits", vdes_cand);
+    layout->addRow("VDES sync errors", vdes_sync_err);
+    layout->addRow("PPM bit duration", ppm_bit_us);
+    layout->addRow("PPM data rate", ppm_rate);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    if (gmsk_baud_rate_spin_ != nullptr) {
+      const QSignalBlocker blocker(gmsk_baud_rate_spin_);
+      gmsk_baud_rate_spin_->setValue(gmsk_baud->value());
+    }
+    if (gmsk_bt_spin_ != nullptr) {
+      const QSignalBlocker blocker(gmsk_bt_spin_);
+      gmsk_bt_spin_->setValue(gmsk_bt->value());
+    }
+    if (gmsk_mod_index_spin_ != nullptr) {
+      const QSignalBlocker blocker(gmsk_mod_index_spin_);
+      gmsk_mod_index_spin_->setValue(gmsk_mod_idx->value());
+    }
+    if (gmsk_decoder_combo_ != nullptr) {
+      const QSignalBlocker blocker(gmsk_decoder_combo_);
+      const int idx = gmsk_decoder_combo_->findData(decoder_combo->currentData());
+      if (idx >= 0) gmsk_decoder_combo_->setCurrentIndex(idx);
+    }
+    if (gmsk_postproc_combo_ != nullptr) {
+      const QSignalBlocker blocker(gmsk_postproc_combo_);
+      const int idx = gmsk_postproc_combo_->findData(postproc_combo->currentData());
+      if (idx >= 0) gmsk_postproc_combo_->setCurrentIndex(idx);
+    }
+    if (vdes_bit_rate_spin_ != nullptr) {
+      const QSignalBlocker blocker(vdes_bit_rate_spin_);
+      vdes_bit_rate_spin_->setValue(vdes_bps->value());
+    }
+    if (vdes_pll_bw_spin_ != nullptr) {
+      const QSignalBlocker blocker(vdes_pll_bw_spin_);
+      vdes_pll_bw_spin_->setValue(vdes_pll->value());
+    }
+    if (vdes_candidate_bits_spin_ != nullptr) {
+      const QSignalBlocker blocker(vdes_candidate_bits_spin_);
+      vdes_candidate_bits_spin_->setValue(vdes_cand->value());
+    }
+    if (vdes_sync_errors_spin_ != nullptr) {
+      const QSignalBlocker blocker(vdes_sync_errors_spin_);
+      vdes_sync_errors_spin_->setValue(vdes_sync_err->value());
+    }
+    if (ppm_bit_duration_us_spin_ != nullptr) {
+      const QSignalBlocker blocker(ppm_bit_duration_us_spin_);
+      ppm_bit_duration_us_spin_->setValue(ppm_bit_us->value());
+    }
+    if (ppm_data_rate_mbit_spin_ != nullptr) {
+      const QSignalBlocker blocker(ppm_data_rate_mbit_spin_);
+      ppm_data_rate_mbit_spin_->setValue(ppm_rate->value());
+    }
+
+    update_vdes_controls();
+    if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
   });
   connect(receiver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
     auto_squelch_active_ = false;
