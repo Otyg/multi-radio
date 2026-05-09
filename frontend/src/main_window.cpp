@@ -2703,7 +2703,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     return;
   }
 
-  if (plugin_type == "VDES_ASM_L2" || plugin_type == "VDES_ASM_TBD") {
+  if (plugin_type == "VDES_ASM_L2" || plugin_type == "VDES_ASM_TBD" ||
+      plugin_type == "VDES_ASM_DIAG") {
     const QString ts = row.timestamp.toString("HH:mm:ss");
     AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
                   .arg(ts)
