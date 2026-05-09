@@ -140,7 +140,8 @@ class MainWindow : public QMainWindow {
   QWidget*        gmsk_params_widget_    = nullptr;
   QComboBox*      gmsk_decoder_combo_    = nullptr;
   QComboBox*      gmsk_postproc_combo_   = nullptr;
-  QWidget*        ppm_params_widget_        = nullptr;
+  QWidget*        ppm_params_widget_           = nullptr;
+  QWidget*        fixed_plugin_params_widget_  = nullptr;
   QSpinBox*       ppm_bit_duration_us_spin_  = nullptr;
   QDoubleSpinBox* ppm_data_rate_mbit_spin_   = nullptr;
   QPlainTextEdit* fixed_hdlc_log_        = nullptr;

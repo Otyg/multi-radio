@@ -307,9 +307,8 @@ void PluginHost::ProcessIq(const IQSampleBlock& iq, const MessageCallback& callb
     // Decoder and postprocessor plugins are invoked via EmitFromPlugin chaining, not directly.
     if (plugin.role == static_cast<int>(MR_PLUGIN_ROLE_DECODER)) continue;
     if (plugin.role == static_cast<int>(MR_PLUGIN_ROLE_POSTPROCESSING)) continue;
-    // Skip if a specific demodulator is selected and this isn't it.
-    if (!active_demodulator_name_.empty() &&
-        plugin.info.plugin_name != active_demodulator_name_) continue;
+    // Skip unless this plugin is the explicitly selected demodulator.
+    if (plugin.info.plugin_name != active_demodulator_name_) continue;
 
     EmitCallbackState state;
     state.callback      = &callback;

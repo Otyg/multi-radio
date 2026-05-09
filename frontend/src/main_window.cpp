@@ -1214,10 +1214,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   ppm_row->addStretch(1);
   ppm_params_widget_->setVisible(false);
 
+  fixed_plugin_params_widget_ = new QWidget(fixed_tab);
+  {
+    auto* vbox = new QVBoxLayout(fixed_plugin_params_widget_);
+    vbox->setContentsMargins(0, 0, 0, 0);
+    vbox->setSpacing(2);
+    vbox->addWidget(gmsk_params_widget_);
+    vbox->addWidget(ppm_params_widget_);
+  }
+  fixed_plugin_params_widget_->setVisible(false);
+
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);
-  fixed_layout->addRow("GMSK", gmsk_params_widget_);
-  fixed_layout->addRow("PPM", ppm_params_widget_);
+  fixed_layout->addRow("Plugin", fixed_plugin_params_widget_);
   fixed_layout->addRow("Ljudfilter", fixed_filter_row);
 
   fixed_hdlc_log_ = new QPlainTextEdit(fixed_tab);
@@ -1594,12 +1603,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     }
     fixed_bandwidth_manual_override_ = (value != fixed_bandwidth_last_auto_hz_);
   });
-  connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+  connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, fixed_layout]() {
     const v1::Modulation modulation = FixedModulationFromCombo(fixed_modulation_combo_);
+    const bool is_gmsk = (modulation == v1::MODULATION_GMSK);
+    const bool is_ppm  = (modulation == v1::MODULATION_PPM);
     if (gmsk_params_widget_ != nullptr)
-      gmsk_params_widget_->setVisible(modulation == v1::MODULATION_GMSK);
+      gmsk_params_widget_->setVisible(is_gmsk);
     if (ppm_params_widget_ != nullptr)
-      ppm_params_widget_->setVisible(modulation == v1::MODULATION_PPM);
+      ppm_params_widget_->setVisible(is_ppm);
+    if (fixed_plugin_params_widget_ != nullptr) {
+      const bool show = is_gmsk || is_ppm;
+      fixed_plugin_params_widget_->setVisible(show);
+      if (auto* lbl = fixed_layout->labelForField(fixed_plugin_params_widget_))
+        lbl->setVisible(show);
+    }
     /* ADS-B kräver exakt 2 Msps — lås samplerate-spinnern */
     if (sample_rate_spin_ != nullptr) {
       const bool is_adsb = (modulation == v1::MODULATION_ADSB);
