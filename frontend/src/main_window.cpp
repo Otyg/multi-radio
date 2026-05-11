@@ -3144,6 +3144,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
                   .arg(payload));
+    all_rows_.push_back(row);
+    AddMessageRow(row);
     return;
   }
 
@@ -3161,6 +3163,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
                   .arg(payload));
+    all_rows_.push_back(row);
+    AddMessageRow(row);
     return;
   }
 
