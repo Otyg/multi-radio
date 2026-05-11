@@ -304,7 +304,7 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
 
   if (content.width() >= (min_panel_w * 3 + gap * 2)) {
     const int panel_w = (content.width() - 2 * gap) / 3;
-    const int remaining_w = content.width() - 2 * panel_w - 2 * gap;
+    const int remaining_w = content.width() - 3 * panel_w - 2 * gap;
     waveform_rect = QRect(content.left(), content.top(), panel_w, content.height());
     spectrogram_rect = QRect(content.left() + panel_w + gap, content.top(), panel_w, content.height());
     waterfall_rect = QRect(content.left() + 2 * (panel_w + gap), content.top(),
