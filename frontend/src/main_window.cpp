@@ -1184,7 +1184,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   vdes_bit_rate_spin_ = new QSpinBox(gmsk_params_widget_);
   vdes_bit_rate_spin_->setRange(2400, 76800);
   vdes_bit_rate_spin_->setSingleStep(1200);
-  vdes_bit_rate_spin_->setValue(19200);
+  vdes_bit_rate_spin_->setValue(28800);
   vdes_bit_rate_spin_->setSuffix(" bps");
   vdes_bit_rate_spin_->setToolTip("VDES ASM bitrate for vdes_asm_demod.");
   vdes_pll_bw_spin_ = new QDoubleSpinBox(gmsk_params_widget_);
