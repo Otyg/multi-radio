@@ -30,6 +30,7 @@ class SignalVisualizationWidget : public QWidget {
   void SetVisualizationSettings(int fft_size, double frequency_start_hz, double frequency_end_hz);
   void SetSpectrumSource(SpectrumSource source);
   void SetChannelLabel(const QString& label);
+  void SetChannelBandwidthHz(int bandwidth_hz);
   void SetReceiverSquelchThresholdDb(uint32_t receiver_id, double threshold_db);
   void SetReceiverSignalLevelDb(uint32_t receiver_id, double signal_level_db);
   void ClearReceiverSignalLevelDb(uint32_t receiver_id);
@@ -139,6 +140,9 @@ class SignalVisualizationWidget : public QWidget {
   static void DrawHeatmap(QPainter* painter, const QRect& area, const QVector<QVector<double>>& rows,
                           bool newest_at_top, bool rainbow_colors, bool suppress_below_mean,
                           bool has_noise_floor_threshold_db, double noise_floor_threshold_db);
+  static void DrawChannelOverlay(QPainter* painter, const QRect& plot,
+                                  double freq_start_hz, double freq_end_hz,
+                                  int bandwidth_hz, bool with_fill);
 
   bool RequireExplicitSelection() const;
   DisplayState BuildDisplayState() const;
@@ -161,6 +165,7 @@ class SignalVisualizationWidget : public QWidget {
   double frequency_start_hz_ = 0.0;
   double frequency_end_hz_ = 20000.0;
   SpectrumSource spectrum_source_ = SpectrumSource::kDemodulated;
+  int channel_bandwidth_hz_ = 0;
   bool auto_noise_reduction_enabled_ = false;
   bool noise_floor_filter_enabled_ = false;
   double noise_floor_db_ = -30.0;

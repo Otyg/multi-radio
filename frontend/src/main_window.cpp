@@ -1512,14 +1512,26 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(vdes_pll_bw_spin_,     QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, apply_on_dspin);
   connect(vdes_candidate_bits_spin_, QOverload<int>::of(&QSpinBox::valueChanged),   this, apply_on_spin);
   connect(vdes_sync_errors_spin_, QOverload<int>::of(&QSpinBox::valueChanged),      this, apply_on_spin);
+  auto update_channel_overlay = [this]() {
+    const bool is_receiver =
+        signal_visualization_->CurrentSpectrumSource() ==
+        SignalVisualizationWidget::SpectrumSource::kReceiverInput;
+    const int bw = is_receiver
+        ? (fixed_channel_bandwidth_spin_ ? fixed_channel_bandwidth_spin_->value()
+                                         : channel_bandwidth_spin_->value())
+        : 0;
+    signal_visualization_->SetChannelBandwidthHz(bw);
+  };
+
   connect(fixed_channel_bandwidth_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
-          [this](int value) {
+          [this, update_channel_overlay](int value) {
             if (fixed_bandwidth_sync_in_progress_) return;
             fixed_bandwidth_manual_override_ = (value != fixed_bandwidth_last_auto_hz_);
             {
               const QSignalBlocker blocker(channel_bandwidth_spin_);
               channel_bandwidth_spin_->setValue(value);
             }
+            update_channel_overlay();
             if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
           });
   connect(gmsk_decoder_combo_,   QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -1649,6 +1661,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
   signal_visualization_ = new SignalVisualizationWidget(central);
   signal_visualization_->SetSpectrumSource(SignalVisualizationWidget::SpectrumSource::kReceiverInput);
+  if (fixed_channel_bandwidth_spin_ != nullptr)
+    signal_visualization_->SetChannelBandwidthHz(fixed_channel_bandwidth_spin_->value());
   {
     QSettings settings("multi-radio", "multi-radio-client");
     settings.beginGroup("visualization");
@@ -1709,12 +1723,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     }
     signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
   });
-  connect(spectrum_source_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+  connect(spectrum_source_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, update_channel_overlay]() {
     const int selected = spectrum_source_combo_->currentData().toInt();
     const auto source =
         (selected == 1) ? SignalVisualizationWidget::SpectrumSource::kReceiverInput
                         : SignalVisualizationWidget::SpectrumSource::kDemodulated;
     signal_visualization_->SetSpectrumSource(source);
+    update_channel_overlay();
     AppendLog(QString("Visualization spectrum source: %1")
                   .arg(source == SignalVisualizationWidget::SpectrumSource::kReceiverInput
                            ? "receiver"
@@ -1729,7 +1744,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(dwell_ms_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
     SaveScanListConfigToSettings();
   });
-  connect(channel_bandwidth_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+  connect(channel_bandwidth_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this, update_channel_overlay](int value) {
     if (fixed_bandwidth_sync_in_progress_) {
       return;
     }
@@ -1739,6 +1754,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       const QSignalBlocker blocker(fixed_channel_bandwidth_spin_);
       fixed_channel_bandwidth_spin_->setValue(value);
     }
+    update_channel_overlay();
   });
   connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           [this, update_vdes_controls]() {

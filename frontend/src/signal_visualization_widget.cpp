@@ -156,6 +156,13 @@ void SignalVisualizationWidget::SetSpectrumSource(SpectrumSource source) {
   update();
 }
 
+void SignalVisualizationWidget::SetChannelBandwidthHz(int bandwidth_hz) {
+  const int bw = std::max(0, bandwidth_hz);
+  if (channel_bandwidth_hz_ == bw) return;
+  channel_bandwidth_hz_ = bw;
+  update();
+}
+
 void SignalVisualizationWidget::SetChannelLabel(const QString& label) {
   if (channel_label_ == label) {
     return;
@@ -387,6 +394,20 @@ void SignalVisualizationWidget::paintEvent(QPaintEvent* event) {
                     apply_noise_floor_filter, noise_floor_db_);
   DrawHeatmap(&painter, waterfall_rect.adjusted(8, 30, -8, -8), display.waterfall_rows, true, true,
               auto_noise_reduction_enabled_, apply_noise_floor_filter, noise_floor_db_);
+
+  if (spectrum_source_ == SpectrumSource::kReceiverInput && channel_bandwidth_hz_ > 0 &&
+      display.frequency_end_hz > display.frequency_start_hz) {
+    // Spectrogram: plot area matches DrawSpectrumCurve's internal plot (36px left margin, 24px bottom)
+    const QRect spec_area = spectrogram_rect.adjusted(8, 30, -8, -8);
+    const QRect spec_plot = spec_area.adjusted(36, 8, -10, -24);
+    DrawChannelOverlay(&painter, spec_plot,
+                       display.frequency_start_hz, display.frequency_end_hz,
+                       channel_bandwidth_hz_, true);
+    // Waterfall
+    DrawChannelOverlay(&painter, waterfall_rect.adjusted(8, 30, -8, -8),
+                       display.frequency_start_hz, display.frequency_end_hz,
+                       channel_bandwidth_hz_, false);
+  }
 }
 
 void SignalVisualizationWidget::OnFrameTick() {
@@ -722,6 +743,60 @@ void SignalVisualizationWidget::DrawLevelMeter(QPainter* painter, const QRect& a
   painter->setPen(status_color);
   painter->drawText(detail_row, Qt::AlignRight | Qt::AlignVCenter,
                     QString("%1  %2").arg(quality_text, status_text));
+  painter->restore();
+}
+
+void SignalVisualizationWidget::DrawChannelOverlay(QPainter* painter, const QRect& plot,
+                                                   double freq_start_hz, double freq_end_hz,
+                                                   int bandwidth_hz, bool with_fill) {
+  if (!painter || bandwidth_hz <= 0 || freq_end_hz <= freq_start_hz) return;
+
+  const double span_hz   = freq_end_hz - freq_start_hz;
+  const double center_hz = (freq_start_hz + freq_end_hz) * 0.5;
+  const double left_hz   = center_hz - bandwidth_hz * 0.5;
+  const double right_hz  = center_hz + bandwidth_hz * 0.5;
+
+  auto hz_to_x = [&](double hz) {
+    const double t = (hz - freq_start_hz) / span_hz;
+    return plot.left() + static_cast<int>(t * (plot.width() - 1));
+  };
+
+  const int x_left   = hz_to_x(left_hz);
+  const int x_right  = hz_to_x(right_hz);
+  const int x_center = hz_to_x(center_hz);
+
+  painter->save();
+  painter->setClipRect(plot);
+
+  if (with_fill && x_right > x_left) {
+    const int xl = std::clamp(x_left,  plot.left(), plot.right());
+    const int xr = std::clamp(x_right, plot.left(), plot.right());
+    painter->fillRect(QRect(xl, plot.top(), xr - xl, plot.height()), QColor(64, 220, 200, 22));
+  }
+
+  painter->setPen(QPen(QColor(64, 220, 200, 190), 1, Qt::DashLine));
+  if (x_left >= plot.left() && x_left <= plot.right())
+    painter->drawLine(x_left, plot.top(), x_left, plot.bottom());
+  if (x_right >= plot.left() && x_right <= plot.right())
+    painter->drawLine(x_right, plot.top(), x_right, plot.bottom());
+
+  painter->setPen(QPen(QColor(64, 220, 200, 70), 1));
+  if (x_center >= plot.left() && x_center <= plot.right())
+    painter->drawLine(x_center, plot.top(), x_center, plot.bottom());
+
+  if (with_fill) {
+    const QString label = FormatFrequencyLabel(static_cast<double>(bandwidth_hz));
+    const QFontMetrics fm(painter->font());
+    const int lw = fm.horizontalAdvance(label);
+    const int lh = fm.height();
+    const int lx = std::clamp((x_left + x_right) / 2 - lw / 2,
+                               plot.left() + 2, plot.right() - lw - 2);
+    const int ly = plot.top() + 3;
+    painter->fillRect(QRect(lx - 3, ly, lw + 6, lh), QColor(11, 16, 24, 210));
+    painter->setPen(QColor(100, 210, 195));
+    painter->drawText(lx, ly + fm.ascent(), label);
+  }
+
   painter->restore();
 }
 
