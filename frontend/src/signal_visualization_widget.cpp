@@ -753,48 +753,72 @@ void SignalVisualizationWidget::DrawChannelOverlay(QPainter* painter, const QRec
 
   const double span_hz   = freq_end_hz - freq_start_hz;
   const double center_hz = (freq_start_hz + freq_end_hz) * 0.5;
-  const double left_hz   = center_hz - bandwidth_hz * 0.5;
-  const double right_hz  = center_hz + bandwidth_hz * 0.5;
+  const double bw        = static_cast<double>(bandwidth_hz);
+  const double half_bw   = bw * 0.5;
 
-  auto hz_to_x = [&](double hz) {
-    const double t = (hz - freq_start_hz) / span_hz;
-    return plot.left() + static_cast<int>(t * (plot.width() - 1));
+  auto hz_to_x = [&](double hz) -> int {
+    return plot.left() + static_cast<int>((hz - freq_start_hz) / span_hz * (plot.width() - 1));
   };
 
-  const int x_left   = hz_to_x(left_hz);
-  const int x_right  = hz_to_x(right_hz);
-  const int x_center = hz_to_x(center_hz);
+  // Channel grid: left edge of channel k is at center_hz - bw/2 + k * bw
+  const double edge_origin = center_hz - half_bw;
+  const int n_start = static_cast<int>(std::floor((freq_start_hz - edge_origin) / bw));
+  const int n_end   = static_cast<int>(std::ceil ((freq_end_hz   - edge_origin) / bw));
 
   painter->save();
   painter->setClipRect(plot);
 
-  if (with_fill && x_right > x_left) {
-    const int xl = std::clamp(x_left,  plot.left(), plot.right());
-    const int xr = std::clamp(x_right, plot.left(), plot.right());
-    painter->fillRect(QRect(xl, plot.top(), xr - xl, plot.height()), QColor(64, 220, 200, 22));
+  // Fills: center channel (k=0) highlighted, neighbours very subtle
+  if (with_fill) {
+    for (int k = n_start; k < n_end; ++k) {
+      const int xl = std::clamp(hz_to_x(edge_origin + k * bw),       plot.left(), plot.right());
+      const int xr = std::clamp(hz_to_x(edge_origin + (k + 1) * bw), plot.left(), plot.right());
+      if (xr <= xl) continue;
+      const QColor fill = (k == 0) ? QColor(64, 220, 200, 22)
+                                   : QColor(64, 160, 180, (std::abs(k) % 2 == 0) ? 8 : 5);
+      painter->fillRect(QRect(xl, plot.top(), xr - xl, plot.height()), fill);
+    }
   }
 
-  painter->setPen(QPen(QColor(64, 220, 200, 190), 1, Qt::DashLine));
-  if (x_left >= plot.left() && x_left <= plot.right())
-    painter->drawLine(x_left, plot.top(), x_left, plot.bottom());
-  if (x_right >= plot.left() && x_right <= plot.right())
-    painter->drawLine(x_right, plot.top(), x_right, plot.bottom());
+  // Channel boundary lines
+  for (int k = n_start; k <= n_end; ++k) {
+    const int x = hz_to_x(edge_origin + k * bw);
+    if (x < plot.left() || x > plot.right()) continue;
+    // Edges of the center channel are brighter
+    const bool is_center_edge = (k == 0 || k == 1);
+    painter->setPen(QPen(QColor(64, 220, 200, is_center_edge ? 190 : 110), 1, Qt::DashLine));
+    painter->drawLine(x, plot.top(), x, plot.bottom());
+  }
 
-  painter->setPen(QPen(QColor(64, 220, 200, 70), 1));
-  if (x_center >= plot.left() && x_center <= plot.right())
-    painter->drawLine(x_center, plot.top(), x_center, plot.bottom());
+  // Faint centre line for each visible channel
+  for (int k = n_start; k < n_end; ++k) {
+    const int x = hz_to_x(edge_origin + k * bw + half_bw);
+    if (x < plot.left() || x > plot.right()) continue;
+    painter->setPen(QPen(QColor(64, 220, 200, k == 0 ? 75 : 35), 1));
+    painter->drawLine(x, plot.top(), x, plot.bottom());
+  }
 
+  // Labels: bandwidth on center channel, centre-frequency on others (if they fit)
   if (with_fill) {
-    const QString label = FormatFrequencyLabel(static_cast<double>(bandwidth_hz));
     const QFontMetrics fm(painter->font());
-    const int lw = fm.horizontalAdvance(label);
     const int lh = fm.height();
-    const int lx = std::clamp((x_left + x_right) / 2 - lw / 2,
-                               plot.left() + 2, plot.right() - lw - 2);
-    const int ly = plot.top() + 3;
-    painter->fillRect(QRect(lx - 3, ly, lw + 6, lh), QColor(11, 16, 24, 210));
-    painter->setPen(QColor(100, 210, 195));
-    painter->drawText(lx, ly + fm.ascent(), label);
+    for (int k = n_start; k < n_end; ++k) {
+      const int xl = hz_to_x(edge_origin + k * bw);
+      const int xr = hz_to_x(edge_origin + (k + 1) * bw);
+      const int ch_px_width = std::clamp(xr, plot.left(), plot.right()) -
+                              std::clamp(xl, plot.left(), plot.right());
+      const QString label = (k == 0)
+          ? FormatFrequencyLabel(bw)
+          : FormatFrequencyLabel(edge_origin + k * bw + half_bw);
+      const int lw = fm.horizontalAdvance(label);
+      if (lw + 8 > ch_px_width) continue;  // skip if label doesn't fit
+      const int x_center = hz_to_x(edge_origin + k * bw + half_bw);
+      const int lx = std::clamp(x_center - lw / 2, plot.left() + 2, plot.right() - lw - 2);
+      const int ly = plot.top() + 3;
+      painter->fillRect(QRect(lx - 3, ly, lw + 6, lh), QColor(11, 16, 24, 210));
+      painter->setPen(k == 0 ? QColor(100, 210, 195) : QColor(80, 175, 165));
+      painter->drawText(lx, ly + fm.ascent(), label);
+    }
   }
 
   painter->restore();
