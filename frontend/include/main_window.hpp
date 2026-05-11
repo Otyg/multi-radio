@@ -168,6 +168,7 @@ class MainWindow : public QMainWindow {
   QCheckBox* range_noise_gate_checkbox_ = nullptr;
   QDoubleSpinBox* range_noise_gate_spin_ = nullptr;
   QDoubleSpinBox* range_db_ceiling_spin_ = nullptr;
+  QSpinBox* scan_range_channel_bw_spin_ = nullptr;
   QSpinBox* dwell_ms_spin_ = nullptr;
   QSpinBox* sample_rate_spin_ = nullptr;
   QSpinBox* channel_bandwidth_spin_ = nullptr;

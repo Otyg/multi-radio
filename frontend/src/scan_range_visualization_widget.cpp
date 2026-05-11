@@ -33,6 +33,18 @@ void ScanRangeVisualizationWidget::Configure(double start_hz, double end_hz,
   latest_spectrum_.clear();
   waterfall_rows_.clear();
   last_tuned_hz_ = 0.0;
+  frame_start_hz_ = 0.0;
+  frame_end_hz_ = 0.0;
+  last_row_timer_.invalidate();
+  update();
+}
+
+void ScanRangeVisualizationWidget::SetDwellMs(int dwell_ms) {
+  dwell_ms_ = std::max(1, dwell_ms);
+}
+
+void ScanRangeVisualizationWidget::SetChannelBandwidthHz(int bandwidth_hz) {
+  channel_bandwidth_hz_ = std::max(0, bandwidth_hz);
   update();
 }
 
@@ -90,10 +102,42 @@ void ScanRangeVisualizationWidget::PushSpectrum(const std::vector<double>& spect
                                                  double frame_start_hz,
                                                  double frame_end_hz,
                                                  double tuned_hz) {
-  if (total_bins_ <= 0 || scan_step_hz_ <= 0.0 || scan_end_hz_ <= scan_start_hz_) {
+  if (total_bins_ <= 0) return;
+
+  const bool single_freq = (scan_start_hz_ > 0.0 && scan_start_hz_ == scan_end_hz_);
+
+  if (!single_freq && (scan_step_hz_ <= 0.0 || scan_end_hz_ <= scan_start_hz_)) return;
+
+  // ── Single-frequency mode: time-based row commit ──────────────────────────
+  if (single_freq) {
+    frame_start_hz_ = frame_start_hz;
+    frame_end_hz_   = frame_end_hz;
+
+    if (sweep_buffer_.size() != total_bins_) sweep_buffer_.fill(0.0, total_bins_);
+
+    const double frame_span = frame_end_hz - frame_start_hz;
+    const int n_src = static_cast<int>(spectrum.size());
+    if (frame_span > 0.0 && n_src > 0) {
+      for (int i = 0; i < n_src; ++i) {
+        const double t = (n_src <= 1) ? 0.5 : (static_cast<double>(i) + 0.5) / n_src;
+        const int dst = std::clamp(static_cast<int>(t * total_bins_), 0, total_bins_ - 1);
+        sweep_buffer_[dst] = std::max(sweep_buffer_[dst], Clamp01(spectrum[i]));
+      }
+    }
+    latest_spectrum_ = sweep_buffer_;
+
+    if (!last_row_timer_.isValid()) last_row_timer_.start();
+    if (last_row_timer_.elapsed() >= static_cast<qint64>(dwell_ms_)) {
+      waterfall_rows_.prepend(sweep_buffer_);
+      if (waterfall_rows_.size() > kMaxRows) waterfall_rows_.removeLast();
+      sweep_buffer_.fill(0.0, total_bins_);
+      last_row_timer_.restart();
+    }
+    update();
     return;
   }
 
+  // ── Multi-frequency sweep mode ────────────────────────────────────────────
   const bool is_wrap = (last_tuned_hz_ > 0.0) &&
                        (tuned_hz < last_tuned_hz_ - scan_step_hz_ * 0.5);
   if (is_wrap && !sweep_buffer_.isEmpty()) {
@@ -145,8 +189,11 @@ void ScanRangeVisualizationWidget::paintEvent(QPaintEvent* event) {
   const QRect wfall_rect(content.left(), content.top() + spec_h + gap, content.width(),
                          content.height() - spec_h - gap);
 
-  const double show_start = scan_start_hz_ - scan_step_hz_ * 0.5;
-  const double show_end = scan_end_hz_ + scan_step_hz_ * 0.5;
+  const bool single_freq = (scan_start_hz_ > 0.0 && scan_start_hz_ == scan_end_hz_);
+  const double show_start = single_freq ? frame_start_hz_
+                                        : scan_start_hz_ - scan_step_hz_ * 0.5;
+  const double show_end   = single_freq ? frame_end_hz_
+                                        : scan_end_hz_ + scan_step_hz_ * 0.5;
 
   auto draw_panel = [&](const QRect& r, const QString& title) {
     painter.setPen(QPen(QColor(66, 79, 102), 1));
@@ -306,15 +353,46 @@ void ScanRangeVisualizationWidget::DrawSpectrum(QPainter* p, const QRect& rect,
 
   // Frequency axis ticks below the plot.
   p->setPen(QColor(100, 120, 155));
-  const double span = scan_end_hz_ - scan_start_hz_;
+  const bool sf = (scan_start_hz_ > 0.0 && scan_start_hz_ == scan_end_hz_);
+  const double axis_start = sf ? frame_start_hz_ : (scan_start_hz_ - scan_step_hz_ * 0.5);
+  const double axis_end   = sf ? frame_end_hz_   : (scan_end_hz_   + scan_step_hz_ * 0.5);
+  const double axis_span  = std::max(1.0, axis_end - axis_start);
   for (int i = 0; i <= 4; ++i) {
     const double frac = static_cast<double>(i) / 4.0;
-    const double freq = (scan_start_hz_ - scan_step_hz_ * 0.5) + frac * (span + scan_step_hz_);
+    const double freq = axis_start + frac * axis_span;
     const int px = plot.left() + static_cast<int>(frac * (W - 1));
     const QString label = FormatFreq(freq);
     const int lw = fm.horizontalAdvance(label);
     const int tx = std::clamp(px - lw / 2, plot.left(), plot.right() - lw);
     p->drawText(tx, rect.bottom(), label);
+  }
+
+  // Channel markers
+  if (channel_bandwidth_hz_ > 0 && axis_span > 0.0) {
+    p->save();
+    p->setClipRect(plot);
+    const double bw       = static_cast<double>(channel_bandwidth_hz_);
+    const double center   = (axis_start + axis_end) * 0.5;
+    const double edge0    = center - bw * 0.5;
+    const int n_start     = static_cast<int>(std::floor((axis_start - edge0) / bw));
+    const int n_end       = static_cast<int>(std::ceil ((axis_end   - edge0) / bw));
+    auto hz_to_px = [&](double hz) -> int {
+      return plot.left() + static_cast<int>((hz - axis_start) / axis_span * (W - 1));
+    };
+    for (int k = n_start; k < n_end; ++k) {
+      const int xl = std::clamp(hz_to_px(edge0 + k * bw),       plot.left(), plot.right());
+      const int xr = std::clamp(hz_to_px(edge0 + (k + 1) * bw), plot.left(), plot.right());
+      if (xr > xl)
+        p->fillRect(QRect(xl, plot.top(), xr - xl, plot.height()),
+                    QColor(64, 220, 200, k == 0 ? 18 : 8));
+    }
+    for (int k = n_start; k <= n_end; ++k) {
+      const int x = hz_to_px(edge0 + k * bw);
+      if (x < plot.left() || x > plot.right()) continue;
+      p->setPen(QPen(QColor(64, 220, 200, (k == 0 || k == 1) ? 180 : 100), 1, Qt::DashLine));
+      p->drawLine(x, plot.top(), x, plot.bottom());
+    }
+    p->restore();
   }
 }
 
@@ -367,15 +445,39 @@ void ScanRangeVisualizationWidget::DrawWaterfall(QPainter* p, const QRect& rect,
   p->setRenderHint(QPainter::Antialiasing, true);
   p->setPen(QColor(100, 120, 155));
   const QFontMetrics fm(p->font());
-  const double span = scan_end_hz_ - scan_start_hz_;
+  const bool sf_wf = (scan_start_hz_ > 0.0 && scan_start_hz_ == scan_end_hz_);
+  const double wf_axis_start = sf_wf ? frame_start_hz_ : (scan_start_hz_ - scan_step_hz_ * 0.5);
+  const double wf_axis_end   = sf_wf ? frame_end_hz_   : (scan_end_hz_   + scan_step_hz_ * 0.5);
+  const double wf_axis_span  = std::max(1.0, wf_axis_end - wf_axis_start);
   for (int i = 0; i <= 4; ++i) {
     const double frac = static_cast<double>(i) / 4.0;
-    const double freq = (scan_start_hz_ - scan_step_hz_ * 0.5) + frac * (span + scan_step_hz_);
+    const double freq = wf_axis_start + frac * wf_axis_span;
     const int px = rect.left() + static_cast<int>(frac * (W - 1));
     const QString label = FormatFreq(freq);
     const int lw = fm.horizontalAdvance(label);
     const int tx = std::clamp(px - lw / 2, rect.left(), rect.right() - lw);
     p->drawText(tx, rect.bottom() - 2, label);
+  }
+
+  // Channel markers
+  if (channel_bandwidth_hz_ > 0 && wf_axis_span > 0.0) {
+    p->save();
+    p->setClipRect(rect);
+    const double bw    = static_cast<double>(channel_bandwidth_hz_);
+    const double center = (wf_axis_start + wf_axis_end) * 0.5;
+    const double edge0 = center - bw * 0.5;
+    const int n_start  = static_cast<int>(std::floor((wf_axis_start - edge0) / bw));
+    const int n_end    = static_cast<int>(std::ceil ((wf_axis_end   - edge0) / bw));
+    auto hz_to_px_wf = [&](double hz) -> int {
+      return rect.left() + static_cast<int>((hz - wf_axis_start) / wf_axis_span * (W - 1));
+    };
+    for (int k = n_start; k <= n_end; ++k) {
+      const int x = hz_to_px_wf(edge0 + k * bw);
+      if (x < rect.left() || x > rect.right()) continue;
+      p->setPen(QPen(QColor(64, 220, 200, (k == 0 || k == 1) ? 160 : 90), 1, Qt::DashLine));
+      p->drawLine(x, rect.top(), x, rect.bottom());
+    }
+    p->restore();
   }
 
   // Row count label (completed sweeps only)

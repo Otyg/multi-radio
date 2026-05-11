@@ -460,6 +460,11 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
            f += normalized.range_step_hz) {
         normalized.frequency_list_hz.push_back(f);
       }
+    } else if (mode_ == RadioMode::kScanRange &&
+               normalized.range_start_hz > 0.0 &&
+               normalized.range_start_hz == normalized.range_end_hz) {
+      normalized.frequency_list_hz.clear();
+      normalized.frequency_list_hz.push_back(normalized.range_start_hz);
     }
     mode_config_ = std::move(normalized);
     scan_channel_idx_ = 0;

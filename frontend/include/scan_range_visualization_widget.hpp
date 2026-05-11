@@ -3,6 +3,7 @@
 #include <vector>
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QVector>
 #include <QWidget>
@@ -16,6 +17,8 @@ class ScanRangeVisualizationWidget : public QWidget {
   explicit ScanRangeVisualizationWidget(QWidget* parent = nullptr);
 
   void Configure(double start_hz, double end_hz, double step_hz, int total_bins);
+  void SetDwellMs(int dwell_ms);
+  void SetChannelBandwidthHz(int bandwidth_hz);
   void PushSpectrum(const std::vector<double>& spectrum, double frame_start_hz,
                     double frame_end_hz, double tuned_hz);
   void SetNoiseGate(bool enabled, double threshold);
@@ -51,6 +54,11 @@ class ScanRangeVisualizationWidget : public QWidget {
   QVector<double> latest_spectrum_;
   QVector<QVector<double>> waterfall_rows_;
   double last_tuned_hz_ = 0.0;
+  double frame_start_hz_ = 0.0;
+  double frame_end_hz_   = 0.0;
+  int dwell_ms_ = 500;
+  int channel_bandwidth_hz_ = 0;
+  QElapsedTimer last_row_timer_;
 
   static constexpr int kMaxRows = 150;
   static constexpr int kLabelW   = 38;

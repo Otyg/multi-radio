@@ -1349,12 +1349,23 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_db_ceiling_spin_->setValue(kScanSpectrumCeilingDb);
   range_db_ceiling_spin_->setSuffix(" dBFS");
   range_db_ceiling_spin_->setToolTip("Max-värde på dB-skalan i spektrogrammet");
+  scan_range_channel_bw_spin_ = new QSpinBox(range_tab);
+  scan_range_channel_bw_spin_->setRange(0, 500000);
+  scan_range_channel_bw_spin_->setSingleStep(1000);
+  scan_range_channel_bw_spin_->setValue(0);
+  scan_range_channel_bw_spin_->setSuffix(" Hz");
+  scan_range_channel_bw_spin_->setSpecialValueText("Av");
+  scan_range_channel_bw_spin_->setToolTip("Kanalbredd för kanalmarkeringar i spektrum/vattenfall");
+
   auto* threshold_row = new QHBoxLayout();
   threshold_row->addWidget(range_noise_gate_checkbox_);
   threshold_row->addWidget(range_noise_gate_spin_);
   threshold_row->addSpacing(16);
   threshold_row->addWidget(new QLabel("Tak:", range_tab));
   threshold_row->addWidget(range_db_ceiling_spin_);
+  threshold_row->addSpacing(16);
+  threshold_row->addWidget(new QLabel("Kanalbredd:", range_tab));
+  threshold_row->addWidget(scan_range_channel_bw_spin_);
   threshold_row->addStretch(1);
   range_outer->addLayout(threshold_row);
 
@@ -1741,6 +1752,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       AddMessageRow(row);
     }
   });
+  connect(dwell_ms_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+    if (scan_range_viz_) scan_range_viz_->SetDwellMs(value);
+  });
   connect(dwell_ms_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
     SaveScanListConfigToSettings();
   });
@@ -2041,6 +2055,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
                               ? range_fft_size_combo_->currentData().toInt(&fft_ok)
                               : 1024;
       scan_range_viz_->Configure(start, end, step, fft_ok ? fft_val : 1024);
+      if (dwell_ms_spin_) scan_range_viz_->SetDwellMs(dwell_ms_spin_->value());
     }
 
     const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
@@ -2092,6 +2107,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(range_db_ceiling_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double val) {
             if (scan_range_viz_ != nullptr) scan_range_viz_->SetDbCeiling(val);
+          });
+  connect(scan_range_channel_bw_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int val) {
+            if (scan_range_viz_ != nullptr) scan_range_viz_->SetChannelBandwidthHz(val);
           });
   connect(scan_range_viz_, &ScanRangeVisualizationWidget::RangeSelected, this,
           [this](double start_hz, double end_hz) {
@@ -2616,6 +2635,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
                             ? range_fft_size_combo_->currentData().toInt(&fft_ok)
                             : 1024;
     scan_range_viz_->Configure(vis_start, vis_end, vis_step, fft_ok ? fft_val : 1024);
+    if (dwell_ms_spin_) scan_range_viz_->SetDwellMs(dwell_ms_spin_->value());
   }
   return true;
 }
