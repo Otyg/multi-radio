@@ -73,6 +73,12 @@ class MainWindow : public QMainWindow {
     double frequency_hz = 0.0;
     QString payload;
     QString decoded_summary;
+    QString mmsi;
+    QString lat;
+    QString lon;
+    QString sog;
+    QString cog;
+    QString other;
   };
   struct AisCrcSummaryState {
     quint64 last_log_unix_ms = 0;

@@ -1616,8 +1616,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   signal_minutes_layout->addWidget(signal_filter_combo_);
   signal_minutes_layout->addWidget(minutes_filter_spin_);
   air_marine_layout->addRow("Signal / Last minutes", signal_minutes_row);
-  decoded_table_ = new QTableWidget(0, 6, air_marine_tab);
-  decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload", "Decoded"});
+  decoded_table_ = new QTableWidget(0, 7, air_marine_tab);
+  decoded_table_->setHorizontalHeaderLabels({"Time", "MMSI", "Lat", "Long", "SOG", "COG", "Other"});
   decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
   decoded_table_->setMinimumHeight(280);
   air_marine_layout->addRow(decoded_table_);
@@ -3050,6 +3050,37 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   } else if (signal_type == "SIGNAL_TYPE_DSC") {
     row.decoded_summary = BuildDscDecodedSummary(fields);
   }
+  const auto field_value = [&fields](const QString& key) {
+    return fields.contains(key) ? fields.value(key).toString() : QString();
+  };
+  row.mmsi = field_value("mmsi");
+  row.lat = field_value("lat");
+  if (row.lat.isEmpty()) row.lat = field_value("latitude");
+  row.lon = field_value("lon");
+  if (row.lon.isEmpty()) row.lon = field_value("longitude");
+  row.sog = field_value("sog");
+  row.cog = field_value("cog");
+  const QStringList excluded_fields = {
+      "mmsi", "lat", "lon", "latitude", "longitude", "sog", "cog"};
+  QStringList other_parts;
+  if (!row.payload.isEmpty()) {
+    other_parts.append(QString("payload=%1").arg(row.payload));
+  }
+  if (!row.decoded_summary.isEmpty()) {
+    other_parts.append(QString("decoded=%1").arg(row.decoded_summary));
+  }
+  for (auto it = fields.cbegin(); it != fields.cend(); ++it) {
+    const QString key = it.key();
+    if (excluded_fields.contains(key)) {
+      continue;
+    }
+    const QString value = it.value().toString();
+    if (value.isEmpty()) {
+      continue;
+    }
+    other_parts.append(QString("%1=%2").arg(key, value));
+  }
+  row.other = other_parts.join(' ');
 
   // Log plugin-decoded digital frames (FSK, GMSK, NRZI, etc.)
   const QString plugin_type = fields.value("signal_type").toString();
@@ -4452,11 +4483,12 @@ void MainWindow::AddMessageRow(const MessageRow& row) {
   const int current = decoded_table_->rowCount();
   decoded_table_->insertRow(current);
   decoded_table_->setItem(current, 0, new QTableWidgetItem(row.timestamp.toString("HH:mm:ss")));
-  decoded_table_->setItem(current, 1, new QTableWidgetItem(QString::number(row.receiver_id)));
-  decoded_table_->setItem(current, 2, new QTableWidgetItem(row.signal_type));
-  decoded_table_->setItem(current, 3, new QTableWidgetItem(QString::number(row.frequency_hz, 'f', 0)));
-  decoded_table_->setItem(current, 4, new QTableWidgetItem(row.payload));
-  decoded_table_->setItem(current, 5, new QTableWidgetItem(row.decoded_summary));
+  decoded_table_->setItem(current, 1, new QTableWidgetItem(row.mmsi));
+  decoded_table_->setItem(current, 2, new QTableWidgetItem(row.lat));
+  decoded_table_->setItem(current, 3, new QTableWidgetItem(row.lon));
+  decoded_table_->setItem(current, 4, new QTableWidgetItem(row.sog));
+  decoded_table_->setItem(current, 5, new QTableWidgetItem(row.cog));
+  decoded_table_->setItem(current, 6, new QTableWidgetItem(row.other));
 }
 
 bool MainWindow::PassesFilter(const MessageRow& row) const {
