@@ -1610,10 +1610,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   minutes_filter_spin_->setValue(30);
   air_marine_layout->addRow(new QLabel("Uses built-in AIS + DSC channels.", air_marine_tab));
   air_marine_layout->addRow(new QLabel("AIS: 162000000 Hz, DSC Ch 70: 156525000 Hz", air_marine_tab));
-  air_marine_layout->addRow("AIS+DSC bandbredd", channel_bandwidth_spin_);
-  air_marine_layout->addRow("Signal", signal_filter_combo_);
-  air_marine_layout->addRow("Receiver", receiver_filter_combo_);
-  air_marine_layout->addRow("Last minutes", minutes_filter_spin_);
+  auto* signal_minutes_row = new QWidget(air_marine_tab);
+  auto* signal_minutes_layout = new QHBoxLayout(signal_minutes_row);
+  signal_minutes_layout->setContentsMargins(0, 0, 0, 0);
+  signal_minutes_layout->addWidget(signal_filter_combo_);
+  signal_minutes_layout->addWidget(minutes_filter_spin_);
+  air_marine_layout->addRow("Signal / Last minutes", signal_minutes_row);
   decoded_table_ = new QTableWidget(0, 6, air_marine_tab);
   decoded_table_->setHorizontalHeaderLabels({"Time", "Receiver", "Signal", "Frequency", "Payload", "Decoded"});
   decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -2494,6 +2496,10 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
         fixed_modulation = parsed;
       }
     }
+  }
+  if (mode == v1::RADIO_MODE_AIR_MARINE_PLOT) {
+    config.set_fixed_frequency_hz(162000000.0);
+    fixed_modulation = v1::MODULATION_AIS_DUAL;
   }
   /* In scan-list mode, if any channel uses AIS Dual let that take precedence
      so the backend selects ais_dual_demod without requiring the user to also
