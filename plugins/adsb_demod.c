@@ -490,6 +490,13 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->mag_cap = FRAME_SAMPS + 65536u;
   ctx->mag = (uint32_t*)malloc(ctx->mag_cap * sizeof(uint32_t));
   if (!ctx->mag) { free(ctx); return NULL; }
+  
+  // Debug: notify plugin initialization
+  const char* debug_env = getenv("MR_PLUGIN_DEBUG");
+  if (debug_env && debug_env[0] != '0') {
+    fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.8-2.2 Msps)\n");
+  }
+  
   return (MrPluginCtx*)ctx;
 }
 
@@ -520,7 +527,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   AdsbCtx* ctx = (AdsbCtx*)raw;
 
   /* Kräver ~2 Msps (acceptera 1.8–2.2 Msps) */
-  if (sr < 1800000u || sr > 2200000u) return;
+  if (sr < 1800000u || sr > 2200000u) {
+    const char* debug_env = getenv("MR_PLUGIN_DEBUG");
+    if (debug_env && debug_env[0] != '0') {
+      fprintf(stderr, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.8-2.2 Msps)\n", sr);
+    }
+    return;
+  }
 
   /* Utöka buffert vid behov */
   const uint32_t needed = ctx->mag_len + num_pairs;

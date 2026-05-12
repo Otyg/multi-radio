@@ -202,6 +202,15 @@ bool PluginHost::LoadAll(std::string* error) {
     lp.info.api_version    = meta->api_version;
     lp.info.enabled        = true;
     lp.info.path           = path_str;
+    
+    // Debug: notify loaded and initialized plugin
+    const char* debug_env = std::getenv("MR_PLUGIN_DEBUG");
+    if (debug_env && (debug_env[0] != '0')) {
+      std::fprintf(stderr, "[plugin_host] Loaded: %s v%s from %s\n",
+                   lp.info.plugin_name.c_str(),
+                   lp.info.plugin_version.c_str(),
+                   path.filename().string().c_str());
+    }
     lp.dl_handle           = handle;
     lp.fn_create      = fn_create;
     lp.fn_destroy     = fn_destroy;
