@@ -1017,18 +1017,14 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         break;
       }
 
-      uint32_t crc_calc = crc24(frame, n_bytes - 3u);
-      uint32_t crc_fram = ((uint32_t)frame[n_bytes - 3u] << 16) |
-                          ((uint32_t)frame[n_bytes - 2u] <<  8) |
-                           (uint32_t)frame[n_bytes - 1u];
-
       int corrected = 0;
       int ap_recovered = 0;
-      if (crc_calc != crc_fram) {
+      uint32_t syndrome = modesChecksum(frame, n_bits);
+      if (syndrome != 0u) {
         int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, NULL);
         if (fixed > 0) {
           corrected = fixed;
-          crc_calc = crc24(frame, n_bytes - 3u);
+          syndrome = modesChecksum(frame, n_bits);
         } else {
           if (df == 0u || df == 4u || df == 5u || df == 16u ||
               df == 20u || df == 21u || df == 24u) {
@@ -1039,7 +1035,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
           }
         }
       }
-      if (crc_calc == crc_fram || ap_recovered) {
+      if (syndrome == 0u || ap_recovered) {
         ctx->crc_ok_count++;
         if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
         if (ap_recovered) ctx->crc_ok_ap_count++;
@@ -1079,7 +1075,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                     sr, (double)spb);
             for (uint32_t x = 0; x < n_bytes; ++x)
               fprintf(fail_out, "%02X", frame[x]);
-            fprintf(fail_out, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
+            fprintf(fail_out, "  syndrome=%06X\n", syndrome);
             if (debug_enabled) fflush(fail_out);
           }
           if (df == 17u) ++ctx->df17_fail_count;
