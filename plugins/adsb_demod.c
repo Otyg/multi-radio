@@ -386,11 +386,33 @@ static int slice_phase4(const uint32_t* m) {
   return (int)((int32_t)(m[0]) + (int32_t)(5u*m[1]) - (int32_t)(5u*m[2]) - (int32_t)(m[3]));
 }
 
-typedef int (*slice_fn)(const uint32_t*);
-
-static const slice_fn phase_slices[5] = {
-  slice_phase0, slice_phase1, slice_phase2, slice_phase3, slice_phase4
+/* Phase-specific bit offsets and correlator mappings for Manchester decoding */
+static const uint32_t bit_offsets[5][8] = {
+  {0, 2, 4, 7, 9, 12, 14, 16},  /* phase 3 -> phase 0 */
+  {0, 2, 5, 7, 9, 12, 14, 17},  /* phase 4 -> phase 1 */
+  {0, 2, 5, 7, 10, 12, 14, 17}, /* phase 5 -> phase 2 */
+  {0, 3, 5, 7, 10, 12, 15, 17}, /* phase 6 -> phase 3 */
+  {0, 3, 5, 8, 10, 12, 15, 17}, /* phase 7 -> phase 4 */
 };
+
+static const int bit_funcs[5][8] = {
+  {0, 2, 4, 1, 3, 0, 2, 4},     /* phase 0: which slice_phase per bit */
+  {1, 3, 0, 2, 4, 1, 3, 0},     /* phase 1 */
+  {2, 4, 1, 3, 0, 2, 4, 1},     /* phase 2 */
+  {3, 0, 2, 4, 1, 3, 0, 2},     /* phase 3 */
+  {4, 1, 3, 0, 2, 4, 1, 3},     /* phase 4 */
+};
+
+static int apply_correlator(int func_idx, const uint32_t* m) {
+  switch (func_idx) {
+    case 0: return slice_phase0(m);
+    case 1: return slice_phase1(m);
+    case 2: return slice_phase2(m);
+    case 3: return slice_phase3(m);
+    case 4: return slice_phase4(m);
+    default: return 0;
+  }
+}
 
 
 /* ------------------------------------------------------------------ */
@@ -872,22 +894,20 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     ++ctx->preamble_count;
     
-    const uint32_t* preamble = ctx->mag + p;
-    const uint32_t* msg_start = preamble + 19u;
+    const uint32_t* msg_start = ctx->mag + p + 19u;
     
-    slice_fn slice = phase_slices[best_phase - 3];
+    int phase_idx = best_phase - 3;  /* map phase 3-7 to index 0-4 */
     
     uint8_t byte0 = 0u;
     {
       const uint32_t* ptr = msg_start;
-      byte0 |= (slice(ptr + 0) > 0 ? 0x80u : 0);
-      byte0 |= (slice(ptr + 2) > 0 ? 0x40u : 0);
-      byte0 |= (slice(ptr + 4) > 0 ? 0x20u : 0);
-      byte0 |= (slice(ptr + 7) > 0 ? 0x10u : 0);
-      byte0 |= (slice(ptr + 9) > 0 ? 0x08u : 0);
-      byte0 |= (slice(ptr + 12) > 0 ? 0x04u : 0);
-      byte0 |= (slice(ptr + 14) > 0 ? 0x02u : 0);
-      byte0 |= (slice(ptr + 16) > 0 ? 0x01u : 0);
+      const uint32_t* offsets = bit_offsets[phase_idx];
+      const int* funcs = bit_funcs[phase_idx];
+      
+      for (int b = 0; b < 8; ++b) {
+        int corr = apply_correlator(funcs[b], ptr + offsets[b]);
+        if (corr > 0) byte0 |= (uint8_t)(0x80u >> b);
+      }
     }
     
     uint32_t df = (byte0 >> 3u) & 0x1Fu;
@@ -903,14 +923,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     for (uint32_t i = 1; i < n_bytes; ++i) {
       const uint32_t* ptr = msg_start + i * 19u;
       uint8_t byte_val = 0u;
-      byte_val |= (slice(ptr + 0) > 0 ? 0x80u : 0);
-      byte_val |= (slice(ptr + 2) > 0 ? 0x40u : 0);
-      byte_val |= (slice(ptr + 4) > 0 ? 0x20u : 0);
-      byte_val |= (slice(ptr + 7) > 0 ? 0x10u : 0);
-      byte_val |= (slice(ptr + 9) > 0 ? 0x08u : 0);
-      byte_val |= (slice(ptr + 12) > 0 ? 0x04u : 0);
-      byte_val |= (slice(ptr + 14) > 0 ? 0x02u : 0);
-      byte_val |= (slice(ptr + 16) > 0 ? 0x01u : 0);
+      const uint32_t* offsets = bit_offsets[phase_idx];
+      const int* funcs = bit_funcs[phase_idx];
+      
+      for (int b = 0; b < 8; ++b) {
+        int corr = apply_correlator(funcs[b], ptr + offsets[b]);
+        if (corr > 0) byte_val |= (uint8_t)(0x80u >> b);
+      }
       frame[i] = byte_val;
     }
 
