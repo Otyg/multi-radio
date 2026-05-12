@@ -1797,12 +1797,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       }
     }
     update_vdes_controls();
-    /* ADS-B kräver exakt 2 Msps — lås samplerate-spinnern */
+    /* ADS-B kräver exakt 2.4 Msps (dump1090-kompatibel fas-avkodning) — lås samplerate-spinnern */
     if (sample_rate_spin_ != nullptr) {
       const bool is_adsb = (modulation == v1::MODULATION_ADSB);
       if (is_adsb) {
         const QSignalBlocker blocker(sample_rate_spin_);
-        sample_rate_spin_->setValue(2048000);
+        sample_rate_spin_->setValue(2400000);
       }
       /* AIS Dual rekommenderar minst 250 kSps för att täcka båda kanalerna (±25 kHz) */
       if (is_ais_dual && sample_rate_spin_->value() < 250000) {
@@ -2244,7 +2244,7 @@ void MainWindow::RefreshReceivers() {
           const bool is_adsb = (fixed_modulation == v1::MODULATION_ADSB);
           if (is_adsb) {
             const QSignalBlocker sr_blocker(sample_rate_spin_);
-            sample_rate_spin_->setValue(2048000);
+            sample_rate_spin_->setValue(2400000);
           }
           sample_rate_spin_->setEnabled(!is_adsb);
         }
