@@ -338,26 +338,59 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
 
 static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
     uint32_t high;
-    
+    uint32_t base_signal;
+    uint32_t base_noise;
+
+    if (! (m[0] < m[1] && m[12] > m[13]))
+        return 0;
+
     if (phase == 3) {
-        high = (m[1] + m[3] + m[9] + m[11] + m[12]) / 5u;
+        if (!(m[1] > m[2] && m[2] < m[3] && m[3] > m[4] &&
+              m[8] < m[9] && m[9] > m[10] && m[10] < m[11]))
+            return 0;
+        high = (m[1] + m[3] + m[9] + m[11] + m[12]) / 4u;
+        base_signal = m[1] + m[3] + m[9];
+        base_noise = m[5] + m[6] + m[7];
     } else if (phase == 4) {
+        if (!(m[1] > m[2] && m[2] < m[3] && m[3] > m[4] &&
+              m[8] < m[9] && m[9] > m[10] && m[11] < m[12]))
+            return 0;
         high = (m[1] + m[3] + m[9] + m[12]) / 4u;
+        base_signal = m[1] + m[3] + m[9] + m[12];
+        base_noise = m[5] + m[6] + m[7] + m[8];
     } else if (phase == 5) {
-        high = (m[1] + m[3] + m[4] + m[9] + m[10] + m[12]) / 6u;
+        if (!(m[1] > m[2] && m[2] < m[3] && m[4] > m[5] &&
+              m[8] < m[9] && m[10] > m[11] && m[11] < m[12]))
+            return 0;
+        high = (m[1] + m[3] + m[4] + m[9] + m[10] + m[12]) / 4u;
+        base_signal = m[1] + m[12];
+        base_noise = m[6] + m[7];
     } else if (phase == 6) {
+        if (!(m[1] > m[2] && m[3] < m[4] && m[4] > m[5] &&
+              m[9] < m[10] && m[10] > m[11] && m[11] < m[12]))
+            return 0;
         high = (m[1] + m[4] + m[10] + m[12]) / 4u;
+        base_signal = m[1] + m[4] + m[10] + m[12];
+        base_noise = m[5] + m[6] + m[7] + m[8];
     } else if (phase == 7) {
-        high = (m[1] + m[2] + m[4] + m[10] + m[12]) / 5u;
+        if (!(m[2] > m[3] && m[3] < m[4] && m[4] > m[5] &&
+              m[9] < m[10] && m[10] > m[11] && m[11] < m[12]))
+            return 0;
+        high = (m[1] + m[2] + m[4] + m[10] + m[12]) / 4u;
+        base_signal = m[4] + m[10] + m[12];
+        base_noise = m[6] + m[7] + m[8];
     } else {
         return 0;
     }
-    
-    if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
-        m[14] >= high || m[15] >= high || m[16] >= high || m[17] >= high || m[18] >= high) {
+
+    if (base_signal * 2 < 3 * base_noise)
         return 0;
-    }
-    
+
+    if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
+        m[14] >= high || m[15] >= high || m[16] >= high || m[17] >= high ||
+        m[18] >= high)
+        return 0;
+
     if (out_high) *out_high = high;
     return 1;
 }
@@ -871,9 +904,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  uint32_t samples_per_bit = (uint32_t)(spb * 1000.0f / 500.0f + 0.5f);  /* ~2 samples per symbol @ 2 Msps */
-  uint32_t samples_per_byte = samples_per_bit * 16u;  /* 8 bits × 2 symbols/bit */
-  uint32_t min_frame = 19u + samples_per_byte + 2u;  /* preamble + at least 1 byte */
+  uint32_t min_frame = 19u + (14u * 19u) + 1u;  /* max long frame length including phase 7 extra sample */
 
   uint32_t p = 0;
   while (p + 19u < ctx->mag_len) {
@@ -894,7 +925,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     ++ctx->preamble_count;
     
-    const uint32_t* msg_start = ctx->mag + p + 19u;
+    const uint32_t* msg_start = ctx->mag + p + 19u + ((best_phase == 7) ? 1u : 0u);
     
     int phase_idx = best_phase - 3;  /* map phase 3-7 to index 0-4 */
     
@@ -913,7 +944,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     uint32_t df = (byte0 >> 3u) & 0x1Fu;
     uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
     uint32_t n_bits = n_bytes * 8u;
-    uint32_t frame_len = 19u + (n_bytes * 19u);
+    uint32_t frame_len = 19u + (n_bytes * 19u) + ((best_phase == 7) ? 1u : 0u);
     
     if (p + frame_len > ctx->mag_len) break;
     
