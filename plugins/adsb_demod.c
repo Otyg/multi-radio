@@ -1,18 +1,20 @@
 /**
  * adsb_demod.c — ADS-B / Mode S demodulator
  *
+ * Anpassad från dump1090 (https://github.com/antirez/dump1090)
+ * för kompatibilitet med multi-radio plugin-struktur.
+ *
  * Kräver IQ vid 2 Msps (eller 2048 ksps) inställt på 1090 MHz.
  *
  * Algoritm:
  *   1. Beräkna magnituden (I²+Q²) per sampel.
- *   2. Sök efter Mode S-preambel (8 µs = 16 samplar vid 2 Msps):
- *        HÖG: sampelpositioner 0, 2, 7, 9
- *        LÅG: sampelpositioner 1, 3–6, 8, 10–15
- *   3. PPM-avkoda bitar (hög+låg=1, låg+hög=0, 1 µs = 2 samplar/bit).
- *   4. Validera CRC-24.
- *   5. Emittera godkänd ram som "ADSB" med råhex som payload.
+ *   2. Sök efter Mode S-preambel med fas-korrigering.
+ *   3. PPM-avkoda bitar med felkorrigering.
+ *   4. Validera CRC-24 med felkorrigeringstabell.
+ *   5. Avkoda meddelandetyper (DF17, etc.).
+ *   6. Emittera godkänd ram som "ADSB" med råhex som payload.
  *
- * Normaliserade fält: df, icao, bits
+ * Normaliserade fält: df, icao, bits, crc_ok, errorbit
  */
 
 #include "mr_plugin_api.h"
@@ -22,23 +24,90 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 /* ------------------------------------------------------------------ */
-/* Mode S-konstanter                                                    */
+/* Mode S-konstanter från dump1090                                     */
 /* ------------------------------------------------------------------ */
 
-#define PREAMBLE_SAMPS  16u   /* 8 µs × 2 samplar/µs */
-#define BIT_SAMPS        2u   /* 1 µs × 2 samplar/µs */
+#define MODES_DEFAULT_RATE         2000000
+#define MODES_PREAMBLE_US 8       /* microseconds */
+#define MODES_LONG_MSG_BITS 112
+#define MODES_SHORT_MSG_BITS 56
+#define PREAMBLE_SAMPS  16u      /* 8 µs × 2 samplar/µs */
+#define BIT_SAMPS        2u      /* 1 µs × 2 samplar/µs */
 #define SHORT_BITS      56u
 #define LONG_BITS      112u
-#define LONG_SAMPS     (LONG_BITS * BIT_SAMPS)          /* 224 */
-#define FRAME_SAMPS    (PREAMBLE_SAMPS + LONG_SAMPS)    /* 240 */
+#define LONG_SAMPS     (LONG_BITS * BIT_SAMPS)
+#define FRAME_SAMPS    (PREAMBLE_SAMPS + LONG_SAMPS)
+#define MODES_FULL_LEN (MODES_PREAMBLE_US+MODES_LONG_MSG_BITS)
+#define MODES_LONG_MSG_BYTES (112/8)
+#define MODES_SHORT_MSG_BYTES (56/8)
+#define MODES_MAX_BITERRORS 2     /* Maximum correctable bit errors. */
 
-#define MODES_POLY 0xFFF409u  /* CRC-24-generatorpolynom för Mode S */
+/* Number of entries in error syndrome table:
+ * Single bit errors: 107 (bits 5-111)
+ * Two-bit errors: 107*106/2 = 5671
+ * Total: 5778 */
+#define NERRORINFO 5778
+#define MODES_ICAO_CACHE_LEN 1024
+#define MODES_ICAO_CACHE_TTL 60
+
+/* ------------------------------------------------------------------ */
+/* Datastrukturer från dump1090                                       */
+/* ------------------------------------------------------------------ */
+
+/* Structure for error syndrome lookup table entries. */
+struct errorinfo {
+    uint32_t syndrome;          /* CRC syndrome for this error pattern. */
+    int bits;                   /* Number of bit errors (1 or 2). */
+    int pos[MODES_MAX_BITERRORS]; /* Bit positions to correct. */
+};
+
+/* Error syndrome lookup table, sorted by syndrome for binary search. */
+static struct errorinfo bitErrorTable[NERRORINFO];
+
+/* The struct we use to store information about a decoded message. */
+struct modesMessage {
+    /* Generic fields */
+    unsigned char msg[MODES_LONG_MSG_BYTES]; /* Binary message. */
+    int msgbits;                /* Number of bits in message */
+    int msgtype;                /* Downlink format # */
+    int crcok;                  /* True if CRC was valid */
+    uint32_t crc;               /* Message CRC */
+    int errorbit;               /* Bit corrected. -1 if no bit corrected. */
+    int aa1, aa2, aa3;          /* ICAO Address bytes 1 2 and 3 */
+    int phase_corrected;        /* True if phase correction was applied. */
+
+    /* DF 17, 18 */
+    int metype;                 /* Extended squitter message type. */
+    int mesub;                  /* Extended squitter message subtype. */
+    int fflag;                  /* 1 = Odd, 0 = Even CPR message. */
+    int raw_latitude;           /* Non decoded latitude */
+    int raw_longitude;          /* Non decoded longitude */
+    char flight[9];             /* 8 chars flight number. */
+    int ew_dir;                 /* 0 = East, 1 = West. */
+    int ew_velocity;            /* E/W velocity. */
+    int ns_dir;                 /* 0 = North, 1 = South. */
+    int ns_velocity;            /* N/S velocity. */
+    int vert_rate_source;       /* Vertical rate source. */
+    int vert_rate_sign;         /* Vertical rate sign. */
+    int vert_rate;              /* Vertical rate. */
+    int velocity;               /* Computed from EW and NS velocity. */
+
+    /* DF4, DF5, DF20, DF21 */
+    int fs;                     /* Flight status for DF4,5,20,21 */
+    int dr;                     /* Request extraction of downlink request. */
+    int um;                     /* Request extraction of downlink request. */
+    int identity;               /* 13 bits identity (Squawk). */
+
+    /* Fields used by multiple message types. */
+    int altitude, unit;
+};
 
 /* ------------------------------------------------------------------ */
 /* Kontext                                                              */
@@ -51,52 +120,241 @@ typedef struct {
   uint64_t  preamble_count;
   uint64_t  crc_ok_count;
   uint64_t  crc_ok_corrected_count;
+  uint64_t  crc_ok_ap_count;
   uint64_t  crc_fail_count;
   uint64_t  df17_ok_count;
   uint64_t  df17_fail_count;
+  uint64_t  df18_ok_count;
+  uint64_t  df18_fail_count;
   uint64_t  last_stats_ms;
+  uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
+  int      error_info_initialized;
 } AdsbCtx;
 
 /* ------------------------------------------------------------------ */
-/* CRC-24                                                               */
+/* CRC-24 från dump1090                                                 */
 /* ------------------------------------------------------------------ */
 
-static uint32_t crc24(const uint8_t* data, uint32_t n) {
-  uint32_t crc = 0;
-  for (uint32_t i = 0; i < n; ++i) {
-    crc ^= (uint32_t)data[i] << 16;
-    for (int b = 0; b < 8; ++b) {
-      crc = (crc & 0x800000u) ? (crc << 1) ^ MODES_POLY : crc << 1;
-      crc &= 0xFFFFFFu;
+/* Parity table for MODE S Messages.
+ * The table contains 112 elements, every element corresponds to a bit set
+ * in the message, starting from the first bit of actual data after the
+ * preamble.
+ *
+ * For messages of 112 bit, the whole table is used.
+ * For messages of 56 bits only the last 56 elements are used.
+ */
+static uint32_t modes_checksum_table[112] = {
+0x3935ea, 0x1c9af5, 0xf1b77e, 0x78dbbf, 0xc397db, 0x9e31e9, 0xb0e2f0, 0x587178,
+0x2c38bc, 0x161c5e, 0x0b0e2f, 0xfa7d13, 0x82c48d, 0xbe9842, 0x5f4c21, 0xd05c14,
+0x682e0a, 0x341705, 0xe5f186, 0x72f8c3, 0xc68665, 0x9cb936, 0x4e5c9b, 0xd8d449,
+0x939020, 0x49c810, 0x24e408, 0x127204, 0x093902, 0x049c81, 0xfdb444, 0x7eda22,
+0x3f6d11, 0xe04c8c, 0x702646, 0x381323, 0xe3f395, 0x8e03ce, 0x4701e7, 0xdc7af7,
+0x91c77f, 0xb719bb, 0xa476d9, 0xadc168, 0x56e0b4, 0x2bfd53, 0xea04ad, 0x8af852,
+0x457c29, 0xdd4410, 0x6ea208, 0x375104, 0x1ba882, 0x0dd441, 0xf91024, 0x7c8812,
+0x3e4409, 0xe0d800, 0x706c00, 0x383600, 0x1c1b00, 0x0e0d80, 0x0706c0, 0x038360,
+0x01c1b0, 0x00e0d8, 0x00706c, 0x003836, 0x001c1b, 0xfff409, 0x000000, 0x000000,
+0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
+0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
+0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000
+};
+
+/* Compute the CRC syndrome of a Mode S message. */
+static uint32_t modesChecksum(unsigned char *msg, int bits) {
+    uint32_t crc = 0;
+    int offset = (bits == 112) ? 0 : (112-56);
+    int j;
+
+    for(j = 0; j < bits-24; j++) {
+        int byte = j/8;
+        int bit = j%8;
+        int bitmask = 1 << (7-bit);
+        if (msg[byte] & bitmask)
+            crc ^= modes_checksum_table[j+offset];
     }
-  }
-  return crc;
+
+    uint32_t rem = ((uint32_t)msg[(bits/8)-3] << 16) |
+          ((uint32_t)msg[(bits/8)-2] << 8) |
+           (uint32_t)msg[(bits/8)-1];
+    return (crc ^ rem) & 0x00FFFFFF;
+}
+
+/* Given the Downlink Format (DF) of the message, return the message length in bits. */
+static int modesMessageLenByType(int type) {
+    if (type == 16 || type == 17 || type == 18 || type == 19 ||
+        type == 20 || type == 21)
+        return MODES_LONG_MSG_BITS;
+    else
+        return MODES_SHORT_MSG_BITS;
+}
+
+/* Comparison function for qsort/bsearch on errorinfo by syndrome. */
+static int cmpErrorInfo(const void *a, const void *b) {
+    const struct errorinfo *ea = (const struct errorinfo *)a;
+    const struct errorinfo *eb = (const struct errorinfo *)b;
+    if (ea->syndrome < eb->syndrome) return -1;
+    if (ea->syndrome > eb->syndrome) return 1;
+    return 0;
+}
+
+static uint32_t crc24(const uint8_t* data, uint32_t n);
+
+static uint32_t modesComputeCRC(const uint8_t *msg, int bits) {
+    return crc24(msg, (bits/8) - 3);
+}
+
+static uint32_t ICAOCacheHashAddress(uint32_t a) {
+    a = ((a >> 16) ^ a) * 0x45d9f3b;
+    a = ((a >> 16) ^ a) * 0x45d9f3b;
+    a = ((a >> 16) ^ a);
+    return a & (MODES_ICAO_CACHE_LEN - 1u);
+}
+
+static void addRecentlySeenICAOAddr(AdsbCtx *ctx, uint32_t addr) {
+    uint32_t h = ICAOCacheHashAddress(addr);
+    ctx->icao_cache[h*2]   = addr;
+    ctx->icao_cache[h*2+1] = (uint32_t)time(NULL);
+}
+
+static int ICAOAddressWasRecentlySeen(AdsbCtx *ctx, uint32_t addr) {
+    uint32_t h = ICAOCacheHashAddress(addr);
+    uint32_t a = ctx->icao_cache[h*2];
+    uint32_t t = ctx->icao_cache[h*2+1];
+    return a && a == addr && time(NULL) - t <= MODES_ICAO_CACHE_TTL;
+}
+
+static int bruteForceAP(AdsbCtx *ctx, uint8_t *frame, uint32_t n_bits) {
+    uint32_t addr;
+    uint32_t crc = modesComputeCRC(frame, n_bits);
+    uint32_t lastbyte = (n_bits/8) - 1u;
+    uint8_t aux[MODES_LONG_MSG_BYTES];
+
+    memcpy(aux, frame, n_bits/8);
+    aux[lastbyte]   ^= crc & 0xffu;
+    aux[lastbyte-1] ^= (crc >> 8) & 0xffu;
+    aux[lastbyte-2] ^= (crc >> 16) & 0xffu;
+
+    addr = ((uint32_t)aux[lastbyte-2] << 16) |
+           ((uint32_t)aux[lastbyte-1] << 8) |
+            (uint32_t)aux[lastbyte];
+
+    return ICAOAddressWasRecentlySeen(ctx, addr);
+}
+
+/* Initialize the error correction syndrome table. */
+static void modesInitErrorInfo(void) {
+    unsigned char msg[MODES_LONG_MSG_BYTES];
+    int i, j, n;
+    uint32_t crc;
+
+    n = 0;
+    memset(bitErrorTable, 0, sizeof(bitErrorTable));
+    memset(msg, 0, MODES_LONG_MSG_BYTES);
+
+    for (i = 5; i < MODES_LONG_MSG_BITS; i++) {
+        int bytepos0 = (i >> 3);
+        int mask0 = 1 << (7 - (i & 7));
+        msg[bytepos0] ^= mask0;
+        crc = modesChecksum(msg, MODES_LONG_MSG_BITS);
+
+        bitErrorTable[n].syndrome = crc;
+        bitErrorTable[n].bits = 1;
+        bitErrorTable[n].pos[0] = i;
+        bitErrorTable[n].pos[1] = -1;
+        n++;
+
+        for (j = i + 1; j < MODES_LONG_MSG_BITS; j++) {
+            int bytepos1 = (j >> 3);
+            int mask1 = 1 << (7 - (j & 7));
+            msg[bytepos1] ^= mask1;
+            crc = modesChecksum(msg, MODES_LONG_MSG_BITS);
+
+            if (n >= NERRORINFO) break;
+
+            bitErrorTable[n].syndrome = crc;
+            bitErrorTable[n].bits = 2;
+            bitErrorTable[n].pos[0] = i;
+            bitErrorTable[n].pos[1] = j;
+            n++;
+
+            msg[bytepos1] ^= mask1;
+        }
+        msg[bytepos0] ^= mask0;
+    }
+
+    qsort(bitErrorTable, NERRORINFO, sizeof(struct errorinfo), cmpErrorInfo);
+}
+
+/* Fix bit errors using the syndrome table. */
+static int fixBitErrors(unsigned char *msg, int bits, int maxfix, int *fixedbits) {
+    struct errorinfo *pei;
+    struct errorinfo ei;
+    int bitpos, offset, i, res;
+
+    memset(&ei, 0, sizeof(struct errorinfo));
+    ei.syndrome = modesChecksum(msg, bits);
+
+    pei = bsearch(&ei, bitErrorTable, NERRORINFO,
+                  sizeof(struct errorinfo), cmpErrorInfo);
+    if (pei == NULL) return 0;
+
+    if (pei->bits > maxfix) return 0;
+
+    offset = MODES_LONG_MSG_BITS - bits;
+    for (i = 0; i < pei->bits; i++) {
+        bitpos = pei->pos[i] - offset;
+        if ((bitpos < 0) || (bitpos >= bits)) return 0;
+    }
+
+    res = 0;
+    for (i = 0; i < pei->bits; i++) {
+        bitpos = pei->pos[i] - offset;
+        msg[bitpos >> 3] ^= (1 << (7 - (bitpos & 7)));
+        if (fixedbits) {
+            fixedbits[res++] = bitpos;
+        } else {
+            res++;
+        }
+    }
+    return res;
 }
 
 /* ------------------------------------------------------------------ */
-/* Preambeldetektion                                                    */
+/* Preamble detection and decoding helpers                            */
 /* ------------------------------------------------------------------ */
 
-/* HIGH vid 0,2,7,9 — LÅG vid 1,3–6,8 och guard-intervall 10–15 */
+static uint32_t crc24(const uint8_t* data, uint32_t n) {
+    uint32_t crc = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        crc ^= (uint32_t)data[i] << 16;
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc & 0x800000u) ? (crc << 1) ^ 0xFFF409u : crc << 1;
+            crc &= 0xFFFFFFu;
+        }
+    }
+    return crc;
+}
+
 static int preamble_ok(const uint32_t* m) {
-  /* Lokal kontrast: varje hög-puls måste överstiga sina direkta grannar × 2 */
-  if (m[0] < m[1] * 2u) return 0;
-  if (m[2] < m[1] * 2u || m[2] < m[3] * 2u) return 0;
-  if (m[7] < m[6] * 2u || m[7] < m[8] * 2u) return 0;
-  if (m[9] < m[8] * 2u || m[9] < m[10] * 2u) return 0;
+    if (m[0] < m[1] * 2u) return 0;
+    if (m[2] < m[1] * 2u || m[2] < m[3] * 2u) return 0;
+    if (m[7] < m[6] * 2u || m[7] < m[8] * 2u) return 0;
+    if (m[9] < m[8] * 2u || m[9] < m[10] * 2u) return 0;
 
-  /* Pulslikhet: de fyra hög-pulserna ska vara inom 3:1 i effekt */
-  uint32_t hi_min = m[0], hi_max = m[0];
-  if (m[2] < hi_min) hi_min = m[2]; else if (m[2] > hi_max) hi_max = m[2];
-  if (m[7] < hi_min) hi_min = m[7]; else if (m[7] > hi_max) hi_max = m[7];
-  if (m[9] < hi_min) hi_min = m[9]; else if (m[9] > hi_max) hi_max = m[9];
-  if (hi_min * 3u < hi_max) return 0;
+    uint32_t hi_min = m[0], hi_max = m[0];
+    if (m[2] < hi_min) hi_min = m[2]; else if (m[2] > hi_max) hi_max = m[2];
+    if (m[7] < hi_min) hi_min = m[7]; else if (m[7] > hi_max) hi_max = m[7];
+    if (m[9] < hi_min) hi_min = m[9]; else if (m[9] > hi_max) hi_max = m[9];
+    if (hi_min * 3u < hi_max) return 0;
 
-  /* Summa-SNR: summan av 4 höga ≥ summan av 12 låga inkl. guard-intervall */
-  uint32_t h = m[0] + m[2] + m[7] + m[9];
-  uint32_t l = m[1] + m[3] + m[4] + m[5] + m[6] + m[8]
-             + m[10] + m[11] + m[12] + m[13] + m[14] + m[15];
-  return h >= l;
+    uint32_t h = m[0] + m[2] + m[7] + m[9];
+    uint32_t l = m[1] + m[3] + m[4] + m[5] + m[6] + m[8] +
+                 m[10] + m[11] + m[12] + m[13] + m[14] + m[15];
+    return h >= l;
+}
+
+static uint32_t sample_index(float base, float spb, float chip_off) {
+    float x = base * spb - chip_off;
+    return (x > 0.0f) ? (uint32_t)(x + 0.99999f) : 0u;
 }
 
 /* ------------------------------------------------------------------ */
@@ -105,25 +363,6 @@ static int preamble_ok(const uint32_t* m) {
 
 static int decode_bit(uint32_t s0, uint32_t s1) {
   return (s0 > s1) ? 1 : 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Ettbitars-felkorrigering                                             */
-/* ------------------------------------------------------------------ */
-
-/* Provar att vända en bit i taget; returnerar bitindex (0-based) om en
- * enda bit-vändning ger korrekt CRC-24, annars -1. */
-static int try_fix_single_bit(uint8_t* frame, uint32_t n_bytes) {
-  for (uint32_t bit = 0; bit < n_bytes * 8u; ++bit) {
-    frame[bit / 8u] ^= (uint8_t)(0x80u >> (bit % 8u));
-    uint32_t calc = crc24(frame, n_bytes - 3u);
-    uint32_t recv = ((uint32_t)frame[n_bytes - 3u] << 16) |
-                    ((uint32_t)frame[n_bytes - 2u] <<  8) |
-                     (uint32_t)frame[n_bytes - 1u];
-    if (calc == recv) return (int)bit;
-    frame[bit / 8u] ^= (uint8_t)(0x80u >> (bit % 8u)); /* återställ */
-  }
-  return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -272,7 +511,8 @@ static const char* tc_type(uint32_t tc) {
  *   kv JSON  — maskinavläsbar, inkl. råhex och avkodade fält              */
 static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                        double freq_hz, uint64_t unix_ms,
-                       MrEmitFn emit_fn, void* user_data) {
+                       MrEmitFn emit_fn, void* user_data,
+                       int corrected, int ap_recovered) {
   /* Råhex — läggs i kv */
   char* raw = (char*)malloc(n_bytes * 2u + 1u);
   if (!raw) return;
@@ -292,6 +532,14 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
                       "{\"df\":\"%u\",\"icao\":\"%06X\",\"country\":\"%s\","
                       "\"bits\":\"%u\",\"raw\":\"%s\"",
                       df, icao, cc, n_bytes * 8u, raw);
+  if (corrected > 0) {
+    kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                     ",\"corrected_bits\":%d", corrected);
+  }
+  if (ap_recovered) {
+    kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
+                     ",\"ap_recovered\":1");
+  }
   int tpos = snprintf(text, sizeof(text), "[%s] ", cc);
 
   if ((df == 17u || df == 18u) && n_bytes == 14u) {
@@ -412,6 +660,9 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
       tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
                        "TC%u (%s)", tc, tc_type(tc));
     }
+    if (df == 18u) {
+      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, " [DF18]");
+    }
   } else {
     /* Ej DF17/18 — avkoda standardformat, visa "DF-n okänt" för övriga */
     switch (df) {
@@ -490,13 +741,14 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->mag_cap = FRAME_SAMPS + 65536u;
   ctx->mag = (uint32_t*)malloc(ctx->mag_cap * sizeof(uint32_t));
   if (!ctx->mag) { free(ctx); return NULL; }
-  
+  ctx->error_info_initialized = 0;
+
   // Debug: notify plugin initialization
   const char* debug_env = getenv("MR_PLUGIN_DEBUG");
   if (debug_env && debug_env[0] != '0') {
     fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.8-2.2 Msps)\n");
   }
-  
+
   return (MrPluginCtx*)ctx;
 }
 
@@ -526,6 +778,12 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   if (!raw || !iq || !num_pairs || !emit_fn) return;
   AdsbCtx* ctx = (AdsbCtx*)raw;
 
+  /* Initialize error correction table if not done */
+  if (!ctx->error_info_initialized) {
+    modesInitErrorInfo();
+    ctx->error_info_initialized = 1;
+  }
+
   /* Kräver ~2 Msps (acceptera 1.8–2.2 Msps) */
   if (sr < 1800000u || sr > 2200000u) {
     const char* debug_env = getenv("MR_PLUGIN_DEBUG");
@@ -545,145 +803,141 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* IQ → magnitud (I²+Q²), undviker heltalsspill via int32_t */
+  /* IQ → magnitud (I²+Q²) */
   for (uint32_t n = 0; n < num_pairs; ++n) {
     int32_t i = (int32_t)iq[n * 2u];
     int32_t q = (int32_t)iq[n * 2u + 1u];
     ctx->mag[ctx->mag_len++] = (uint32_t)(i * i) + (uint32_t)(q * q);
   }
 
-  /* Samplar per bit ur faktisk sample rate */
   float spb = (float)sr * 1e-6f;
-
-  /* Vid sr > 2 Msps sträcker sig puls 1 (0–0.5 µs) över sample 1 (t=0.488 µs < 0.5 µs),
-   * vilket gör att preamble_ok matchar 1 sampel sent: p = P_true + 1.
-   * chip_off kompenserar för att datapekaren (p + PREAMBLE_SAMPS) hamnar
-   * (PREAMBLE_SAMPS + det_off) − 8×spb samplar efter den verkliga datastarten. */
-  uint32_t det_off  = (sr > 2000000u) ? 1u : 0u;
-  float    chip_off = (float)(PREAMBLE_SAMPS + det_off) - 8.0f * spb;
-
-  /* Chip-sampling: s0 = första sampel i chip 1, s1 = första sampel i chip 2.
-   * Använder ceil(base) = floor(base + 0.99999) för att undvika <math.h>. */
-#define CHIP_S0(b) ({ float _b = (float)(b) * spb - chip_off; \
-                      (_b > 0.0f) ? (uint32_t)(_b + 0.99999f) : 0u; })
-#define CHIP_S1(b) ({ float _b = (float)(b) * spb - chip_off + spb * 0.5f; \
-                      (_b > 0.0f) ? (uint32_t)(_b + 0.99999f) : 0u; })
-
+  uint32_t det_off = (sr > 2000000u) ? 1u : 0u;
+  float chip_off = (float)(PREAMBLE_SAMPS + det_off) - 8.0f * spb;
   uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
 
-  /* Sök efter preamblar och avkoda ramar */
   uint32_t p = 0;
   while (p + min_frame <= ctx->mag_len) {
-    if (!preamble_ok(ctx->mag + p)) { ++p; continue; }
-    ++ctx->preamble_count;
+    if (!preamble_ok(ctx->mag + p)) {
+      ++p;
+      continue;
+    }
 
+    ++ctx->preamble_count;
     const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
 
-    /* DF-fält (5 bitar) */
     uint32_t df5 = 0;
-    for (int b = 0; b < 5; ++b)
-      df5 = (df5 << 1) | (uint32_t)decode_bit(data[CHIP_S0(b)], data[CHIP_S1(b)]);
+    for (int b = 0; b < 5; ++b) {
+      uint32_t s0 = data[sample_index((float)b, spb, chip_off)];
+      uint32_t s1 = data[sample_index((float)b, spb, chip_off + spb * 0.5f)];
+      df5 = (df5 << 1u) | (uint32_t)decode_bit(s0, s1);
+    }
 
-    uint32_t n_bits  = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
+    uint32_t n_bits = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
     uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
-
-    /* Vänta om vi inte har tillräckligt med samplar för hela ramen */
     if (p + n_samps > ctx->mag_len) break;
 
-    /* Avkoda alla bitar */
-    uint8_t frame[LONG_BITS / 8u];
+    uint8_t frame[MODES_LONG_MSG_BYTES];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      if (decode_bit(data[CHIP_S0(bit)], data[CHIP_S1(bit)]))
+      uint32_t s0 = data[sample_index((float)bit, spb, chip_off)];
+      uint32_t s1 = data[sample_index((float)bit, spb, chip_off + spb * 0.5f)];
+      if (decode_bit(s0, s1))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
 
     uint32_t n_bytes = n_bits / 8u;
-
-    /* CRC-24-validering */
     uint32_t crc_calc = crc24(frame, n_bytes - 3u);
     uint32_t crc_fram = ((uint32_t)frame[n_bytes - 3u] << 16) |
                         ((uint32_t)frame[n_bytes - 2u] <<  8) |
                          (uint32_t)frame[n_bytes - 1u];
 
+    int corrected = 0;
+    int ap_recovered = 0;
+    if (crc_calc != crc_fram) {
+      int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, NULL);
+      if (fixed > 0) {
+        corrected = fixed;
+        crc_calc = crc24(frame, n_bytes - 3u);
+      } else {
+        uint32_t df = (frame[0] >> 3) & 0x1Fu;
+        if (df == 0u || df == 4u || df == 5u || df == 16u ||
+            df == 20u || df == 21u || df == 24u) {
+          if (bruteForceAP(ctx, frame, n_bits)) {
+            ap_recovered = 1;
+            corrected = -1;
+          }
+        }
+      }
+    }
+
     uint32_t df = (frame[0] >> 3) & 0x1Fu;
-    if (crc_calc == crc_fram) {
-      ++ctx->crc_ok_count;
-      if (df == 17u) ++ctx->df17_ok_count;
-      
-      // Debug: log raw frame on successful decode
+    if (crc_calc == crc_fram || ap_recovered) {
+      ctx->crc_ok_count++;
+      if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
+      if (ap_recovered) ctx->crc_ok_ap_count++;
+      if (df == 17u) ctx->df17_ok_count++;
+
+      uint32_t icao = ((uint32_t)frame[1] << 16) |
+                      ((uint32_t)frame[2] <<  8) |
+                       (uint32_t)frame[3];
+      if (df == 17u || df == 18u) {
+        addRecentlySeenICAOAddr(ctx, icao);
+      }
+
       const char* debug_env = getenv("MR_PLUGIN_DEBUG");
       if (debug_env && debug_env[0] != '0') {
-        uint32_t icao = ((uint32_t)frame[1] << 16) |
-                        ((uint32_t)frame[2] <<  8) |
-                         (uint32_t)frame[3];
-        fprintf(stderr, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u hex=",
-                df, icao, n_bytes);
+        fprintf(stderr, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u", df, icao, n_bytes);
+        if (corrected > 0) fprintf(stderr, " corrected=%d", corrected);
+        if (ap_recovered) fprintf(stderr, " ap_recovered=1");
+        if (df == 17u && ap_recovered) fprintf(stderr, " [DF17 AP RECOVERED]");
+        if (df == 18u) fprintf(stderr, " [DF18]");
+        fprintf(stderr, " hex=");
         for (uint32_t x = 0; x < n_bytes; ++x)
           fprintf(stderr, "%02X", frame[x]);
         fprintf(stderr, "\n");
       }
-      
-      emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
+
+      emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
       p += n_samps - 2u;
     } else {
-      /* Försök rätta ett enskilt bitfel */
-      int fixed_bit = try_fix_single_bit(frame, n_bytes);
-      if (fixed_bit >= 0) {
-        ++ctx->crc_ok_corrected_count;
-        ++ctx->crc_ok_count;
-        df = (frame[0] >> 3) & 0x1Fu;
-        if (df == 17u) ++ctx->df17_ok_count;
-        
-        // Debug: log raw frame on corrected decode
-        const char* debug_env = getenv("MR_PLUGIN_DEBUG");
-        if (debug_env && debug_env[0] != '0') {
-          uint32_t icao = ((uint32_t)frame[1] << 16) |
-                          ((uint32_t)frame[2] <<  8) |
-                           (uint32_t)frame[3];
-          fprintf(stderr, "[adsb_demod] CORRECTED: DF=%u ICAO=%06X bit=%d bytes=%u hex=",
-                  df, icao, fixed_bit, n_bytes);
+      if (df == 17u || df == 18u) {
+        if ((df == 17u && ctx->df17_fail_count < 5u) ||
+            (df == 18u && ctx->df18_fail_count < 5u)) {
+          fprintf(stderr, "[ADS-B DBG] DF%u #%llu sr=%u spb=%.3f: ",
+                  df,
+                  (unsigned long long)((df == 17u) ? ctx->df17_fail_count : ctx->df18_fail_count) + 1u,
+                  sr, (double)spb);
           for (uint32_t x = 0; x < n_bytes; ++x)
             fprintf(stderr, "%02X", frame[x]);
-          fprintf(stderr, "\n");
+          fprintf(stderr, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
         }
-        
-        emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
-        p += n_samps - 2u;
-      } else {
-        if (df == 17u) {
-          if (ctx->df17_fail_count < 5u) {
-            fprintf(stderr, "[ADS-B DBG] DF17 #%llu sr=%u spb=%.3f: ",
-                    (unsigned long long)ctx->df17_fail_count + 1u, sr, (double)spb);
-            for (uint32_t x = 0; x < n_bytes; ++x)
-              fprintf(stderr, "%02X", frame[x]);
-            fprintf(stderr, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
-          }
-          ++ctx->df17_fail_count;
-        }
-        ++ctx->crc_fail_count;
-        ++p;
+        if (df == 17u) ++ctx->df17_fail_count;
+        if (df == 18u) ++ctx->df18_fail_count;
       }
+      ++ctx->crc_fail_count;
+      ++p;
     }
   }
 
-  /* Skriv ut statistik var 10:e sekund */
+  uint32_t keep = ctx->mag_len - p;
+  if (keep > 0u) {
+    memmove(ctx->mag, ctx->mag + p, keep * sizeof(uint32_t));
+  }
+  ctx->mag_len = keep;
+
   if (unix_ms - ctx->last_stats_ms >= 10000u) {
     ctx->last_stats_ms = unix_ms;
     fprintf(stderr,
-            "[ADS-B] preamble=%llu  crc_ok=%llu(+%llu korr)  crc_fail=%llu"
-            "  df17_ok=%llu  df17_fail=%llu\n",
+            "[ADS-B] preamble=%llu  crc_ok=%llu(+%llu korr +%llu ap)  crc_fail=%llu"
+            "  df17_ok=%llu  df17_fail=%llu  df18_ok=%llu  df18_fail=%llu\n",
             (unsigned long long)ctx->preamble_count,
             (unsigned long long)ctx->crc_ok_count,
             (unsigned long long)ctx->crc_ok_corrected_count,
+            (unsigned long long)ctx->crc_ok_ap_count,
             (unsigned long long)ctx->crc_fail_count,
             (unsigned long long)ctx->df17_ok_count,
-            (unsigned long long)ctx->df17_fail_count);
+            (unsigned long long)ctx->df17_fail_count,
+            (unsigned long long)ctx->df18_ok_count,
+            (unsigned long long)ctx->df18_fail_count);
   }
-
-  /* Behåll obearbetade samplar för nästa block */
-  uint32_t keep = (p < ctx->mag_len) ? (ctx->mag_len - p) : 0u;
-  if (p > 0u && keep > 0u)
-    memmove(ctx->mag, ctx->mag + p, keep * sizeof(uint32_t));
-  ctx->mag_len = keep;
 }
