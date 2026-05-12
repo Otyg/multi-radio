@@ -129,7 +129,13 @@ typedef struct {
   uint64_t  last_stats_ms;
   uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
   int      error_info_initialized;
+  int      debug_enabled;
+  FILE*    debug_file;
 } AdsbCtx;
+
+static FILE* debug_out(AdsbCtx* ctx) {
+  return ctx->debug_file ? ctx->debug_file : stderr;
+}
 
 /* ------------------------------------------------------------------ */
 /* CRC-24 från dump1090                                                 */
@@ -825,11 +831,26 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->mag = (uint32_t*)malloc(ctx->mag_cap * sizeof(uint32_t));
   if (!ctx->mag) { free(ctx); return NULL; }
   ctx->error_info_initialized = 0;
+  ctx->debug_enabled = 0;
+  ctx->debug_file = NULL;
 
-  // Debug: notify plugin initialization
   const char* debug_env = getenv("MR_PLUGIN_DEBUG");
-  if (debug_env && debug_env[0] != '0') {
-    fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.5-2.5 Msps)\n");
+  const char* debug_file_path = getenv("MR_PLUGIN_DEBUG_FILE");
+  if (debug_file_path && debug_file_path[0] != '\0') {
+    ctx->debug_file = fopen(debug_file_path, "a");
+    if (!ctx->debug_file) {
+      fprintf(stderr, "[adsb_demod] WARNING: could not open debug file '%s'\n", debug_file_path);
+    }
+  }
+  ctx->debug_enabled = (debug_env && debug_env[0] != '0') || (ctx->debug_file != NULL);
+
+  if (ctx->debug_enabled) {
+    FILE* out = debug_out(ctx);
+    fprintf(out, "[adsb_demod] Plugin initialized (sample rate 1.5-2.5 Msps)\n");
+    if (ctx->debug_file) {
+      fprintf(out, "[adsb_demod] Logging debug to file: %s\n", debug_file_path);
+    }
+    fflush(out);
   }
 
   return (MrPluginCtx*)ctx;
@@ -838,6 +859,10 @@ MrPluginCtx* mr_plugin_create(void) {
 void mr_plugin_destroy(MrPluginCtx* raw) {
   if (!raw) return;
   AdsbCtx* ctx = (AdsbCtx*)raw;
+  if (ctx->debug_file) {
+    fclose(ctx->debug_file);
+    ctx->debug_file = NULL;
+  }
   free(ctx->mag);
   free(ctx);
 }
@@ -867,20 +892,23 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->error_info_initialized = 1;
   }
 
-  const char* debug_env = getenv("MR_PLUGIN_DEBUG");
-  
+  FILE* debug_file = debug_out(ctx);
+  int debug_enabled = ctx->debug_enabled;
+
   static uint32_t last_sr = 0u;
   if (sr != last_sr) {
     last_sr = sr;
-    if (debug_env && debug_env[0] != '0') {
-      fprintf(stderr, "[adsb_demod] Sample rate: %u Hz (%.3f Msps)\n", sr, (double)sr / 1e6);
+    if (debug_enabled) {
+      fprintf(debug_file, "[adsb_demod] Sample rate: %u Hz (%.3f Msps)\n", sr, (double)sr / 1e6);
+      fflush(debug_file);
     }
   }
 
   /* Kräver ~2 Msps (acceptera 1.5–2.5 Msps för mer donglar-flexibilitet) */
   if (sr < 1500000u || sr > 2500000u) {
-    if (debug_env && debug_env[0] != '0') {
-      fprintf(stderr, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.5-2.5 Msps)\n", sr);
+    if (debug_enabled) {
+      fprintf(debug_file, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.5-2.5 Msps)\n", sr);
+      fflush(debug_file);
     }
     return;
   }
@@ -904,135 +932,161 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  uint32_t min_frame = 19u + (14u * 19u) + 1u;  /* max long frame length including phase 7 extra sample */
+  uint32_t min_frame = 320u;  /* safe maximum sample window for long messages */
 
   uint32_t p = 0;
-  while (p + 19u < ctx->mag_len) {
+  while (p + min_frame <= ctx->mag_len) {
     int best_phase = -1;
     uint32_t best_high = 0u;
-    
+
     for (int ph = 3; ph <= 7; ++ph) {
       if (preamble_ok_phase(ctx->mag + p, ph, &best_high)) {
         best_phase = ph;
         break;
       }
     }
-    
+
     if (best_phase < 0) {
       ++p;
       continue;
     }
 
     ++ctx->preamble_count;
-    
-    const uint32_t* msg_start = ctx->mag + p + 19u + ((best_phase == 7) ? 1u : 0u);
-    
-    int phase_idx = best_phase - 3;  /* map phase 3-7 to index 0-4 */
-    
-    uint8_t byte0 = 0u;
+    if (debug_enabled) {
+      fprintf(debug_file, "[adsb_demod] preamble found at idx=%u best_phase=%d high=%u\n", p, best_phase, best_high);
+      fflush(debug_file);
+    }
+
+    uint32_t msg_offset = (best_phase >= 4) ? 20u : 19u;
+    const uint32_t* pPtr = ctx->mag + p + msg_offset;
+    int phase = (best_phase + 1) % 5;
+
+    uint8_t frame[MODES_LONG_MSG_BYTES];
+    const uint32_t* last_ptr = pPtr;
+
     {
-      const uint32_t* ptr = msg_start;
-      const uint32_t* offsets = bit_offsets[phase_idx];
-      const int* funcs = bit_funcs[phase_idx];
-      
+      const uint32_t* ptr = pPtr;
+      const uint32_t* offsets = bit_offsets[phase];
+      const int* funcs = bit_funcs[phase];
+      uint8_t byte0 = 0u;
       for (int b = 0; b < 8; ++b) {
         int corr = apply_correlator(funcs[b], ptr + offsets[b]);
         if (corr > 0) byte0 |= (uint8_t)(0x80u >> b);
       }
-    }
-    
-    uint32_t df = (byte0 >> 3u) & 0x1Fu;
-    uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
-    uint32_t n_bits = n_bytes * 8u;
-    uint32_t frame_len = 19u + (n_bytes * 19u) + ((best_phase == 7) ? 1u : 0u);
-    
-    if (p + frame_len > ctx->mag_len) break;
-    
-    uint8_t frame[MODES_LONG_MSG_BYTES];
-    frame[0] = byte0;
-    
-    for (uint32_t i = 1; i < n_bytes; ++i) {
-      const uint32_t* ptr = msg_start + i * 19u;
-      uint8_t byte_val = 0u;
-      const uint32_t* offsets = bit_offsets[phase_idx];
-      const int* funcs = bit_funcs[phase_idx];
-      
-      for (int b = 0; b < 8; ++b) {
-        int corr = apply_correlator(funcs[b], ptr + offsets[b]);
-        if (corr > 0) byte_val |= (uint8_t)(0x80u >> b);
+      frame[0] = byte0;
+      uint32_t df = (byte0 >> 3u) & 0x1Fu;
+      uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
+      uint32_t n_bits = n_bytes * 8u;
+
+      if (n_bytes > MODES_LONG_MSG_BYTES) {
+        ++p;
+        continue;
       }
-      frame[i] = byte_val;
-    }
 
-    uint32_t crc_calc = crc24(frame, n_bytes - 3u);
-    uint32_t crc_fram = ((uint32_t)frame[n_bytes - 3u] << 16) |
-                        ((uint32_t)frame[n_bytes - 2u] <<  8) |
-                         (uint32_t)frame[n_bytes - 1u];
+      if (debug_enabled) {
+        fprintf(debug_file, "[adsb_demod] decode header DF=%u n_bytes=%u first_phase=%d msg_offset=%u\n",
+                df, n_bytes, phase, msg_offset);
+        fflush(debug_file);
+      }
 
-    int corrected = 0;
-    int ap_recovered = 0;
-    if (crc_calc != crc_fram) {
-      int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, NULL);
-      if (fixed > 0) {
-        corrected = fixed;
-        crc_calc = crc24(frame, n_bytes - 3u);
-      } else {
-        if (df == 0u || df == 4u || df == 5u || df == 16u ||
-            df == 20u || df == 21u || df == 24u) {
-          if (bruteForceAP(ctx, frame, n_bits)) {
-            ap_recovered = 1;
-            corrected = -1;
+      if (phase == 4) pPtr += 20u;
+      else pPtr += 19u;
+      phase = (phase + 1) % 5;
+
+      for (uint32_t i = 1; i < n_bytes; ++i) {
+        ptr = pPtr;
+        last_ptr = ptr;
+        const uint32_t* offsets = bit_offsets[phase];
+        const int* funcs = bit_funcs[phase];
+        uint8_t byte_val = 0u;
+        for (int b = 0; b < 8; ++b) {
+          int corr = apply_correlator(funcs[b], ptr + offsets[b]);
+          if (corr > 0) byte_val |= (uint8_t)(0x80u >> b);
+        }
+        frame[i] = byte_val;
+        if (phase == 4) pPtr += 20u;
+        else pPtr += 19u;
+        phase = (phase + 1) % 5;
+      }
+
+      uint32_t frame_len = (uint32_t)(last_ptr - (ctx->mag + p)) + 18u;
+      if (p + frame_len > ctx->mag_len) {
+        break;
+      }
+
+      uint32_t crc_calc = crc24(frame, n_bytes - 3u);
+      uint32_t crc_fram = ((uint32_t)frame[n_bytes - 3u] << 16) |
+                          ((uint32_t)frame[n_bytes - 2u] <<  8) |
+                           (uint32_t)frame[n_bytes - 1u];
+
+      int corrected = 0;
+      int ap_recovered = 0;
+      if (crc_calc != crc_fram) {
+        int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, NULL);
+        if (fixed > 0) {
+          corrected = fixed;
+          crc_calc = crc24(frame, n_bytes - 3u);
+        } else {
+          if (df == 0u || df == 4u || df == 5u || df == 16u ||
+              df == 20u || df == 21u || df == 24u) {
+            if (bruteForceAP(ctx, frame, n_bits)) {
+              ap_recovered = 1;
+              corrected = -1;
+            }
           }
         }
       }
-    }
-    if (crc_calc == crc_fram || ap_recovered) {
-      ctx->crc_ok_count++;
-      if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
-      if (ap_recovered) ctx->crc_ok_ap_count++;
-      if (df == 17u) ctx->df17_ok_count++;
+      if (crc_calc == crc_fram || ap_recovered) {
+        ctx->crc_ok_count++;
+        if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
+        if (ap_recovered) ctx->crc_ok_ap_count++;
+        if (df == 17u) ctx->df17_ok_count++;
 
-      uint32_t icao = ((uint32_t)frame[1] << 16) |
-                      ((uint32_t)frame[2] <<  8) |
-                       (uint32_t)frame[3];
-      if (df == 17u || df == 18u) {
-        addRecentlySeenICAOAddr(ctx, icao);
-      }
-
-      const char* debug_env = getenv("MR_PLUGIN_DEBUG");
-      if (debug_env && debug_env[0] != '0') {
-        fprintf(stderr, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u", df, icao, n_bytes);
-        if (corrected > 0) fprintf(stderr, " corrected=%d", corrected);
-        if (ap_recovered) fprintf(stderr, " ap_recovered=1");
-        if (df == 17u && ap_recovered) fprintf(stderr, " [DF17 AP RECOVERED]");
-        if (df == 18u) fprintf(stderr, " [DF18]");
-        fprintf(stderr, " hex=");
-        for (uint32_t x = 0; x < n_bytes; ++x)
-          fprintf(stderr, "%02X", frame[x]);
-        fprintf(stderr, "\n");
-      }
-
-      emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
-      p += frame_len;
-    } else {
-      if (df == 17u || df == 18u) {
-        if ((df == 17u && ctx->df17_fail_count < 5u) ||
-            (df == 18u && ctx->df18_fail_count < 5u)) {
-          fprintf(stderr, "[ADS-B DBG] DF%u #%llu sr=%u spb=%.3f: ",
-                  df,
-                  (unsigned long long)((df == 17u) ? ctx->df17_fail_count : ctx->df18_fail_count) + 1u,
-                  sr, (double)spb);
-          for (uint32_t x = 0; x < n_bytes; ++x)
-            fprintf(stderr, "%02X", frame[x]);
-          fprintf(stderr, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
+        uint32_t icao = ((uint32_t)frame[1] << 16) |
+                        ((uint32_t)frame[2] <<  8) |
+                         (uint32_t)frame[3];
+        if (df == 17u || df == 18u) {
+          addRecentlySeenICAOAddr(ctx, icao);
         }
-        if (df == 17u) ++ctx->df17_fail_count;
-        if (df == 18u) ++ctx->df18_fail_count;
+
+        if (debug_enabled) {
+          fprintf(debug_file, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u", df, icao, n_bytes);
+          if (corrected > 0) fprintf(debug_file, " corrected=%d", corrected);
+          if (ap_recovered) fprintf(debug_file, " ap_recovered=1");
+          if (df == 17u && ap_recovered) fprintf(debug_file, " [DF17 AP RECOVERED]");
+          if (df == 18u) fprintf(debug_file, " [DF18]");
+          fprintf(debug_file, " hex=");
+          for (uint32_t x = 0; x < n_bytes; ++x)
+            fprintf(debug_file, "%02X", frame[x]);
+          fprintf(debug_file, "\n");
+          fflush(debug_file);
+        }
+
+        emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
+        p += frame_len;
+        continue;
+      } else {
+        if (df == 17u || df == 18u) {
+          if ((df == 17u && ctx->df17_fail_count < 5u) ||
+              (df == 18u && ctx->df18_fail_count < 5u)) {
+            FILE* fail_out = debug_enabled ? debug_file : stderr;
+            fprintf(fail_out, "[ADS-B DBG] DF%u #%llu sr=%u spb=%.3f: ",
+                    df,
+                    (unsigned long long)((df == 17u) ? ctx->df17_fail_count : ctx->df18_fail_count) + 1u,
+                    sr, (double)spb);
+            for (uint32_t x = 0; x < n_bytes; ++x)
+              fprintf(fail_out, "%02X", frame[x]);
+            fprintf(fail_out, "  calc=%06X rx=%06X\n", crc_calc, crc_fram);
+            if (debug_enabled) fflush(fail_out);
+          }
+          if (df == 17u) ++ctx->df17_fail_count;
+          if (df == 18u) ++ctx->df18_fail_count;
+        }
+        ++ctx->crc_fail_count;
+        ++p;
+        continue;
       }
-      ++ctx->crc_fail_count;
-      ++p;
     }
-    p += frame_len;
   }
 
   if (p > 0u && p < ctx->mag_len) {
