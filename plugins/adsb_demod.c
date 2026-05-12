@@ -25,6 +25,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <liquid/liquid.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -129,9 +130,7 @@ typedef struct {
   uint64_t  last_stats_ms;
   uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
   int      error_info_initialized;
-  uint32_t mag_peak;            /* Peak magnitude for adaptive scaling */
-  uint32_t mag_sum;             /* Running sum for RMS estimation */
-  uint32_t mag_count;           /* Sample count for averaging */
+  agc_crcf agc;                 /* libliquid AGC for adaptive gain control */
 } AdsbCtx;
 
 /* ------------------------------------------------------------------ */
@@ -745,11 +744,16 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->mag = (uint32_t*)malloc(ctx->mag_cap * sizeof(uint32_t));
   if (!ctx->mag) { free(ctx); return NULL; }
   ctx->error_info_initialized = 0;
+  
+  /* Create libliquid AGC for automatic gain control */
+  ctx->agc = agc_crcf_create();
+  if (!ctx->agc) { free(ctx->mag); free(ctx); return NULL; }
+  agc_crcf_set_bandwidth(ctx->agc, 1e-4f);  /* Slow convergence for stable tracking */
 
   // Debug: notify plugin initialization
   const char* debug_env = getenv("MR_PLUGIN_DEBUG");
   if (debug_env && debug_env[0] != '0') {
-    fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.8-2.2 Msps)\n");
+    fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.5-2.5 Msps, AGC enabled)\n");
   }
 
   return (MrPluginCtx*)ctx;
@@ -758,6 +762,7 @@ MrPluginCtx* mr_plugin_create(void) {
 void mr_plugin_destroy(MrPluginCtx* raw) {
   if (!raw) return;
   AdsbCtx* ctx = (AdsbCtx*)raw;
+  if (ctx->agc) agc_crcf_destroy(ctx->agc);
   free(ctx->mag);
   free(ctx);
 }
@@ -806,38 +811,16 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* IQ → magnitud (I²+Q²) med adaptiv skalning */
+  /* Apply libliquid AGC to IQ samples, then compute magnitude */
   for (uint32_t n = 0; n < num_pairs; ++n) {
-    int32_t i = (int32_t)iq[n * 2u];
-    int32_t q = (int32_t)iq[n * 2u + 1u];
-    uint32_t mag = (uint32_t)(i * i) + (uint32_t)(q * q);
+    float complex samp = (float)iq[n * 2u] + _Complex_I * (float)iq[n * 2u + 1u];
+    float complex agc_out;
+    agc_crcf_execute(ctx->agc, samp, &agc_out);
     
-    /* Track peak magnitude for adaptive scaling */
-    if (mag > ctx->mag_peak) ctx->mag_peak = mag;
-    ctx->mag_sum += mag;
-    ctx->mag_count++;
-    
+    float i = crealf(agc_out);
+    float q = cimagf(agc_out);
+    uint32_t mag = (uint32_t)(i * i + q * q);
     ctx->mag[ctx->mag_len++] = mag;
-  }
-  
-  /* Adaptiv normalisering var 4096:e sampel för svaga signaler */
-  uint32_t scale = 1u;
-  if (ctx->mag_count >= 4096u) {
-    uint32_t avg_mag = ctx->mag_sum / ctx->mag_count;
-    uint32_t target_avg = 5000000u;  /* Målvärde för genomsnittlig magnitud */
-    if (avg_mag > 0u && avg_mag < target_avg) {
-      scale = (target_avg / avg_mag);  /* 32-bitars multiplikator */
-      if (scale > 256u) scale = 256u;   /* Cap till max 256× */
-    }
-    ctx->mag_peak = 0u;
-    ctx->mag_sum = 0u;
-    ctx->mag_count = 0u;
-  }
-  
-  if (scale > 1u) {
-    for (uint32_t i = 0; i < ctx->mag_len; ++i) {
-      ctx->mag[i] *= scale;
-    }
   }
 
   float spb = (float)sr * 1e-6f;
