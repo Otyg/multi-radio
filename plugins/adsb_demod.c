@@ -389,7 +389,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         return 0;
     }
 
-    if (base_signal < 2 * base_noise)
+    if (base_signal * 2 < 3 * base_noise)
         return 0;
 
     if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
