@@ -339,6 +339,11 @@ static uint32_t sample_at_us(float usec, float spb) {
     return (x > 0.0f) ? (uint32_t)(x + 0.5f) : 0u;
 }
 
+static uint32_t sample_index(float base, float spb, float chip_off) {
+    float x = base * spb - chip_off;
+    return (x > 0.0f) ? (uint32_t)(x + 0.99999f) : 0u;
+}
+
 static int preamble_ok(const uint32_t* m, float spb) {
     uint32_t s[16];
     for (int i = 0; i < 16; ++i)
@@ -830,7 +835,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  uint32_t min_frame = sample_at_us((float)LONG_BITS + 8.0f, spb) + 2u;
+  uint32_t det_off = (sr > 2000000u) ? 1u : 0u;
+  float chip_off = (float)(PREAMBLE_SAMPS + det_off) - 8.0f * spb;
+  uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
 
   uint32_t p = 0;
   while (p + min_frame <= ctx->mag_len) {
@@ -840,24 +847,24 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     }
 
     ++ctx->preamble_count;
-    const uint32_t* data = ctx->mag + p + sample_at_us(8.0f, spb);
+    const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
 
     uint32_t df5 = 0;
     for (int b = 0; b < 5; ++b) {
-      uint32_t s0 = data[sample_at_us((float)b, spb)];
-      uint32_t s1 = data[sample_at_us((float)b + 0.5f, spb)];
+      uint32_t s0 = data[sample_index((float)b, spb, chip_off)];
+      uint32_t s1 = data[sample_index((float)b, spb, chip_off + spb * 0.5f)];
       df5 = (df5 << 1u) | (uint32_t)decode_bit(s0, s1);
     }
 
     uint32_t n_bits = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
-    uint32_t n_samps = sample_at_us((float)n_bits + 8.0f, spb) + 2u;
+    uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
     if (p + n_samps > ctx->mag_len) break;
 
     uint8_t frame[MODES_LONG_MSG_BYTES];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      uint32_t s0 = data[sample_at_us((float)bit, spb)];
-      uint32_t s1 = data[sample_at_us((float)bit + 0.5f, spb)];
+      uint32_t s0 = data[sample_index((float)bit, spb, chip_off)];
+      uint32_t s1 = data[sample_index((float)bit, spb, chip_off + spb * 0.5f)];
       if (decode_bit(s0, s1))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
