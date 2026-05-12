@@ -125,7 +125,9 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
     out.dwell_ms = 500;
   }
   if (out.sample_rate_hz == 0) {
-    out.sample_rate_hz = kDefaultSampleRateHz;
+    out.sample_rate_hz = (out.fixed_modulation == Modulation::kAdsbMod)
+                             ? 2400000u
+                             : kDefaultSampleRateHz;
   }
   if (out.channel_bandwidth_hz == 0) {
     out.channel_bandwidth_hz = kDefaultChannelBandwidthHz;

@@ -846,7 +846,7 @@ MrPluginCtx* mr_plugin_create(void) {
 
   if (ctx->debug_enabled) {
     FILE* out = debug_out(ctx);
-    fprintf(out, "[adsb_demod] Plugin initialized (sample rate 1.5-2.5 Msps)\n");
+    fprintf(out, "[adsb_demod] Plugin initialized (nominal 2.4 Msps, accepts 2.3-2.5 Msps)\n");
     if (ctx->debug_file) {
       fprintf(out, "[adsb_demod] Logging debug to file: %s\n", debug_file_path);
     }
@@ -904,10 +904,10 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     }
   }
 
-  /* Kräver ~2 Msps (acceptera 1.5–2.5 Msps för mer donglar-flexibilitet) */
-  if (sr < 1500000u || sr > 2500000u) {
+  /* Kräver ~2.4 Msps (acceptera 2.3–2.5 Msps) */
+  if (sr < 2300000u || sr > 2500000u) {
     if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.5-2.5 Msps)\n", sr);
+      fprintf(debug_file, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected ~2.4 Msps)\n", sr);
       fflush(debug_file);
     }
     return;
