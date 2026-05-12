@@ -25,7 +25,6 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <liquid/liquid.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -130,7 +129,6 @@ typedef struct {
   uint64_t  last_stats_ms;
   uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
   int      error_info_initialized;
-  agc_crcf agc;                 /* libliquid AGC for adaptive gain control */
 } AdsbCtx;
 
 /* ------------------------------------------------------------------ */
@@ -744,16 +742,11 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->mag = (uint32_t*)malloc(ctx->mag_cap * sizeof(uint32_t));
   if (!ctx->mag) { free(ctx); return NULL; }
   ctx->error_info_initialized = 0;
-  
-  /* Create libliquid AGC for automatic gain control */
-  ctx->agc = agc_crcf_create();
-  if (!ctx->agc) { free(ctx->mag); free(ctx); return NULL; }
-  agc_crcf_set_bandwidth(ctx->agc, 1e-4f);  /* Slow convergence for stable tracking */
 
   // Debug: notify plugin initialization
   const char* debug_env = getenv("MR_PLUGIN_DEBUG");
   if (debug_env && debug_env[0] != '0') {
-    fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.5-2.5 Msps, AGC enabled)\n");
+    fprintf(stderr, "[adsb_demod] Plugin initialized (sample rate 1.5-2.5 Msps)\n");
   }
 
   return (MrPluginCtx*)ctx;
@@ -762,7 +755,6 @@ MrPluginCtx* mr_plugin_create(void) {
 void mr_plugin_destroy(MrPluginCtx* raw) {
   if (!raw) return;
   AdsbCtx* ctx = (AdsbCtx*)raw;
-  if (ctx->agc) agc_crcf_destroy(ctx->agc);
   free(ctx->mag);
   free(ctx);
 }
@@ -820,13 +812,11 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* Simple magnitude computation without AGC (AGC was causing false DF0 decodes) */
+  /* Simple magnitude computation: IQ → |mag|² */
   for (uint32_t n = 0; n < num_pairs; ++n) {
-    float i = (float)iq[n * 2u];
-    float q = (float)iq[n * 2u + 1u];
-    float mag_sq = i * i + q * q;
-    uint32_t mag = (uint32_t)mag_sq;
-    if (mag > 1000000000u) mag = 1000000000u;  /* Clamp to avoid overflow */
+    int32_t i = (int32_t)iq[n * 2u];
+    int32_t q = (int32_t)iq[n * 2u + 1u];
+    uint32_t mag = (uint32_t)(i * i) + (uint32_t)(q * q);
     ctx->mag[ctx->mag_len++] = mag;
   }
 
