@@ -906,10 +906,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
   /* Kräver ~2.4 Msps (acceptera 2.3–2.5 Msps) */
   if (sr < 2300000u || sr > 2500000u) {
-    if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected ~2.4 Msps)\n", sr);
-      fflush(debug_file);
-    }
+    fprintf(stderr, "[adsb_demod] WARNING: sample rate %u Hz rejected (expected 2.3-2.5 Msps)\n", sr);
     return;
   }
 
