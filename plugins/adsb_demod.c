@@ -341,7 +341,7 @@ static uint32_t sample_at_us(float usec, float spb) {
 
 static uint32_t sample_index(float base, float spb, float chip_off) {
     float x = base * spb - chip_off;
-    return (x > 0.0f) ? (uint32_t)(x + 0.99999f) : 0u;
+    return (x > 0.0f) ? (uint32_t)(x + 0.5f) : 0u;
 }
 
 static int preamble_ok(const uint32_t* m, float spb) {
@@ -835,7 +835,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  float chip_off = (float)PREAMBLE_SAMPS - 8.0f * spb;
+  float chip_off = 0.0f;
   uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
 
   uint32_t p = 0;
