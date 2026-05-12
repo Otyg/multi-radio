@@ -811,15 +811,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* Apply libliquid AGC to IQ samples, then compute magnitude */
+  /* Simple magnitude computation without AGC (AGC was causing false DF0 decodes) */
   for (uint32_t n = 0; n < num_pairs; ++n) {
-    float complex samp = (float)iq[n * 2u] + _Complex_I * (float)iq[n * 2u + 1u];
-    float complex agc_out;
-    agc_crcf_execute(ctx->agc, samp, &agc_out);
-    
-    float i = crealf(agc_out);
-    float q = cimagf(agc_out);
-    uint32_t mag = (uint32_t)(i * i + q * q);
+    float i = (float)iq[n * 2u];
+    float q = (float)iq[n * 2u + 1u];
+    float mag_sq = i * i + q * q;
+    uint32_t mag = (uint32_t)mag_sq;
+    if (mag > 1000000000u) mag = 1000000000u;  /* Clamp to avoid overflow */
     ctx->mag[ctx->mag_len++] = mag;
   }
 
