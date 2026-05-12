@@ -376,7 +376,7 @@ static int preamble_ok(const uint32_t* m, float spb) {
 /* ------------------------------------------------------------------ */
 
 static int decode_bit(uint32_t s0, uint32_t s1) {
-  return (s0 > s1) ? 1 : 0;
+  return (s0 > s1) ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -835,8 +835,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  uint32_t det_off = (sr > 2000000u) ? 1u : 0u;
-  float chip_off = (float)(PREAMBLE_SAMPS + det_off) - 8.0f * spb;
+  float chip_off = (float)PREAMBLE_SAMPS - 8.0f * spb;
   uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
 
   uint32_t p = 0;
@@ -851,8 +850,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     uint32_t df5 = 0;
     for (int b = 0; b < 5; ++b) {
-      uint32_t s0 = data[sample_index((float)b, spb, chip_off)];
-      uint32_t s1 = data[sample_index((float)b, spb, chip_off + spb * 0.5f)];
+      uint32_t s0 = data[sample_index((float)b + 0.25f, spb, chip_off)];
+      uint32_t s1 = data[sample_index((float)b + 0.75f, spb, chip_off)];
       df5 = (df5 << 1u) | (uint32_t)decode_bit(s0, s1);
     }
 
@@ -863,8 +862,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     uint8_t frame[MODES_LONG_MSG_BYTES];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      uint32_t s0 = data[sample_index((float)bit, spb, chip_off)];
-      uint32_t s1 = data[sample_index((float)bit, spb, chip_off + spb * 0.5f)];
+      uint32_t s0 = data[sample_index((float)bit + 0.25f, spb, chip_off)];
+      uint32_t s1 = data[sample_index((float)bit + 0.75f, spb, chip_off)];
       if (decode_bit(s0, s1))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
