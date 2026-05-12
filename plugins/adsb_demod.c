@@ -334,27 +334,36 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
     return crc;
 }
 
-static int preamble_ok(const uint32_t* m) {
-    if (m[0] < m[1] * 2u) return 0;
-    if (m[2] < m[1] * 2u || m[2] < m[3] * 2u) return 0;
-    if (m[7] < m[6] * 2u || m[7] < m[8] * 2u) return 0;
-    if (m[9] < m[8] * 2u || m[9] < m[10] * 2u) return 0;
-
-    uint32_t hi_min = m[0], hi_max = m[0];
-    if (m[2] < hi_min) hi_min = m[2]; else if (m[2] > hi_max) hi_max = m[2];
-    if (m[7] < hi_min) hi_min = m[7]; else if (m[7] > hi_max) hi_max = m[7];
-    if (m[9] < hi_min) hi_min = m[9]; else if (m[9] > hi_max) hi_max = m[9];
-    if (hi_min * 3u < hi_max) return 0;
-
-    uint32_t h = m[0] + m[2] + m[7] + m[9];
-    uint32_t l = m[1] + m[3] + m[4] + m[5] + m[6] + m[8] +
-                 m[10] + m[11] + m[12] + m[13] + m[14] + m[15];
-    return h >= l;
+static uint32_t sample_at_us(float usec, float spb) {
+    float x = usec * spb;
+    return (x > 0.0f) ? (uint32_t)(x + 0.5f) : 0u;
 }
 
-static uint32_t sample_index(float base, float spb, float chip_off) {
-    float x = base * spb - chip_off;
-    return (x > 0.0f) ? (uint32_t)(x + 0.99999f) : 0u;
+static int preamble_ok(const uint32_t* m, float spb) {
+    uint32_t s[16];
+    for (int i = 0; i < 16; ++i)
+        s[i] = sample_at_us((float)i * 0.5f, spb);
+
+    if (!(m[s[0]] > m[s[1]] &&
+          m[s[1]] < m[s[2]] &&
+          m[s[2]] > m[s[3]] &&
+          m[s[3]] < m[s[0]] &&
+          m[s[4]] < m[s[0]] &&
+          m[s[5]] < m[s[0]] &&
+          m[s[6]] < m[s[0]] &&
+          m[s[7]] > m[s[8]] &&
+          m[s[8]] < m[s[9]] &&
+          m[s[9]] > m[s[6]]))
+    {
+        return 0;
+    }
+
+    uint32_t hi = (m[s[0]] + m[s[2]] + m[s[7]] + m[s[9]]) / 6u;
+    if (m[s[4]] >= hi || m[s[5]] >= hi) return 0;
+    if (m[s[11]] >= hi || m[s[12]] >= hi ||
+        m[s[13]] >= hi || m[s[14]] >= hi) return 0;
+
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -821,36 +830,34 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  uint32_t det_off = (sr > 2000000u) ? 1u : 0u;
-  float chip_off = (float)(PREAMBLE_SAMPS + det_off) - 8.0f * spb;
-  uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
+  uint32_t min_frame = sample_at_us((float)LONG_BITS + 8.0f, spb) + 2u;
 
   uint32_t p = 0;
   while (p + min_frame <= ctx->mag_len) {
-    if (!preamble_ok(ctx->mag + p)) {
+    if (!preamble_ok(ctx->mag + p, spb)) {
       ++p;
       continue;
     }
 
     ++ctx->preamble_count;
-    const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
+    const uint32_t* data = ctx->mag + p + sample_at_us(8.0f, spb);
 
     uint32_t df5 = 0;
     for (int b = 0; b < 5; ++b) {
-      uint32_t s0 = data[sample_index((float)b, spb, chip_off)];
-      uint32_t s1 = data[sample_index((float)b, spb, chip_off + spb * 0.5f)];
+      uint32_t s0 = data[sample_at_us((float)b, spb)];
+      uint32_t s1 = data[sample_at_us((float)b + 0.5f, spb)];
       df5 = (df5 << 1u) | (uint32_t)decode_bit(s0, s1);
     }
 
     uint32_t n_bits = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
-    uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
+    uint32_t n_samps = sample_at_us((float)n_bits + 8.0f, spb) + 2u;
     if (p + n_samps > ctx->mag_len) break;
 
     uint8_t frame[MODES_LONG_MSG_BYTES];
     memset(frame, 0, sizeof(frame));
     for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      uint32_t s0 = data[sample_index((float)bit, spb, chip_off)];
-      uint32_t s1 = data[sample_index((float)bit, spb, chip_off + spb * 0.5f)];
+      uint32_t s0 = data[sample_at_us((float)bit, spb)];
+      uint32_t s1 = data[sample_at_us((float)bit + 0.5f, spb)];
       if (decode_bit(s0, s1))
         frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
     }
