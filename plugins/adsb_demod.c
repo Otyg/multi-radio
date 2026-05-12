@@ -963,9 +963,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       fflush(debug_file);
     }
 
-    uint32_t msg_offset = (best_phase >= 4) ? 20u : 19u;
+    uint32_t msg_offset = (best_phase == 7) ? 20u : 19u;
     const uint32_t* pPtr = ctx->mag + p + msg_offset;
-    int phase = (best_phase + 1) % 5;
+    int phase = best_phase - 3;   /* maps 3→0, 4→1, 5→2, 6→3, 7→4 */
 
     uint8_t frame[MODES_LONG_MSG_BYTES];
     const uint32_t* last_ptr = pPtr;
