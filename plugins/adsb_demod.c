@@ -940,9 +940,15 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     uint32_t best_high = 0u;
 
     for (int ph = 3; ph <= 7; ++ph) {
-      if (preamble_ok_phase(ctx->mag + p, ph, &best_high)) {
-        best_phase = ph;
-        break;
+      uint32_t phase_high = 0u;
+      if (preamble_ok_phase(ctx->mag + p, ph, &phase_high)) {
+        if (debug_enabled) {
+          fprintf(debug_file, "[adsb_demod] preamble candidate idx=%u phase=%d high=%u\n", p, ph, phase_high);
+        }
+        if (best_phase < 0 || phase_high > best_high) {
+          best_phase = ph;
+          best_high = phase_high;
+        }
       }
     }
 
@@ -953,7 +959,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     ++ctx->preamble_count;
     if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] preamble found at idx=%u best_phase=%d high=%u\n", p, best_phase, best_high);
+      fprintf(debug_file, "[adsb_demod] preamble selected idx=%u best_phase=%d high=%u\n", p, best_phase, best_high);
       fflush(debug_file);
     }
 
