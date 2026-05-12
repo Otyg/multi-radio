@@ -333,7 +333,7 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) {
         crc ^= (uint32_t)data[i] << 16;
         for (int b = 0; b < 8; ++b) {
-            crc = (crc & 0x800000u) ? (crc << 1) ^ 0xFFF409u : crc << 1;
+            crc = (crc & 0x800000u) ? (crc << 1) ^ 0x800409u : crc << 1;
             crc &= 0xFFFFFFu;
         }
     }
