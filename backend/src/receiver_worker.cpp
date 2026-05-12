@@ -515,13 +515,19 @@ void ReceiverWorker::PushPluginConfig() {
   /* For AIS Dual the decoder chain is fixed:
      NRZI-S -> AIS postproc (AIS channels) + ASM postproc (ASM channels).
      Derive the effective modulation from fixed_modulation; fall back to
-     checking scan-list channels so the scanner can carry AIS Dual entries
-     without requiring the user to also set the Fixed tab combo. */
+     checking scan-list channels ONLY in SCAN_LIST mode so the scanner can carry
+     AIS Dual entries without requiring the user to also set the Fixed tab combo. */
   Modulation effective_modulation = cfg.fixed_modulation;
-  if (effective_modulation != Modulation::kAisDual) {
+  const bool is_scan_list_mode = (cfg.mode == RadioMode::kScanList);
+  if (is_scan_list_mode && effective_modulation != Modulation::kAisDual) {
     for (const auto& ch : cfg.scan_list_channels) {
       if (ch.modulation == Modulation::kAisDual) {
         effective_modulation = Modulation::kAisDual;
+        const char* debug_env = std::getenv("MR_PLUGIN_DEBUG");
+        if (debug_env && (debug_env[0] != '0')) {
+          std::fprintf(stderr, "[receiver_worker] Switched effective_modulation to AIS Dual from scan-list (mode=%d)\n",
+                       static_cast<int>(cfg.mode));
+        }
         break;
       }
     }

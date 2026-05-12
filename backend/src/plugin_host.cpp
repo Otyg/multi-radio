@@ -228,6 +228,18 @@ bool PluginHost::LoadAll(std::string* error) {
   if (error != nullptr && any_error) {
     *error = errors.str();
   }
+  
+  // Debug: list all loaded plugins
+  const char* debug_env = std::getenv("MR_PLUGIN_DEBUG");
+  if (debug_env && (debug_env[0] != '0')) {
+    std::fprintf(stderr, "[plugin_host] All loaded plugins: ");
+    for (size_t i = 0; i < plugins_.size(); ++i) {
+      if (i > 0) std::fprintf(stderr, ", ");
+      std::fprintf(stderr, "%s (role=%d)", plugins_[i].info.plugin_name.c_str(), plugins_[i].role);
+    }
+    std::fprintf(stderr, " [total: %zu]\n", plugins_.size());
+  }
+  
   return !any_error || !plugins_.empty();
 #endif  // MR_HAVE_DLOPEN
 }
@@ -546,7 +558,15 @@ void PluginHost::SetActiveDecoder(const std::string& plugin_name) {
 
 void PluginHost::SetActiveDemodulator(const std::string& plugin_name) {
   std::lock_guard<std::mutex> lock(mu_);
-  active_demodulator_name_ = plugin_name;
+  if (active_demodulator_name_ != plugin_name) {
+    active_demodulator_name_ = plugin_name;
+    const char* debug_env = std::getenv("MR_PLUGIN_DEBUG");
+    if (debug_env && (debug_env[0] != '0')) {
+      std::fprintf(stderr, "[plugin_host] SetActiveDemodulator: '%s'\n", plugin_name.c_str());
+    }
+  } else {
+    active_demodulator_name_ = plugin_name;
+  }
 }
 
 void PluginHost::SetActivePostprocessor(const std::string& plugin_name) {
