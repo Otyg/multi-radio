@@ -504,7 +504,11 @@ ReceiverStatus ReceiverWorker::Status() const {
 void ReceiverWorker::PushPluginConfig() {
   if (plugin_host_ == nullptr) return;
   ModeConfig cfg;
-  { std::lock_guard<std::mutex> lock(mu_); cfg = mode_config_; }
+  RadioMode current_mode;
+  { std::lock_guard<std::mutex> lock(mu_); 
+    cfg = mode_config_; 
+    current_mode = mode_;
+  }
   plugin_host_->SetParam("baud_rate",        std::to_string(cfg.gmsk_baud_rate));
   plugin_host_->SetParam("bt",               std::to_string(cfg.gmsk_bt));
   plugin_host_->SetParam("modulation_index", std::to_string(cfg.gmsk_modulation_index));
@@ -518,7 +522,7 @@ void ReceiverWorker::PushPluginConfig() {
      checking scan-list channels ONLY in SCAN_LIST mode so the scanner can carry
      AIS Dual entries without requiring the user to also set the Fixed tab combo. */
   Modulation effective_modulation = cfg.fixed_modulation;
-  const bool is_scan_list_mode = (cfg.mode == RadioMode::kScanList);
+  const bool is_scan_list_mode = (current_mode == RadioMode::kScanList);
   if (is_scan_list_mode && effective_modulation != Modulation::kAisDual) {
     for (const auto& ch : cfg.scan_list_channels) {
       if (ch.modulation == Modulation::kAisDual) {
@@ -526,7 +530,7 @@ void ReceiverWorker::PushPluginConfig() {
         const char* debug_env = std::getenv("MR_PLUGIN_DEBUG");
         if (debug_env && (debug_env[0] != '0')) {
           std::fprintf(stderr, "[receiver_worker] Switched effective_modulation to AIS Dual from scan-list (mode=%d)\n",
-                       static_cast<int>(cfg.mode));
+                       static_cast<int>(current_mode));
         }
         break;
       }
