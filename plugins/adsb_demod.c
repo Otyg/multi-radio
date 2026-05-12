@@ -129,6 +129,9 @@ typedef struct {
   uint64_t  last_stats_ms;
   uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
   int      error_info_initialized;
+  uint32_t mag_peak;            /* Peak magnitude for adaptive scaling */
+  uint32_t mag_sum;             /* Running sum for RMS estimation */
+  uint32_t mag_count;           /* Sample count for averaging */
 } AdsbCtx;
 
 /* ------------------------------------------------------------------ */
@@ -784,11 +787,11 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->error_info_initialized = 1;
   }
 
-  /* Kräver ~2 Msps (acceptera 1.8–2.2 Msps) */
-  if (sr < 1800000u || sr > 2200000u) {
+  /* Kräver ~2 Msps (acceptera 1.5–2.5 Msps för mer donglar-flexibilitet) */
+  if (sr < 1500000u || sr > 2500000u) {
     const char* debug_env = getenv("MR_PLUGIN_DEBUG");
     if (debug_env && debug_env[0] != '0') {
-      fprintf(stderr, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.8-2.2 Msps)\n", sr);
+      fprintf(stderr, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.5-2.5 Msps)\n", sr);
     }
     return;
   }
@@ -803,11 +806,38 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* IQ → magnitud (I²+Q²) */
+  /* IQ → magnitud (I²+Q²) med adaptiv skalning */
   for (uint32_t n = 0; n < num_pairs; ++n) {
     int32_t i = (int32_t)iq[n * 2u];
     int32_t q = (int32_t)iq[n * 2u + 1u];
-    ctx->mag[ctx->mag_len++] = (uint32_t)(i * i) + (uint32_t)(q * q);
+    uint32_t mag = (uint32_t)(i * i) + (uint32_t)(q * q);
+    
+    /* Track peak magnitude for adaptive scaling */
+    if (mag > ctx->mag_peak) ctx->mag_peak = mag;
+    ctx->mag_sum += mag;
+    ctx->mag_count++;
+    
+    ctx->mag[ctx->mag_len++] = mag;
+  }
+  
+  /* Adaptiv normalisering var 4096:e sampel för svaga signaler */
+  uint32_t scale = 1u;
+  if (ctx->mag_count >= 4096u) {
+    uint32_t avg_mag = ctx->mag_sum / ctx->mag_count;
+    uint32_t target_avg = 5000000u;  /* Målvärde för genomsnittlig magnitud */
+    if (avg_mag > 0u && avg_mag < target_avg) {
+      scale = (target_avg / avg_mag);  /* 32-bitars multiplikator */
+      if (scale > 256u) scale = 256u;   /* Cap till max 256× */
+    }
+    ctx->mag_peak = 0u;
+    ctx->mag_sum = 0u;
+    ctx->mag_count = 0u;
+  }
+  
+  if (scale > 1u) {
+    for (uint32_t i = 0; i < ctx->mag_len; ++i) {
+      ctx->mag[i] *= scale;
+    }
   }
 
   float spb = (float)sr * 1e-6f;
