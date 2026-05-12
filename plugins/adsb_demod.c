@@ -334,50 +334,64 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
     return crc;
 }
 
-static uint32_t sample_at_us(float usec, float spb) {
-    float x = usec * spb;
-    return (x > 0.0f) ? (uint32_t)(x + 0.5f) : 0u;
-}
 
-static uint32_t sample_index(float base, float spb, float chip_off) {
-    float x = base * spb - chip_off;
-    return (x > 0.0f) ? (uint32_t)(x + 0.5f) : 0u;
-}
 
-static int preamble_ok(const uint32_t* m, float spb) {
-    uint32_t s[16];
-    for (int i = 0; i < 16; ++i)
-        s[i] = sample_at_us((float)i * 0.5f, spb);
-
-    if (!(m[s[0]] > m[s[1]] &&
-          m[s[1]] < m[s[2]] &&
-          m[s[2]] > m[s[3]] &&
-          m[s[3]] < m[s[0]] &&
-          m[s[4]] < m[s[0]] &&
-          m[s[5]] < m[s[0]] &&
-          m[s[6]] < m[s[0]] &&
-          m[s[7]] > m[s[8]] &&
-          m[s[8]] < m[s[9]] &&
-          m[s[9]] > m[s[6]]))
-    {
+static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
+    uint32_t high;
+    
+    if (phase == 3) {
+        high = (m[1] + m[3] + m[9] + m[11] + m[12]) / 5u;
+    } else if (phase == 4) {
+        high = (m[1] + m[3] + m[9] + m[12]) / 4u;
+    } else if (phase == 5) {
+        high = (m[1] + m[3] + m[4] + m[9] + m[10] + m[12]) / 6u;
+    } else if (phase == 6) {
+        high = (m[1] + m[4] + m[10] + m[12]) / 4u;
+    } else if (phase == 7) {
+        high = (m[1] + m[2] + m[4] + m[10] + m[12]) / 5u;
+    } else {
         return 0;
     }
-
-    uint32_t hi = (m[s[0]] + m[s[2]] + m[s[7]] + m[s[9]]) / 6u;
-    if (m[s[4]] >= hi || m[s[5]] >= hi) return 0;
-    if (m[s[11]] >= hi || m[s[12]] >= hi ||
-        m[s[13]] >= hi || m[s[14]] >= hi) return 0;
-
+    
+    if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
+        m[14] >= high || m[15] >= high || m[16] >= high || m[17] >= high || m[18] >= high) {
+        return 0;
+    }
+    
+    if (out_high) *out_high = high;
     return 1;
 }
 
 /* ------------------------------------------------------------------ */
-/* Bitavkodning (PPM)                                                   */
+/* Manchester matched filters (dump1090-style phase correlators)        */
 /* ------------------------------------------------------------------ */
 
-static int decode_bit(uint32_t s0, uint32_t s1) {
-  return (s0 > s1) ? 0 : 1;
+static int slice_phase0(const uint32_t* m) {
+  return (int)((int32_t)(5u*m[0]) - (int32_t)(3u*m[1]) - (int32_t)(2u*m[2]));
 }
+
+static int slice_phase1(const uint32_t* m) {
+  return (int)((int32_t)(4u*m[0]) - (int32_t)(m[1]) - (int32_t)(3u*m[2]));
+}
+
+static int slice_phase2(const uint32_t* m) {
+  return (int)((int32_t)(3u*m[0]) + (int32_t)(m[1]) - (int32_t)(4u*m[2]));
+}
+
+static int slice_phase3(const uint32_t* m) {
+  return (int)((int32_t)(2u*m[0]) + (int32_t)(3u*m[1]) - (int32_t)(5u*m[2]));
+}
+
+static int slice_phase4(const uint32_t* m) {
+  return (int)((int32_t)(m[0]) + (int32_t)(5u*m[1]) - (int32_t)(5u*m[2]) - (int32_t)(m[3]));
+}
+
+typedef int (*slice_fn)(const uint32_t*);
+
+static const slice_fn phase_slices[5] = {
+  slice_phase0, slice_phase1, slice_phase2, slice_phase3, slice_phase4
+};
+
 
 /* ------------------------------------------------------------------ */
 /* ICAO 24-bitars adress → land (ICAO Annex 10-tilldelningar)          */
@@ -835,40 +849,71 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   }
 
   float spb = (float)sr * 1e-6f;
-  float chip_off = 0.0f;
-  uint32_t min_frame = PREAMBLE_SAMPS + (uint32_t)((float)LONG_BITS * spb) + 2u;
+  uint32_t samples_per_bit = (uint32_t)(spb * 1000.0f / 500.0f + 0.5f);  /* ~2 samples per symbol @ 2 Msps */
+  uint32_t samples_per_byte = samples_per_bit * 16u;  /* 8 bits × 2 symbols/bit */
+  uint32_t min_frame = 19u + samples_per_byte + 2u;  /* preamble + at least 1 byte */
 
   uint32_t p = 0;
-  while (p + min_frame <= ctx->mag_len) {
-    if (!preamble_ok(ctx->mag + p, spb)) {
+  while (p + 19u < ctx->mag_len) {
+    int best_phase = -1;
+    uint32_t best_high = 0u;
+    
+    for (int ph = 3; ph <= 7; ++ph) {
+      if (preamble_ok_phase(ctx->mag + p, ph, &best_high)) {
+        best_phase = ph;
+        break;
+      }
+    }
+    
+    if (best_phase < 0) {
       ++p;
       continue;
     }
 
     ++ctx->preamble_count;
-    const uint32_t* data = ctx->mag + p + PREAMBLE_SAMPS;
-
-    uint32_t df5 = 0;
-    for (int b = 0; b < 5; ++b) {
-      uint32_t s0 = data[sample_index((float)b + 0.25f, spb, chip_off)];
-      uint32_t s1 = data[sample_index((float)b + 0.75f, spb, chip_off)];
-      df5 = (df5 << 1u) | (uint32_t)decode_bit(s0, s1);
+    
+    const uint32_t* preamble = ctx->mag + p;
+    const uint32_t* msg_start = preamble + 19u;
+    
+    slice_fn slice = phase_slices[best_phase - 3];
+    
+    uint8_t byte0 = 0u;
+    {
+      const uint32_t* ptr = msg_start;
+      byte0 |= (slice(ptr + 0) > 0 ? 0x80u : 0);
+      byte0 |= (slice(ptr + 2) > 0 ? 0x40u : 0);
+      byte0 |= (slice(ptr + 4) > 0 ? 0x20u : 0);
+      byte0 |= (slice(ptr + 7) > 0 ? 0x10u : 0);
+      byte0 |= (slice(ptr + 9) > 0 ? 0x08u : 0);
+      byte0 |= (slice(ptr + 12) > 0 ? 0x04u : 0);
+      byte0 |= (slice(ptr + 14) > 0 ? 0x02u : 0);
+      byte0 |= (slice(ptr + 16) > 0 ? 0x01u : 0);
     }
-
-    uint32_t n_bits = (df5 >= 16u) ? LONG_BITS : SHORT_BITS;
-    uint32_t n_samps = PREAMBLE_SAMPS + (uint32_t)((float)n_bits * spb) + 2u;
-    if (p + n_samps > ctx->mag_len) break;
-
+    
+    uint32_t df = (byte0 >> 3u) & 0x1Fu;
+    uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
+    uint32_t n_bits = n_bytes * 8u;
+    uint32_t frame_len = 19u + (n_bytes * 19u);
+    
+    if (p + frame_len > ctx->mag_len) break;
+    
     uint8_t frame[MODES_LONG_MSG_BYTES];
-    memset(frame, 0, sizeof(frame));
-    for (uint32_t bit = 0; bit < n_bits; ++bit) {
-      uint32_t s0 = data[sample_index((float)bit + 0.25f, spb, chip_off)];
-      uint32_t s1 = data[sample_index((float)bit + 0.75f, spb, chip_off)];
-      if (decode_bit(s0, s1))
-        frame[bit / 8u] |= (uint8_t)(0x80u >> (bit % 8u));
+    frame[0] = byte0;
+    
+    for (uint32_t i = 1; i < n_bytes; ++i) {
+      const uint32_t* ptr = msg_start + i * 19u;
+      uint8_t byte_val = 0u;
+      byte_val |= (slice(ptr + 0) > 0 ? 0x80u : 0);
+      byte_val |= (slice(ptr + 2) > 0 ? 0x40u : 0);
+      byte_val |= (slice(ptr + 4) > 0 ? 0x20u : 0);
+      byte_val |= (slice(ptr + 7) > 0 ? 0x10u : 0);
+      byte_val |= (slice(ptr + 9) > 0 ? 0x08u : 0);
+      byte_val |= (slice(ptr + 12) > 0 ? 0x04u : 0);
+      byte_val |= (slice(ptr + 14) > 0 ? 0x02u : 0);
+      byte_val |= (slice(ptr + 16) > 0 ? 0x01u : 0);
+      frame[i] = byte_val;
     }
 
-    uint32_t n_bytes = n_bits / 8u;
     uint32_t crc_calc = crc24(frame, n_bytes - 3u);
     uint32_t crc_fram = ((uint32_t)frame[n_bytes - 3u] << 16) |
                         ((uint32_t)frame[n_bytes - 2u] <<  8) |
@@ -882,7 +927,6 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         corrected = fixed;
         crc_calc = crc24(frame, n_bytes - 3u);
       } else {
-        uint32_t df = (frame[0] >> 3) & 0x1Fu;
         if (df == 0u || df == 4u || df == 5u || df == 16u ||
             df == 20u || df == 21u || df == 24u) {
           if (bruteForceAP(ctx, frame, n_bits)) {
@@ -892,8 +936,6 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         }
       }
     }
-
-    uint32_t df = (frame[0] >> 3) & 0x1Fu;
     if (crc_calc == crc_fram || ap_recovered) {
       ctx->crc_ok_count++;
       if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
@@ -921,7 +963,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       }
 
       emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
-      p += n_samps - 2u;
+      p += frame_len;
     } else {
       if (df == 17u || df == 18u) {
         if ((df == 17u && ctx->df17_fail_count < 5u) ||
@@ -940,13 +982,16 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       ++ctx->crc_fail_count;
       ++p;
     }
+    p += frame_len;
   }
 
-  uint32_t keep = ctx->mag_len - p;
-  if (keep > 0u) {
+  if (p > 0u && p < ctx->mag_len) {
+    uint32_t keep = ctx->mag_len - p;
     memmove(ctx->mag, ctx->mag + p, keep * sizeof(uint32_t));
+    ctx->mag_len = keep;
+  } else if (p > 0u) {
+    ctx->mag_len = 0u;
   }
-  ctx->mag_len = keep;
 
   if (unix_ms - ctx->last_stats_ms >= 10000u) {
     ctx->last_stats_ms = unix_ms;
