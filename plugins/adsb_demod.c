@@ -792,9 +792,18 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->error_info_initialized = 1;
   }
 
+  const char* debug_env = getenv("MR_PLUGIN_DEBUG");
+  
+  static uint32_t last_sr = 0u;
+  if (sr != last_sr) {
+    last_sr = sr;
+    if (debug_env && debug_env[0] != '0') {
+      fprintf(stderr, "[adsb_demod] Sample rate: %u Hz (%.3f Msps)\n", sr, (double)sr / 1e6);
+    }
+  }
+
   /* Kräver ~2 Msps (acceptera 1.5–2.5 Msps för mer donglar-flexibilitet) */
   if (sr < 1500000u || sr > 2500000u) {
-    const char* debug_env = getenv("MR_PLUGIN_DEBUG");
     if (debug_env && debug_env[0] != '0') {
       fprintf(stderr, "[adsb_demod] WARNING: Invalid sample rate %u Hz (expected 1.5-2.5 Msps)\n", sr);
     }
