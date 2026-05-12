@@ -610,6 +610,20 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     if (crc_calc == crc_fram) {
       ++ctx->crc_ok_count;
       if (df == 17u) ++ctx->df17_ok_count;
+      
+      // Debug: log raw frame on successful decode
+      const char* debug_env = getenv("MR_PLUGIN_DEBUG");
+      if (debug_env && debug_env[0] != '0') {
+        uint32_t icao = ((uint32_t)frame[1] << 16) |
+                        ((uint32_t)frame[2] <<  8) |
+                         (uint32_t)frame[3];
+        fprintf(stderr, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u hex=",
+                df, icao, n_bytes);
+        for (uint32_t x = 0; x < n_bytes; ++x)
+          fprintf(stderr, "%02X", frame[x]);
+        fprintf(stderr, "\n");
+      }
+      
       emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
       p += n_samps - 2u;
     } else {
@@ -620,6 +634,20 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         ++ctx->crc_ok_count;
         df = (frame[0] >> 3) & 0x1Fu;
         if (df == 17u) ++ctx->df17_ok_count;
+        
+        // Debug: log raw frame on corrected decode
+        const char* debug_env = getenv("MR_PLUGIN_DEBUG");
+        if (debug_env && debug_env[0] != '0') {
+          uint32_t icao = ((uint32_t)frame[1] << 16) |
+                          ((uint32_t)frame[2] <<  8) |
+                           (uint32_t)frame[3];
+          fprintf(stderr, "[adsb_demod] CORRECTED: DF=%u ICAO=%06X bit=%d bytes=%u hex=",
+                  df, icao, fixed_bit, n_bytes);
+          for (uint32_t x = 0; x < n_bytes; ++x)
+            fprintf(stderr, "%02X", frame[x]);
+          fprintf(stderr, "\n");
+        }
+        
         emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data);
         p += n_samps - 2u;
       } else {
