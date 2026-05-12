@@ -389,7 +389,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         return 0;
     }
 
-    if (base_signal * 2 < 3 * base_noise)
+    if (base_signal < 2 * base_noise)
         return 0;
 
     if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
@@ -920,11 +920,11 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* Simple magnitude computation: IQ → |mag|² */
+  /* Amplitude magnitude: |IQ| = sqrt(I²+Q²), som dump1090 */
   for (uint32_t n = 0; n < num_pairs; ++n) {
     int32_t i = (int32_t)iq[n * 2u];
     int32_t q = (int32_t)iq[n * 2u + 1u];
-    uint32_t mag = (uint32_t)(i * i) + (uint32_t)(q * q);
+    uint32_t mag = (uint32_t)sqrtf((float)(i * i + q * q));
     ctx->mag[ctx->mag_len++] = mag;
   }
 
