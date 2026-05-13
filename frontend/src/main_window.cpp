@@ -32,6 +32,9 @@
 #include <QSignalBlocker>
 #include <QSettings>
 #include <QMenu>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTextStream>
@@ -1034,6 +1037,67 @@ QString BuildDscDecodedSummary(const QVariantMap& fields) {
   return summary_parts.join(" ");
 }
 
+bool ParseDoubleField(const QVariantMap& fields, const QString& key, double* out) {
+  if (out == nullptr) return false;
+  if (!fields.contains(key)) return false;
+  bool ok = false;
+  const double v = fields.value(key).toString().toDouble(&ok);
+  if (!ok) return false;
+  *out = v;
+  return true;
+}
+
+QString FieldString(const QVariantMap& fields, const QString& key) {
+  return fields.contains(key) ? fields.value(key).toString() : QString();
+}
+
+std::vector<RadarFixedObject> LoadFixedObjectsFromSettings() {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("radar_view");
+  const QString json = settings.value("fixed_objects_json", "[]").toString();
+  settings.endGroup();
+
+  std::vector<RadarFixedObject> out;
+  const auto doc = QJsonDocument::fromJson(json.toUtf8());
+  if (!doc.isArray()) return out;
+  const QJsonArray arr = doc.array();
+  out.reserve((size_t)arr.size());
+  for (const auto& v : arr) {
+    if (!v.isObject()) continue;
+    const QJsonObject o = v.toObject();
+    RadarFixedObject fo;
+    fo.id = o.value("id").toString();
+    fo.name = o.value("name").toString();
+    fo.lat = o.value("lat").toDouble();
+    fo.lon = o.value("lon").toDouble();
+    if (fo.id.isEmpty()) fo.id = QString("%1,%2").arg(fo.lat, 0, 'f', 6).arg(fo.lon, 0, 'f', 6);
+    out.push_back(fo);
+  }
+  return out;
+}
+
+void SaveFixedObjectsToSettings(const QString& json) {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("radar_view");
+  settings.setValue("fixed_objects_json", json);
+  settings.endGroup();
+}
+
+QString LoadNameAlias(const QString& key) {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("radar_names");
+  const QString v = settings.value(key, "").toString();
+  settings.endGroup();
+  return v;
+}
+
+void SaveNameAlias(const QString& key, const QString& value) {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("radar_names");
+  settings.setValue(key, value);
+  settings.endGroup();
+}
+
 }  // namespace
 
 MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* parent)
@@ -1597,31 +1661,167 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   mode_tabs_->addTab(list_tab, "SCAN_LIST");
 
   auto* air_marine_tab = new QWidget(mode_tabs_);
-  auto* air_marine_layout = new QFormLayout(air_marine_tab);
-  signal_filter_combo_ = new QComboBox(air_marine_tab);
+  auto* air_marine_layout = new QVBoxLayout(air_marine_tab);
+  air_marine_layout->setContentsMargins(0, 0, 0, 0);
+
+  // Three-column live radar view: controls/log, radar, visible objects.
+  auto* air_marine_splitter = new QSplitter(Qt::Horizontal, air_marine_tab);
+
+  auto* air_marine_controls = new QWidget(air_marine_splitter);
+  auto* controls_layout = new QFormLayout(air_marine_controls);
+
+  signal_filter_combo_ = new QComboBox(air_marine_controls);
   signal_filter_combo_->addItem("ALL");
   signal_filter_combo_->addItem("SIGNAL_TYPE_AIS");
   signal_filter_combo_->addItem("SIGNAL_TYPE_ADSB");
   signal_filter_combo_->addItem("SIGNAL_TYPE_DSC");
-  receiver_filter_combo_ = new QComboBox(air_marine_tab);
+  receiver_filter_combo_ = new QComboBox(air_marine_controls);
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
-  minutes_filter_spin_ = new QSpinBox(air_marine_tab);
+  minutes_filter_spin_ = new QSpinBox(air_marine_controls);
   minutes_filter_spin_->setRange(1, 240);
   minutes_filter_spin_->setValue(30);
-  air_marine_layout->addRow(new QLabel("Uses built-in AIS + DSC channels.", air_marine_tab));
-  air_marine_layout->addRow(new QLabel("AIS: 162000000 Hz, DSC Ch 70: 156525000 Hz", air_marine_tab));
-  auto* signal_minutes_row = new QWidget(air_marine_tab);
+  controls_layout->addRow(new QLabel("Uses built-in AIS + ADS-B + DSC channels.", air_marine_controls));
+  controls_layout->addRow(new QLabel("AIS: 162000000 Hz, ADS-B: 1090000000 Hz, DSC Ch 70: 156525000 Hz",
+                                     air_marine_controls));
+  auto* signal_minutes_row = new QWidget(air_marine_controls);
   auto* signal_minutes_layout = new QHBoxLayout(signal_minutes_row);
   signal_minutes_layout->setContentsMargins(0, 0, 0, 0);
   signal_minutes_layout->addWidget(signal_filter_combo_);
   signal_minutes_layout->addWidget(minutes_filter_spin_);
-  air_marine_layout->addRow("Signal / Last minutes", signal_minutes_row);
-  decoded_table_ = new QTableWidget(0, 7, air_marine_tab);
+  controls_layout->addRow("Signal / Last minutes", signal_minutes_row);
+  controls_layout->addRow("Receiver", receiver_filter_combo_);
+
+  decoded_table_ = new QTableWidget(0, 7, air_marine_controls);
   decoded_table_->setHorizontalHeaderLabels({"Time", "MMSI", "Lat", "Long", "SOG", "COG", "Other"});
   decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
   decoded_table_->setMinimumHeight(280);
-  air_marine_layout->addRow(decoded_table_);
-  mode_tabs_->addTab(air_marine_tab, "AIR_MARINE_PLOT");
+  controls_layout->addRow(decoded_table_);
+
+  radar_widget_ = new RadarMapWidget(air_marine_splitter);
+  radar_widget_->SetRangeKm(10.0);
+  radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+
+  visible_objects_widget_ = new VisibleObjectsWidget(air_marine_splitter);
+
+  air_marine_splitter->addWidget(air_marine_controls);
+  air_marine_splitter->addWidget(radar_widget_);
+  air_marine_splitter->addWidget(visible_objects_widget_);
+  air_marine_splitter->setStretchFactor(0, 1);
+  air_marine_splitter->setStretchFactor(1, 3);
+  air_marine_splitter->setStretchFactor(2, 1);
+
+  air_marine_layout->addWidget(air_marine_splitter);
+
+  // Selection wiring.
+  connect(radar_widget_, &RadarMapWidget::TargetSelected, this, [this](const QString& id) {
+    if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetSelectedTarget(id);
+  });
+  connect(visible_objects_widget_, &VisibleObjectsWidget::TargetActivated, this, [this](const QString& id) {
+    if (radar_widget_ != nullptr) radar_widget_->SetSelectedTarget(id);
+  });
+
+  // Radar settings controls (persisted).
+  {
+    QSettings settings("multi-radio", "multi-radio-client");
+    settings.beginGroup("radar_view");
+    const bool show_labels = settings.value("show_labels", false).toBool();
+    const bool show_fixed_names = settings.value("show_fixed_names", true).toBool();
+    const double range_km = std::clamp(settings.value("range_km", 10.0).toDouble(), 0.2, 500.0);
+    const double trail_s = std::clamp(settings.value("trail_seconds", 120.0).toDouble(), 5.0, 3600.0);
+    settings.endGroup();
+
+    radar_widget_->SetShowLabels(show_labels);
+    radar_widget_->SetShowFixedNames(show_fixed_names);
+    radar_widget_->SetRangeKm(range_km);
+    radar_widget_->SetTrailWindowSeconds(trail_s);
+
+    auto* show_labels_cb = new QCheckBox("Show labels", air_marine_controls);
+    show_labels_cb->setChecked(show_labels);
+    controls_layout->addRow(show_labels_cb);
+    connect(show_labels_cb, &QCheckBox::toggled, this, [this](bool enabled) {
+      if (radar_widget_ != nullptr) radar_widget_->SetShowLabels(enabled);
+      QSettings s("multi-radio", "multi-radio-client");
+      s.beginGroup("radar_view");
+      s.setValue("show_labels", enabled);
+      s.endGroup();
+    });
+
+    auto* show_fixed_names_cb = new QCheckBox("Show fixed names", air_marine_controls);
+    show_fixed_names_cb->setChecked(show_fixed_names);
+    controls_layout->addRow(show_fixed_names_cb);
+    connect(show_fixed_names_cb, &QCheckBox::toggled, this, [this](bool enabled) {
+      if (radar_widget_ != nullptr) radar_widget_->SetShowFixedNames(enabled);
+      QSettings s("multi-radio", "multi-radio-client");
+      s.beginGroup("radar_view");
+      s.setValue("show_fixed_names", enabled);
+      s.endGroup();
+    });
+
+    auto* range_spin = new QDoubleSpinBox(air_marine_controls);
+    range_spin->setDecimals(1);
+    range_spin->setRange(0.2, 500.0);
+    range_spin->setSingleStep(0.5);
+    range_spin->setValue(range_km);
+    range_spin->setSuffix(" km");
+    controls_layout->addRow("Range", range_spin);
+    connect(range_spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double km) {
+      if (radar_widget_ != nullptr) radar_widget_->SetRangeKm(km);
+      QSettings s("multi-radio", "multi-radio-client");
+      s.beginGroup("radar_view");
+      s.setValue("range_km", km);
+      s.endGroup();
+    });
+
+    auto* trail_spin = new QDoubleSpinBox(air_marine_controls);
+    trail_spin->setDecimals(0);
+    trail_spin->setRange(5.0, 3600.0);
+    trail_spin->setSingleStep(5.0);
+    trail_spin->setValue(trail_s);
+    trail_spin->setSuffix(" s");
+    controls_layout->addRow("Trail window", trail_spin);
+    connect(trail_spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double sec) {
+      if (radar_widget_ != nullptr) radar_widget_->SetTrailWindowSeconds(sec);
+      QSettings s("multi-radio", "multi-radio-client");
+      s.beginGroup("radar_view");
+      s.setValue("trail_seconds", sec);
+      s.endGroup();
+    });
+
+    auto* fixed_button = new QPushButton("Edit fixed objects...", air_marine_controls);
+    controls_layout->addRow(fixed_button);
+    connect(fixed_button, &QPushButton::clicked, this, [this]() {
+      QSettings s("multi-radio", "multi-radio-client");
+      s.beginGroup("radar_view");
+      const QString existing = s.value("fixed_objects_json", "[]").toString();
+      s.endGroup();
+
+      QDialog dialog(this);
+      dialog.setWindowTitle("Fixed objects (JSON)");
+      dialog.setMinimumSize(520, 420);
+      auto* outer = new QVBoxLayout(&dialog);
+      auto* editor = new QPlainTextEdit(&dialog);
+      editor->setPlainText(existing);
+      outer->addWidget(new QLabel("Format: [{\"id\":\"...\",\"name\":\"...\",\"lat\":..,\"lon\":..}, ...]", &dialog));
+      outer->addWidget(editor, 1);
+      auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+      outer->addWidget(buttons);
+      connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+      connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+      if (dialog.exec() != QDialog::Accepted) return;
+
+      const QString json = editor->toPlainText().trimmed();
+      const auto doc = QJsonDocument::fromJson(json.toUtf8());
+      if (!doc.isArray()) {
+        QMessageBox::warning(this, "Invalid JSON", "Fixed objects must be a JSON array.");
+        return;
+      }
+      SaveFixedObjectsToSettings(json);
+      if (radar_widget_ != nullptr) radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+    });
+  }
+
+  mode_tabs_->addTab(air_marine_tab, "RADAR_VIEW");
 
   auto* global_tab = new QWidget(mode_tabs_);
   auto* global_layout = new QFormLayout(global_tab);
@@ -3086,16 +3286,13 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   } else if (signal_type == "SIGNAL_TYPE_DSC") {
     row.decoded_summary = BuildDscDecodedSummary(fields);
   }
-  const auto field_value = [&fields](const QString& key) {
-    return fields.contains(key) ? fields.value(key).toString() : QString();
-  };
-  row.mmsi = field_value("mmsi");
-  row.lat = field_value("lat");
-  if (row.lat.isEmpty()) row.lat = field_value("latitude");
-  row.lon = field_value("lon");
-  if (row.lon.isEmpty()) row.lon = field_value("longitude");
-  row.sog = field_value("sog");
-  row.cog = field_value("cog");
+  row.mmsi = FieldString(fields, "mmsi");
+  row.lat = FieldString(fields, "lat");
+  if (row.lat.isEmpty()) row.lat = FieldString(fields, "latitude");
+  row.lon = FieldString(fields, "lon");
+  if (row.lon.isEmpty()) row.lon = FieldString(fields, "longitude");
+  row.sog = FieldString(fields, "sog");
+  row.cog = FieldString(fields, "cog");
   const QStringList excluded_fields = {
       "mmsi", "lat", "lon", "latitude", "longitude", "sog", "cog"};
   QStringList other_parts;
@@ -3172,6 +3369,47 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
               .arg(payload));
     }
     return;
+  }
+
+  // Live radar targets (AIS / ADS-B with position).
+  if (radar_widget_ != nullptr && visible_objects_widget_ != nullptr) {
+    double lat = 0.0;
+    double lon = 0.0;
+    const bool has_lat = ParseDoubleField(fields, "lat", &lat) || ParseDoubleField(fields, "latitude", &lat);
+    const bool has_lon = ParseDoubleField(fields, "lon", &lon) || ParseDoubleField(fields, "longitude", &lon);
+    if (has_lat && has_lon) {
+      RadarTargetUpdate t;
+      t.lat = lat;
+      t.lon = lon;
+      t.unix_ms = static_cast<std::uint64_t>(unix_ms);
+      ParseDoubleField(fields, "sog", &t.sog);
+      ParseDoubleField(fields, "cog", &t.cog);
+
+      if (plugin_type.startsWith("AIS_")) {
+        const QString mmsi = FieldString(fields, "mmsi");
+        t.id = mmsi.isEmpty() ? QString("AIS@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : mmsi;
+        t.kind = RadarTargetKind::kVessel;
+        t.label = FieldString(fields, "name");
+        if (t.label.isEmpty()) t.label = LoadNameAlias(t.id);
+        if (!t.label.isEmpty()) SaveNameAlias(t.id, t.label);
+        if (t.label.isEmpty()) t.label = t.id;
+      } else if (plugin_type == "ADSB") {
+        const QString icao = FieldString(fields, "icao");
+        t.id = icao.isEmpty() ? QString("ADSB@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : icao;
+        t.kind = RadarTargetKind::kAircraft;
+        t.label = FieldString(fields, "call_sign");
+        if (t.label.isEmpty()) t.label = LoadNameAlias(t.id);
+        if (!t.label.isEmpty()) SaveNameAlias(t.id, t.label);
+        if (t.label.isEmpty()) t.label = t.id;
+      } else {
+        t.id = QString("%1@%2").arg(plugin_type).arg(receiver_id);
+        t.kind = RadarTargetKind::kUnknown;
+        t.label = t.id;
+      }
+
+      radar_widget_->UpsertTarget(t);
+      visible_objects_widget_->UpsertTarget(t);
+    }
   }
 
   // ADS-B / Mode S frame
