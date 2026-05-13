@@ -25,6 +25,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <limits.h>
 #include <complex.h>
 #include <liquid/liquid.h>
 
@@ -473,24 +474,39 @@ static int preamble_ok_phase(AdsbCtx* ctx, const uint32_t* m, int phase, uint32_
 
 static int slice_phase0(const uint32_t* m) {
   /* Coefficients from readsb/dump1090 demod_2400.c (tuned for 2.4Msps) */
-  return (int)((int32_t)(18u*m[0]) - (int32_t)(15u*m[1]) - (int32_t)(3u*m[2]));
+  int64_t v = 18*(int64_t)m[0] - 15*(int64_t)m[1] - 3*(int64_t)m[2];
+  if (v > INT32_MAX) v = INT32_MAX;
+  if (v < INT32_MIN) v = INT32_MIN;
+  return (int)v;
 }
 
 static int slice_phase1(const uint32_t* m) {
-  return (int)((int32_t)(14u*m[0]) - (int32_t)(5u*m[1]) - (int32_t)(9u*m[2]));
+  int64_t v = 14*(int64_t)m[0] - 5*(int64_t)m[1] - 9*(int64_t)m[2];
+  if (v > INT32_MAX) v = INT32_MAX;
+  if (v < INT32_MIN) v = INT32_MIN;
+  return (int)v;
 }
 
 static int slice_phase2(const uint32_t* m) {
   /* Slightly DC unbalanced but better results (per readsb comment) */
-  return (int)((int32_t)(16u*m[0]) + (int32_t)(5u*m[1]) - (int32_t)(20u*m[2]));
+  int64_t v = 16*(int64_t)m[0] + 5*(int64_t)m[1] - 20*(int64_t)m[2];
+  if (v > INT32_MAX) v = INT32_MAX;
+  if (v < INT32_MIN) v = INT32_MIN;
+  return (int)v;
 }
 
 static int slice_phase3(const uint32_t* m) {
-  return (int)((int32_t)(7u*m[0]) + (int32_t)(11u*m[1]) - (int32_t)(18u*m[2]));
+  int64_t v = 7*(int64_t)m[0] + 11*(int64_t)m[1] - 18*(int64_t)m[2];
+  if (v > INT32_MAX) v = INT32_MAX;
+  if (v < INT32_MIN) v = INT32_MIN;
+  return (int)v;
 }
 
 static int slice_phase4(const uint32_t* m) {
-  return (int)((int32_t)(4u*m[0]) + (int32_t)(15u*m[1]) - (int32_t)(20u*m[2]) + (int32_t)(1u*m[3]));
+  int64_t v = 4*(int64_t)m[0] + 15*(int64_t)m[1] - 20*(int64_t)m[2] + 1*(int64_t)m[3];
+  if (v > INT32_MAX) v = INT32_MAX;
+  if (v < INT32_MIN) v = INT32_MIN;
+  return (int)v;
 }
 
 /* Phase-specific bit offsets and correlator mappings for Manchester decoding
