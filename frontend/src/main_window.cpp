@@ -1114,6 +1114,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* control_layout = new QFormLayout(control_group);
 
   receiver_combo_ = new QComboBox(control_group);
+  receiver_combo_->setVisible(false);  // single-receiver UX for now
 
   fixed_frequency_edit_ = new QLineEdit("162.025", control_group);
   range_start_edit_ = new QLineEdit("156", control_group);
@@ -1689,7 +1690,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   signal_minutes_layout->addWidget(signal_filter_combo_);
   signal_minutes_layout->addWidget(minutes_filter_spin_);
   controls_layout->addRow("Signal / Last minutes", signal_minutes_row);
-  controls_layout->addRow("Receiver", receiver_filter_combo_);
+  // Single-receiver assumption: keep receiver filter internal but don't expose it in UI.
+  receiver_filter_combo_->setVisible(false);
 
   radar_widget_ = new RadarMapWidget(air_marine_splitter);
   radar_widget_->SetRangeKm(10.0);
@@ -1719,6 +1721,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     settings.beginGroup("radar_view");
     const bool show_labels = settings.value("show_labels", false).toBool();
     const bool show_fixed_names = settings.value("show_fixed_names", true).toBool();
+    const bool hide_low_speed = settings.value("hide_low_speed", false).toBool();
     const double range_km = std::clamp(settings.value("range_km", 10.0).toDouble(), 0.2, 500.0);
     const double trail_s = std::clamp(settings.value("trail_seconds", 120.0).toDouble(), 5.0, 3600.0);
     const double center_lat = settings.value("center_lat", 0.0).toDouble();
@@ -1727,96 +1730,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
 
     radar_widget_->SetShowLabels(show_labels);
     radar_widget_->SetShowFixedNames(show_fixed_names);
+    radar_widget_->SetHideLowSpeed(hide_low_speed);
     radar_widget_->SetRangeKm(range_km);
     radar_widget_->SetTrailWindowSeconds(trail_s);
     if (center_lat != 0.0 || center_lon != 0.0) {
       radar_widget_->SetCenter(center_lat, center_lon);
     }
-
-    auto* show_labels_cb = new QCheckBox("Show labels", air_marine_controls);
-    show_labels_cb->setChecked(show_labels);
-    controls_layout->addRow(show_labels_cb);
-    connect(show_labels_cb, &QCheckBox::toggled, this, [this](bool enabled) {
-      if (radar_widget_ != nullptr) radar_widget_->SetShowLabels(enabled);
-      QSettings s("multi-radio", "multi-radio-client");
-      s.beginGroup("radar_view");
-      s.setValue("show_labels", enabled);
-      s.endGroup();
-    });
-
-    auto* show_fixed_names_cb = new QCheckBox("Show fixed names", air_marine_controls);
-    show_fixed_names_cb->setChecked(show_fixed_names);
-    controls_layout->addRow(show_fixed_names_cb);
-    connect(show_fixed_names_cb, &QCheckBox::toggled, this, [this](bool enabled) {
-      if (radar_widget_ != nullptr) radar_widget_->SetShowFixedNames(enabled);
-      QSettings s("multi-radio", "multi-radio-client");
-      s.beginGroup("radar_view");
-      s.setValue("show_fixed_names", enabled);
-      s.endGroup();
-    });
-
-    auto* range_spin = new QDoubleSpinBox(air_marine_controls);
-    range_spin->setDecimals(1);
-    range_spin->setRange(0.2, 500.0);
-    range_spin->setSingleStep(0.5);
-    range_spin->setValue(range_km);
-    range_spin->setSuffix(" km");
-    controls_layout->addRow("Range", range_spin);
-    connect(range_spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double km) {
-      if (radar_widget_ != nullptr) radar_widget_->SetRangeKm(km);
-      QSettings s("multi-radio", "multi-radio-client");
-      s.beginGroup("radar_view");
-      s.setValue("range_km", km);
-      s.endGroup();
-    });
-
-    auto* trail_spin = new QDoubleSpinBox(air_marine_controls);
-    trail_spin->setDecimals(0);
-    trail_spin->setRange(5.0, 3600.0);
-    trail_spin->setSingleStep(5.0);
-    trail_spin->setValue(trail_s);
-    trail_spin->setSuffix(" s");
-    controls_layout->addRow("Trail window", trail_spin);
-    connect(trail_spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double sec) {
-      if (radar_widget_ != nullptr) radar_widget_->SetTrailWindowSeconds(sec);
-      QSettings s("multi-radio", "multi-radio-client");
-      s.beginGroup("radar_view");
-      s.setValue("trail_seconds", sec);
-      s.endGroup();
-    });
-
-    auto* fixed_button = new QPushButton("Edit fixed objects...", air_marine_controls);
-    controls_layout->addRow(fixed_button);
-    connect(fixed_button, &QPushButton::clicked, this, [this]() {
-      QSettings s("multi-radio", "multi-radio-client");
-      s.beginGroup("radar_view");
-      const QString existing = s.value("fixed_objects_json", "[]").toString();
-      s.endGroup();
-
-      QDialog dialog(this);
-      dialog.setWindowTitle("Fixed objects (JSON)");
-      dialog.setMinimumSize(520, 420);
-      auto* outer = new QVBoxLayout(&dialog);
-      auto* editor = new QPlainTextEdit(&dialog);
-      editor->setPlainText(existing);
-      outer->addWidget(new QLabel("Format: [{\"id\":\"...\",\"name\":\"...\",\"lat\":..,\"lon\":..}, ...]", &dialog));
-      outer->addWidget(editor, 1);
-      auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-      outer->addWidget(buttons);
-      connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-      connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-      if (dialog.exec() != QDialog::Accepted) return;
-
-      const QString json = editor->toPlainText().trimmed();
-      const auto doc = QJsonDocument::fromJson(json.toUtf8());
-      if (!doc.isArray()) {
-        QMessageBox::warning(this, "Invalid JSON", "Fixed objects must be a JSON array.");
-        return;
-      }
-      SaveFixedObjectsToSettings(json);
-      if (radar_widget_ != nullptr) radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
-    });
+    if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(hide_low_speed);
 
     auto* radar_settings_button = new QPushButton("Radar settings...", air_marine_controls);
     controls_layout->addRow(radar_settings_button);
@@ -1827,11 +1747,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       s.beginGroup("radar_view");
       const double cur_lat = s.value("center_lat", 0.0).toDouble();
       const double cur_lon = s.value("center_lon", 0.0).toDouble();
+      const bool show_labels = s.value("show_labels", false).toBool();
+      const bool show_fixed_names = s.value("show_fixed_names", true).toBool();
+      const bool hide_low_speed = s.value("hide_low_speed", false).toBool();
+      const double range_km = std::clamp(s.value("range_km", 10.0).toDouble(), 0.2, 500.0);
+      const double trail_s = std::clamp(s.value("trail_seconds", 120.0).toDouble(), 5.0, 3600.0);
+      const QString fixed_json = s.value("fixed_objects_json", "[]").toString();
       s.endGroup();
 
       QDialog dialog(this);
       dialog.setWindowTitle("Radar settings");
-      auto* layout = new QFormLayout(&dialog);
+      dialog.setMinimumSize(560, 520);
+      auto* outer = new QVBoxLayout(&dialog);
+      auto* layout = new QFormLayout();
       auto* lat_spin = new QDoubleSpinBox(&dialog);
       lat_spin->setDecimals(7);
       lat_spin->setRange(-90.0, 90.0);
@@ -1840,23 +1768,80 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       lon_spin->setDecimals(7);
       lon_spin->setRange(-180.0, 180.0);
       lon_spin->setValue(cur_lon);
+      auto* range_spin = new QDoubleSpinBox(&dialog);
+      range_spin->setDecimals(1);
+      range_spin->setRange(0.2, 500.0);
+      range_spin->setSingleStep(0.5);
+      range_spin->setValue(range_km);
+      range_spin->setSuffix(" km");
+      auto* trail_spin = new QDoubleSpinBox(&dialog);
+      trail_spin->setDecimals(0);
+      trail_spin->setRange(5.0, 3600.0);
+      trail_spin->setSingleStep(5.0);
+      trail_spin->setValue(trail_s);
+      trail_spin->setSuffix(" s");
+
+      auto* show_labels_cb = new QCheckBox("Show labels", &dialog);
+      show_labels_cb->setChecked(show_labels);
+      auto* show_fixed_names_cb = new QCheckBox("Show fixed names", &dialog);
+      show_fixed_names_cb->setChecked(show_fixed_names);
+      auto* hide_low_speed_cb = new QCheckBox("Hide low speed (<1 kn)", &dialog);
+      hide_low_speed_cb->setChecked(hide_low_speed);
+
+      auto* fixed_editor = new QPlainTextEdit(&dialog);
+      fixed_editor->setPlainText(fixed_json);
+
       layout->addRow("Center latitude", lat_spin);
       layout->addRow("Center longitude", lon_spin);
+      layout->addRow("Range", range_spin);
+      layout->addRow("Trail window", trail_spin);
+      layout->addRow(show_labels_cb);
+      layout->addRow(show_fixed_names_cb);
+      layout->addRow(hide_low_speed_cb);
+
+      outer->addLayout(layout);
+      outer->addWidget(new QLabel("Fixed objects (JSON):", &dialog));
+      outer->addWidget(fixed_editor, 1);
+
       auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-      layout->addRow(buttons);
+      outer->addWidget(buttons);
       connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
       connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
       if (dialog.exec() != QDialog::Accepted) return;
       const double lat = lat_spin->value();
       const double lon = lon_spin->value();
+      const double new_range_km = range_spin->value();
+      const double new_trail_s = trail_spin->value();
+      const bool new_show_labels = show_labels_cb->isChecked();
+      const bool new_show_fixed_names = show_fixed_names_cb->isChecked();
+      const bool new_hide_low_speed = hide_low_speed_cb->isChecked();
+      const QString json = fixed_editor->toPlainText().trimmed();
+      const auto doc = QJsonDocument::fromJson(json.toUtf8());
+      if (!doc.isArray()) {
+        QMessageBox::warning(this, "Invalid JSON", "Fixed objects must be a JSON array.");
+        return;
+      }
 
       QSettings out("multi-radio", "multi-radio-client");
       out.beginGroup("radar_view");
       out.setValue("center_lat", lat);
       out.setValue("center_lon", lon);
+      out.setValue("range_km", new_range_km);
+      out.setValue("trail_seconds", new_trail_s);
+      out.setValue("show_labels", new_show_labels);
+      out.setValue("show_fixed_names", new_show_fixed_names);
+      out.setValue("hide_low_speed", new_hide_low_speed);
+      out.setValue("fixed_objects_json", json);
       out.endGroup();
       radar_widget_->SetCenter(lat, lon);
+      radar_widget_->SetRangeKm(new_range_km);
+      radar_widget_->SetTrailWindowSeconds(new_trail_s);
+      radar_widget_->SetShowLabels(new_show_labels);
+      radar_widget_->SetShowFixedNames(new_show_fixed_names);
+      radar_widget_->SetHideLowSpeed(new_hide_low_speed);
+      radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+      if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(new_hide_low_speed);
     });
   }
 
@@ -1905,7 +1890,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   button_layout->addWidget(stop_button);
   button_layout->addWidget(apply_button);
 
-  control_layout->addRow("Receiver", receiver_combo_);
+  // Single-receiver UX: do not show receiver selector.
   control_layout->addRow("Mode settings", mode_tabs_);
   control_layout->addRow(button_row);
 
@@ -1973,7 +1958,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
     }
-    signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
+    if (signal_visualization_ != nullptr) {
+      signal_visualization_->SetReceiverFilter(receiver_filter_combo_->currentData().toInt());
+    }
   });
   connect(spectrum_source_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, update_channel_overlay]() {
     const int selected = spectrum_source_combo_->currentData().toInt();
@@ -4811,9 +4798,11 @@ bool MainWindow::PassesFilter(const MessageRow& row) const {
     return false;
   }
 
-  const int receiver_filter = receiver_filter_combo_->currentData().toInt();
-  if (receiver_filter >= 0 && static_cast<int>(row.receiver_id) != receiver_filter) {
-    return false;
+  if (receiver_filter_combo_ != nullptr && receiver_filter_combo_->currentIndex() >= 0) {
+    const int receiver_filter = receiver_filter_combo_->currentData().toInt();
+    if (receiver_filter >= 0 && static_cast<int>(row.receiver_id) != receiver_filter) {
+      return false;
+    }
   }
 
   const int minutes = minutes_filter_spin_->value();

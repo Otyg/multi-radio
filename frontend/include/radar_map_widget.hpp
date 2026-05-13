@@ -26,6 +26,7 @@ class RadarMapWidget : public QWidget {
   void SetShowLabels(bool enabled);
   void SetShowCoastline(bool enabled);
   void SetShowFixedNames(bool enabled);
+  void SetHideLowSpeed(bool enabled);
   void SetTrailWindowSeconds(double seconds);
   void SetFixedObjects(const std::vector<RadarFixedObject>& fixed);
 
@@ -71,6 +72,7 @@ class RadarMapWidget : public QWidget {
   bool show_labels_ = false;
   bool show_coastline_ = true;
   bool show_fixed_names_ = true;
+  bool hide_low_speed_ = false;
 
   QString selected_target_id_;
 

@@ -73,6 +73,11 @@ void RadarMapWidget::SetShowFixedNames(bool enabled) {
   update();
 }
 
+void RadarMapWidget::SetHideLowSpeed(bool enabled) {
+  hide_low_speed_ = enabled;
+  update();
+}
+
 void RadarMapWidget::SetTrailWindowSeconds(double seconds) {
   if (!IsFinite(seconds)) seconds = kDefaultTrailWindowSeconds;
   seconds = std::clamp(seconds, 5.0, 3600.0);
@@ -214,6 +219,7 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   // Trails.
   for (const auto& [_, state] : targets_) {
     const auto& t = state.last;
+    if (hide_low_speed_ && t.kind == RadarTargetKind::kVessel && t.sog < 1.0) continue;
     QColor color = (t.kind == RadarTargetKind::kAircraft) ? aircraft_color_ : vessel_color_;
     if (!selected_target_id_.isEmpty() && t.id == selected_target_id_) color = selected_color_;
 
@@ -239,6 +245,7 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
 
   for (const auto& [_, state] : targets_) {
     const auto& t = state.last;
+    if (hide_low_speed_ && t.kind == RadarTargetKind::kVessel && t.sog < 1.0) continue;
     const QPointF p = LatLonToXY(t.lat, t.lon, cx, cy, px_per_km);
 
     QColor color = (t.kind == RadarTargetKind::kAircraft) ? aircraft_color_ : vessel_color_;

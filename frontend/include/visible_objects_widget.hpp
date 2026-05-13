@@ -20,6 +20,7 @@ class VisibleObjectsWidget : public QWidget {
   void UpsertTarget(const RadarTargetUpdate& update);
   void RemoveStale(std::uint64_t now_ms, std::uint64_t stale_after_ms);
   void SetSelectedTarget(const QString& id);
+  void SetHideLowSpeed(bool enabled) { hide_low_speed_ = enabled; RefreshTable(); }
 
  signals:
   void TargetActivated(const QString& id);
@@ -34,7 +35,7 @@ class VisibleObjectsWidget : public QWidget {
   QTableWidget* table_ = nullptr;
   std::unordered_map<std::string, RowState> rows_;
   QString selected_id_;
+  bool hide_low_speed_ = false;
 };
 
 }  // namespace multi_radio
-

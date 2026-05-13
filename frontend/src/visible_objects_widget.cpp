@@ -80,6 +80,7 @@ void VisibleObjectsWidget::RefreshTable() {
   std::vector<Row> items;
   items.reserve(rows_.size());
   for (const auto& [_, st] : rows_) {
+    if (hide_low_speed_ && st.last.kind == RadarTargetKind::kVessel && st.last.sog < 1.0) continue;
     items.push_back(Row{st.last});
   }
   std::sort(items.begin(), items.end(), [](const Row& a, const Row& b) {
@@ -104,4 +105,3 @@ void VisibleObjectsWidget::RefreshTable() {
 }
 
 }  // namespace multi_radio
-
