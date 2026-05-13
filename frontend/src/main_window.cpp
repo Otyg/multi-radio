@@ -1680,6 +1680,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_outer->setContentsMargins(6, 6, 6, 6);
   controls_outer->setSpacing(10);
 
+  constexpr int kRadarSidePanelWidth = 340;
+  air_marine_controls->setMinimumWidth(kRadarSidePanelWidth);
+  air_marine_controls->setMaximumWidth(kRadarSidePanelWidth);
+
   auto* radar_group = new QGroupBox("Radar", air_marine_controls);
   auto* radar_layout = new QFormLayout(radar_group);
   radar_layout->setContentsMargins(8, 8, 8, 8);
@@ -1688,7 +1692,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* radio_group = new QGroupBox("Radio", air_marine_controls);
   auto* radio_layout = new QVBoxLayout(radio_group);
   radio_layout->setContentsMargins(8, 8, 8, 8);
-  radio_group->setMaximumWidth(340);
   controls_outer->addWidget(radio_group, 1);
 
   // Radar-view radio scanner (separate from SCAN_LIST).
@@ -1754,6 +1757,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);
   visible_objects_widget_ = new VisibleObjectsWidget(air_marine_splitter);
+  visible_objects_widget_->setMinimumWidth(kRadarSidePanelWidth);
+  visible_objects_widget_->setMaximumWidth(kRadarSidePanelWidth);
   air_marine_splitter->addWidget(visible_objects_widget_);
   air_marine_splitter->setStretchFactor(0, 1);
   air_marine_splitter->setStretchFactor(1, 3);
@@ -2362,7 +2367,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     // Show/hide signal_visualization_ and configure scan range viz immediately,
     // before StopReceiver — these are UI-only and safe to do unconditionally.
     if (signal_visualization_ != nullptr) {
-      signal_visualization_->setVisible(index != kScanRangeModeTabIndex);
+      // Hide spectrum/waterfall widgets in RADAR_VIEW.
+      signal_visualization_->setVisible(index != kScanRangeModeTabIndex &&
+                                        index != kAirMarineModeTabIndex);
     }
     if (index == kScanRangeModeTabIndex && scan_range_viz_ != nullptr) {
       const double start = range_start_edit_->text().toDouble() * 1e6;
