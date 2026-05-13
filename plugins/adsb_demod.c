@@ -451,21 +451,23 @@ static int slice_phase4(const uint32_t* m) {
   return (int)((int32_t)(m[0]) + (int32_t)(5u*m[1]) - (int32_t)(5u*m[2]) - (int32_t)(m[3]));
 }
 
-/* Phase-specific bit offsets and correlator mappings for Manchester decoding */
+/* Phase-specific bit offsets and correlator mappings for Manchester decoding
+ * Indexed by phase % 5: phase 0→[0], 1→[1], 2→[2], 3→[3], 4→[4]
+ * From dump1090 demod_2400.c (phases 4-8 map to 4,0,1,2,3 after %5) */
 static const uint32_t bit_offsets[5][8] = {
-  {0, 2, 4, 7, 9, 12, 14, 16},  /* phase 3 -> phase 0 */
-  {0, 2, 5, 7, 9, 12, 14, 17},  /* phase 4 -> phase 1 */
-  {0, 2, 5, 7, 10, 12, 14, 17}, /* phase 5 -> phase 2 */
-  {0, 3, 5, 7, 10, 12, 15, 17}, /* phase 6 -> phase 3 */
-  {0, 3, 5, 8, 10, 12, 15, 17}, /* phase 7 -> phase 4 */
+  {0, 2, 5, 7, 10, 12, 14, 17}, /* phase 0 (from try_phase=5): slice phase 0,2,4,1,3,0,2,4 */
+  {0, 2, 5, 7, 9, 12, 14, 17},  /* phase 1 (from try_phase=6): slice phase 3,0,2,4,1,3,0,2 */
+  {0, 3, 5, 8, 10, 12, 15, 17}, /* phase 2 (from try_phase=7): slice phase 4,1,3,0,2,4,1,3 */
+  {0, 2, 4, 7, 9, 12, 14, 16},  /* phase 3 (from try_phase=3): slice phase 0,2,4,1,3,0,2,4 */
+  {0, 2, 5, 7, 9, 12, 14, 17},  /* phase 4 (from try_phase=4): slice phase 1,3,0,2,4,1,3,0 */
 };
 
 static const int bit_funcs[5][8] = {
-  {0, 2, 4, 1, 3, 0, 2, 4},     /* phase 0: which slice_phase per bit */
-  {1, 3, 0, 2, 4, 1, 3, 0},     /* phase 1 */
-  {2, 4, 1, 3, 0, 2, 4, 1},     /* phase 2 */
-  {3, 0, 2, 4, 1, 3, 0, 2},     /* phase 3 */
-  {4, 1, 3, 0, 2, 4, 1, 3},     /* phase 4 */
+  {2, 4, 1, 3, 0, 2, 4, 1},     /* phase 0: slice_phase2,4,1,3,0,2,4,1 */
+  {3, 0, 2, 4, 1, 3, 0, 2},     /* phase 1: slice_phase3,0,2,4,1,3,0,2 */
+  {4, 1, 3, 0, 2, 4, 1, 3},     /* phase 2: slice_phase4,1,3,0,2,4,1,3 */
+  {0, 2, 4, 1, 3, 0, 2, 4},     /* phase 3: slice_phase0,2,4,1,3,0,2,4 */
+  {1, 3, 0, 2, 4, 1, 3, 0},     /* phase 4: slice_phase1,3,0,2,4,1,3,0 */
 };
 
 static int apply_correlator(int func_idx, const uint32_t* m) {
@@ -1042,9 +1044,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       fflush(debug_file);
     }
 
-    uint32_t msg_offset = (best_phase == 7) ? 20u : 19u;
-    const uint32_t* pPtr = ctx->mag + p + msg_offset;
-    int phase = (best_phase + 1) % 5;   /* maps 3→4, 4→0, 5→1, 6→2, 7→3 */
+    /* Decode pPtr like dump1090: pPtr = mag[p+19] + (best_phase/5) for fine phase offset */
+    const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(best_phase / 5);
+    int phase = best_phase % 5;   /* 3→3, 4→4, 5→0, 6→1, 7→2 */
 
     uint8_t frame[MODES_LONG_MSG_BYTES];
     const uint32_t* last_ptr = pPtr;
@@ -1069,14 +1071,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       }
 
       if (debug_enabled) {
-        fprintf(debug_file, "[adsb_demod] decode header DF=%u n_bytes=%u first_phase=%d msg_offset=%u\n",
-                df, n_bytes, phase, msg_offset);
+        fprintf(debug_file, "[adsb_demod] decode header DF=%u n_bytes=%u first_phase=%d\n",
+                df, n_bytes, phase);
         fflush(debug_file);
       }
 
-      if (phase == 4) pPtr += 20u;
-      else pPtr += 19u;
       phase = (phase + 1) % 5;
+      pPtr += 19u;
 
       for (uint32_t i = 1; i < n_bytes; ++i) {
         ptr = pPtr;
@@ -1089,9 +1090,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
           if (corr > 0) byte_val |= (uint8_t)(0x80u >> b);
         }
         frame[i] = byte_val;
-        if (phase == 4) pPtr += 20u;
-        else pPtr += 19u;
         phase = (phase + 1) % 5;
+        pPtr += (phase == 0u) ? 20u : 19u;  /* Add extra sample when phase wraps to 0 */
       }
 
       uint32_t frame_len = (uint32_t)(last_ptr - (ctx->mag + p)) + 18u;
