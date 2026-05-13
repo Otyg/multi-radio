@@ -2539,6 +2539,11 @@ void MainWindow::RefreshReceivers() {
 
   if (receiver_combo_->currentIndex() >= 0) {
     const uint32_t selected_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
+    int active_mode_tab_index = mode_tabs_ != nullptr ? mode_tabs_->currentIndex() : kFixedModeTabIndex;
+    if (active_mode_tab_index == kGlobalSettingsTabIndex) {
+      active_mode_tab_index = last_mode_tab_index_;
+    }
+    const bool radar_scan_list_active = (active_mode_tab_index == kAirMarineModeTabIndex);
     if (receiver_filter_id_to_apply < 0) {
       const int selected_filter_index = receiver_filter_combo_->findData(QVariant::fromValue<int>(selected_id));
       if (selected_filter_index >= 0) {
@@ -2698,7 +2703,11 @@ void MainWindow::RefreshReceivers() {
           updated.audio_gain_db = static_cast<double>(channel.audio_gain_db());
           updated_channels.push_back(std::move(updated));
         }
-        scan_list_channels_ = std::move(updated_channels);
+        if (radar_scan_list_active) {
+          radar_scan_list_channels_ = std::move(updated_channels);
+        } else {
+          scan_list_channels_ = std::move(updated_channels);
+        }
       }
       scan_list_monitor_checkbox_->setChecked(receiver.mode_config().scan_list_monitor_mode());
       if (scan_list_default_squelch_spin_ != nullptr) {
@@ -2709,6 +2718,7 @@ void MainWindow::RefreshReceivers() {
     }
   }
   RefreshScanListChannelCards();
+  RefreshRadarScanListChannelCards();
 
   signal_visualization_->SetKnownReceivers(receiver_ids);
   signal_visualization_->SetReceiverFilter(receiver_filter_id_to_apply);
