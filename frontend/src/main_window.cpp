@@ -2400,12 +2400,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     if (signal_visualization_ != nullptr) {
       signal_visualization_->SetChannelLabel(QString());
     }
-    if (receiver_combo_->currentIndex() >= 0 && scan_list_default_squelch_spin_ != nullptr) {
+    int active_mode_tab_index = mode_tabs_ != nullptr ? mode_tabs_->currentIndex() : kFixedModeTabIndex;
+    if (active_mode_tab_index == kGlobalSettingsTabIndex) {
+      active_mode_tab_index = last_mode_tab_index_;
+    }
+    const bool radar_scan_list_active = (active_mode_tab_index == kAirMarineModeTabIndex);
+    const QDoubleSpinBox* active_default_squelch_spin =
+        radar_scan_list_active ? radar_scan_list_default_squelch_spin_ : scan_list_default_squelch_spin_;
+    if (receiver_combo_->currentIndex() >= 0 && active_default_squelch_spin != nullptr) {
       const uint32_t receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
       signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id,
-                                                           scan_list_default_squelch_spin_->value());
+                                                           active_default_squelch_spin->value());
     }
     RefreshScanListChannelCards();
+    RefreshRadarScanListChannelCards();
   });
   connect(mode_tabs_, &QTabWidget::currentChanged, this, [this](int index) {
     const int previous_tab_index = last_tab_index_;
@@ -2589,11 +2597,6 @@ void MainWindow::RefreshReceivers() {
 
   if (receiver_combo_->currentIndex() >= 0) {
     const uint32_t selected_id = static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
-    int active_mode_tab_index = mode_tabs_ != nullptr ? mode_tabs_->currentIndex() : kFixedModeTabIndex;
-    if (active_mode_tab_index == kGlobalSettingsTabIndex) {
-      active_mode_tab_index = last_mode_tab_index_;
-    }
-    const bool radar_scan_list_active = (active_mode_tab_index == kAirMarineModeTabIndex);
     if (receiver_filter_id_to_apply < 0) {
       const int selected_filter_index = receiver_filter_combo_->findData(QVariant::fromValue<int>(selected_id));
       if (selected_filter_index >= 0) {
@@ -2656,8 +2659,6 @@ void MainWindow::RefreshReceivers() {
               digital_like && (sample_rate_spin_->value() != 2048000));
         }
       }
-      const double receiver_default_squelch_db =
-          std::clamp(receiver.mode_config().scan_list_default_squelch_db(), -120.0, 0.0);
       if (gmsk_baud_rate_spin_ != nullptr) {
         const QSignalBlocker blocker(gmsk_baud_rate_spin_);
         gmsk_baud_rate_spin_->setValue(static_cast<int>(receiver.mode_config().gmsk_baud_rate()));
@@ -2708,10 +2709,6 @@ void MainWindow::RefreshReceivers() {
       }
       adsb_agc_bandwidth_ = receiver.mode_config().adsb_agc_bandwidth();
       adsb_agc_target_level_ = receiver.mode_config().adsb_agc_target_level();
-      QDoubleSpinBox* active_default_squelch_spin =
-          radar_scan_list_active ? radar_scan_list_default_squelch_spin_ : scan_list_default_squelch_spin_;
-      QCheckBox* active_monitor_checkbox =
-          radar_scan_list_active ? radar_scan_list_monitor_checkbox_ : scan_list_monitor_checkbox_;
       {
         v1::Modulation fixed_modulation = receiver.mode_config().fixed_modulation();
         if (fixed_modulation == v1::MODULATION_UNSPECIFIED) {
@@ -2726,47 +2723,14 @@ void MainWindow::RefreshReceivers() {
         if (vdes_candidate_bits_spin_ != nullptr) vdes_candidate_bits_spin_->setEnabled(use_vdes);
         if (vdes_sync_errors_spin_ != nullptr) vdes_sync_errors_spin_->setEnabled(use_vdes);
       }
-      if (active_default_squelch_spin != nullptr) {
-        const QSignalBlocker blocker(active_default_squelch_spin);
-        active_default_squelch_spin->setValue(receiver_default_squelch_db);
+      int active_mode_tab_index = mode_tabs_ != nullptr ? mode_tabs_->currentIndex() : kFixedModeTabIndex;
+      if (active_mode_tab_index == kGlobalSettingsTabIndex) {
+        active_mode_tab_index = last_mode_tab_index_;
       }
-      const auto& channels = receiver.mode_config().scan_list_channels();
-      if (!channels.empty()) {
-        std::vector<ScanListChannelConfig> updated_channels;
-        updated_channels.reserve(static_cast<size_t>(channels.size()));
-        for (int index = 0; index < channels.size(); ++index) {
-          const auto& channel = channels.Get(index);
-          ScanListChannelConfig updated;
-          updated.label = QString::fromStdString(channel.label());
-          updated.frequency_mhz = channel.frequency_hz() > 0.0 ? channel.frequency_hz() / 1000000.0 : 0.0;
-          updated.modulation = channel.modulation();
-          updated.bandwidth_hz = static_cast<int>(channel.channel_bandwidth_hz());
-          const double channel_squelch_db = channel.squelch_threshold_db();
-          bool use_default_squelch = channel.use_default_squelch();
-          if (!use_default_squelch &&
-              std::abs(channel_squelch_db - receiver_default_squelch_db) < 0.05) {
-            // Legacy configs had no explicit "use default" flag. Treat same-value channels as default.
-            use_default_squelch = true;
-          }
-          updated.use_default_squelch = use_default_squelch;
-          updated.squelch_threshold_db = channel_squelch_db;
-          if (updated.use_default_squelch) {
-            updated.squelch_threshold_db = receiver_default_squelch_db;
-          }
-          updated.dwell_ms = static_cast<int>(channel.dwell_ms());
-          updated.audio_gain_db = static_cast<double>(channel.audio_gain_db());
-          updated_channels.push_back(std::move(updated));
-        }
-        if (radar_scan_list_active) {
-          radar_scan_list_channels_ = std::move(updated_channels);
-        } else {
-          scan_list_channels_ = std::move(updated_channels);
-        }
-      }
-      if (active_monitor_checkbox != nullptr) {
-        const QSignalBlocker blocker(active_monitor_checkbox);
-        active_monitor_checkbox->setChecked(receiver.mode_config().scan_list_monitor_mode());
-      }
+      const bool radar_scan_list_active = (active_mode_tab_index == kAirMarineModeTabIndex);
+      const QDoubleSpinBox* active_default_squelch_spin =
+          radar_scan_list_active ? radar_scan_list_default_squelch_spin_
+                                 : scan_list_default_squelch_spin_;
       if (active_default_squelch_spin != nullptr) {
         signal_visualization_->SetReceiverSquelchThresholdDb(selected_id,
                                                              active_default_squelch_spin->value());
