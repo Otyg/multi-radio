@@ -1708,9 +1708,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   minutes_filter_spin_ = new QSpinBox(radar_group);
   minutes_filter_spin_->setRange(1, 240);
   minutes_filter_spin_->setValue(30);
-  radar_layout->addRow(new QLabel("Uses built-in AIS + ADS-B + DSC channels.", radar_group));
-  radar_layout->addRow(new QLabel("AIS: 162000000 Hz, ADS-B: 1090000000 Hz, DSC Ch 70: 156525000 Hz",
-                                  radar_group));
+  radar_layout->addRow(new QLabel("Radar updates come from the active scan-list channels.", radar_group));
+  radar_layout->addRow(new QLabel("Tip: add an AIS Dual channel (around 162 MHz) to feed the map.", radar_group));
   auto* signal_minutes_row = new QWidget(radar_group);
   auto* signal_minutes_layout = new QHBoxLayout(signal_minutes_row);
   signal_minutes_layout->setContentsMargins(0, 0, 0, 0);
@@ -4592,7 +4591,12 @@ void MainWindow::LoadScanListConfigFromSettingsGroup(const QString& group) {
     channel_count = max_index + 1;
   }
   if (channel_count <= 0) {
-    channel_count = 5;
+    // Seed defaults for the radar view so Start immediately provides AIS updates.
+    if (group == "radar_scan_list") {
+      channel_count = 3;
+    } else {
+      channel_count = 5;
+    }
   }
 
   scan_list_channels_.clear();
@@ -4666,6 +4670,49 @@ void MainWindow::LoadScanListConfigFromSettingsGroup(const QString& group) {
     settings.endGroup();
   }
   settings.endGroup();
+
+  // If radar_scan_list is empty/missing (first run), seed sensible defaults.
+  if (group == "radar_scan_list") {
+    bool any_freq = false;
+    for (const auto& ch : scan_list_channels_) {
+      if (ch.frequency_mhz > 0.0) { any_freq = true; break; }
+    }
+    if (!any_freq) {
+      scan_list_channels_.clear();
+      scan_list_channels_.reserve(3);
+
+      ScanListChannelConfig ais;
+      ais.label = "AIS Dual";
+      ais.frequency_mhz = 162.000;
+      ais.modulation = v1::MODULATION_AIS_DUAL;
+      ais.bandwidth_hz = DefaultBandwidthHzForModulation(ais.modulation);
+      ais.use_default_squelch = true;
+      ais.squelch_threshold_db = default_squelch_db;
+      scan_list_channels_.push_back(ais);
+
+      ScanListChannelConfig dsc;
+      dsc.label = "DSC Ch 70";
+      dsc.frequency_mhz = 156.525;
+      dsc.modulation = v1::MODULATION_FSK;
+      dsc.bandwidth_hz = DefaultBandwidthHzForModulation(dsc.modulation);
+      dsc.use_default_squelch = true;
+      dsc.squelch_threshold_db = default_squelch_db;
+      scan_list_channels_.push_back(dsc);
+
+      ScanListChannelConfig adsb;
+      adsb.label = "ADS-B";
+      adsb.frequency_mhz = 1090.000;
+      adsb.modulation = v1::MODULATION_ADSB;
+      adsb.bandwidth_hz = DefaultBandwidthHzForModulation(adsb.modulation);
+      adsb.use_default_squelch = true;
+      adsb.squelch_threshold_db = default_squelch_db;
+      scan_list_channels_.push_back(adsb);
+
+      SaveScanListConfigToSettingsGroup(group);
+      AppendLog("Seeded radar scan-list defaults (AIS Dual, DSC, ADS-B)");
+    }
+  }
+
   if (migrated_legacy_squelch_format) {
     SaveScanListConfigToSettingsGroup(group);
     AppendLog("Migrated legacy scan-list squelch settings to default-aware format");
