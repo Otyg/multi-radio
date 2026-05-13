@@ -520,6 +520,82 @@ static int apply_correlator(int func_idx, const uint32_t* m) {
   }
 }
 
+/* Extract one byte using dump1090/readsb 2.4Msps slicing pattern.
+ * Advances pPtr and updates phase (0..4). */
+static inline uint8_t slice_byte_2400(const uint32_t** pPtr, int* phase) {
+  const uint32_t* p = *pPtr;
+  uint8_t theByte = 0u;
+  switch (*phase) {
+    case 0:
+      theByte =
+          (slice_phase0(p) > 0 ? 0x80u : 0) |
+          (slice_phase2(p + 2) > 0 ? 0x40u : 0) |
+          (slice_phase4(p + 4) > 0 ? 0x20u : 0) |
+          (slice_phase1(p + 7) > 0 ? 0x10u : 0) |
+          (slice_phase3(p + 9) > 0 ? 0x08u : 0) |
+          (slice_phase0(p + 12) > 0 ? 0x04u : 0) |
+          (slice_phase2(p + 14) > 0 ? 0x02u : 0) |
+          (slice_phase4(p + 16) > 0 ? 0x01u : 0);
+      *phase = 1;
+      *pPtr = p + 19;
+      break;
+    case 1:
+      theByte =
+          (slice_phase1(p) > 0 ? 0x80u : 0) |
+          (slice_phase3(p + 2) > 0 ? 0x40u : 0) |
+          (slice_phase0(p + 5) > 0 ? 0x20u : 0) |
+          (slice_phase2(p + 7) > 0 ? 0x10u : 0) |
+          (slice_phase4(p + 9) > 0 ? 0x08u : 0) |
+          (slice_phase1(p + 12) > 0 ? 0x04u : 0) |
+          (slice_phase3(p + 14) > 0 ? 0x02u : 0) |
+          (slice_phase0(p + 17) > 0 ? 0x01u : 0);
+      *phase = 2;
+      *pPtr = p + 19;
+      break;
+    case 2:
+      theByte =
+          (slice_phase2(p) > 0 ? 0x80u : 0) |
+          (slice_phase4(p + 2) > 0 ? 0x40u : 0) |
+          (slice_phase1(p + 5) > 0 ? 0x20u : 0) |
+          (slice_phase3(p + 7) > 0 ? 0x10u : 0) |
+          (slice_phase0(p + 10) > 0 ? 0x08u : 0) |
+          (slice_phase2(p + 12) > 0 ? 0x04u : 0) |
+          (slice_phase4(p + 14) > 0 ? 0x02u : 0) |
+          (slice_phase1(p + 17) > 0 ? 0x01u : 0);
+      *phase = 3;
+      *pPtr = p + 19;
+      break;
+    case 3:
+      theByte =
+          (slice_phase3(p) > 0 ? 0x80u : 0) |
+          (slice_phase0(p + 3) > 0 ? 0x40u : 0) |
+          (slice_phase2(p + 5) > 0 ? 0x20u : 0) |
+          (slice_phase4(p + 7) > 0 ? 0x10u : 0) |
+          (slice_phase1(p + 10) > 0 ? 0x08u : 0) |
+          (slice_phase3(p + 12) > 0 ? 0x04u : 0) |
+          (slice_phase0(p + 15) > 0 ? 0x02u : 0) |
+          (slice_phase2(p + 17) > 0 ? 0x01u : 0);
+      *phase = 4;
+      *pPtr = p + 19;
+      break;
+    case 4:
+    default:
+      theByte =
+          (slice_phase4(p) > 0 ? 0x80u : 0) |
+          (slice_phase1(p + 3) > 0 ? 0x40u : 0) |
+          (slice_phase3(p + 5) > 0 ? 0x20u : 0) |
+          (slice_phase0(p + 8) > 0 ? 0x10u : 0) |
+          (slice_phase2(p + 10) > 0 ? 0x08u : 0) |
+          (slice_phase4(p + 12) > 0 ? 0x04u : 0) |
+          (slice_phase1(p + 15) > 0 ? 0x02u : 0) |
+          (slice_phase3(p + 17) > 0 ? 0x01u : 0);
+      *phase = 0;
+      *pPtr = p + 20;
+      break;
+  }
+  return theByte;
+}
+
 
 /* ------------------------------------------------------------------ */
 /* ICAO 24-bitars adress → land (ICAO Annex 10-tilldelningar)          */
@@ -1161,50 +1237,45 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     int best_phase = -1;
     uint32_t best_high = 0u;
 
-    for (int ph = 3; ph <= 7; ++ph) {
+    int best_try_phase = -1;
+    for (int pre_ph = 3; pre_ph <= 7; ++pre_ph) {
       uint32_t phase_high = 0u;
-      if (preamble_ok_phase(ctx, ctx->mag + p, ph, &phase_high)) {
+      if (preamble_ok_phase(ctx, ctx->mag + p, pre_ph, &phase_high)) {
         if (debug_enabled) {
-          fprintf(debug_file, "[adsb_demod] preamble candidate idx=%u phase=%d high=%u\n", p, ph, phase_high);
+          fprintf(debug_file, "[adsb_demod] preamble candidate idx=%u phase=%d high=%u\n", p, pre_ph, phase_high);
         }
-        if (best_phase < 0 || phase_high > best_high) {
-          best_phase = ph;
+        int try_phase = pre_ph + 1; /* dump1090 uses try_phase 4..8 for preamble phases 3..7 */
+        if (best_try_phase < 0 || phase_high > best_high) {
+          best_try_phase = try_phase;
           best_high = phase_high;
         }
       }
     }
 
-    if (best_phase < 0) {
+    if (best_try_phase < 0) {
       ++p;
       continue;
     }
 
     ++ctx->preamble_count;
     if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] preamble selected idx=%u best_phase=%d high=%u\n", p, best_phase, best_high);
+      fprintf(debug_file, "[adsb_demod] preamble selected idx=%u best_phase=%d high=%u\n", p, best_try_phase, best_high);
       fflush(debug_file);
     }
 
     /* Decode like dump1090 "demod_2400":
      * - Start at p+19 with a coarse sample offset by phase bucket (best_phase/5)
      * - Then advance 19 or 20 samples depending on phase wrap */
-    const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(best_phase / 5);
-    int phase = best_phase % 5;   /* 3→3, 4→4, 5→0, 6→1, 7→2 */
+    const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(best_try_phase / 5);
+    int phase = best_try_phase % 5;
 
     uint8_t frame[MODES_LONG_MSG_BYTES];
     const uint32_t* last_ptr = pPtr;
 
     {
-      const uint32_t* ptr = pPtr;
-      const uint32_t* offsets = bit_offsets[phase];
-      const int* funcs = bit_funcs[phase];
-      uint8_t byte0 = 0u;
-      for (int b = 0; b < 8; ++b) {
-        int corr = apply_correlator(funcs[b], ptr + offsets[b]);
-        if (corr > 0) byte0 |= (uint8_t)(0x80u >> b);
-      }
-      frame[0] = byte0;
-      uint32_t df = (byte0 >> 3u) & 0x1Fu;
+      frame[0] = slice_byte_2400(&pPtr, &phase);
+      last_ptr = pPtr;
+      uint32_t df = (frame[0] >> 3u) & 0x1Fu;
       uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
       uint32_t n_bits = n_bytes * 8u;
 
@@ -1219,22 +1290,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         fflush(debug_file);
       }
 
-      phase = (phase + 1) % 5;
-      pPtr += (phase == 0) ? 20u : 19u;
-
       for (uint32_t i = 1; i < n_bytes; ++i) {
-        ptr = pPtr;
-        last_ptr = ptr;
-        const uint32_t* offsets = bit_offsets[phase];
-        const int* funcs = bit_funcs[phase];
-        uint8_t byte_val = 0u;
-        for (int b = 0; b < 8; ++b) {
-          int corr = apply_correlator(funcs[b], ptr + offsets[b]);
-          if (corr > 0) byte_val |= (uint8_t)(0x80u >> b);
-        }
-        frame[i] = byte_val;
-        phase = (phase + 1) % 5;
-        pPtr += (phase == 0u) ? 20u : 19u;  /* Add extra sample when phase wraps to 0 */
+        frame[i] = slice_byte_2400(&pPtr, &phase);
+        last_ptr = pPtr;
       }
 
       uint32_t frame_len = (uint32_t)(last_ptr - (ctx->mag + p)) + 18u;
