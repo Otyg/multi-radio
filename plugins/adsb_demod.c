@@ -119,6 +119,7 @@ typedef struct {
   uint32_t  mag_len;
   uint64_t  preamble_count;
   uint64_t  crc_ok_count;
+  uint64_t  crc_ok_clean_count;
   uint64_t  crc_ok_corrected_count;
   uint64_t  crc_ok_ap_count;
   uint64_t  crc_fail_count;
@@ -1021,7 +1022,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       int ap_recovered = 0;
       uint32_t syndrome = modesChecksum(frame, n_bits);
       if (syndrome != 0u) {
-        int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, NULL);
+        int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
+        int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, fixbits);
         if (fixed > 0) {
           corrected = fixed;
           syndrome = modesChecksum(frame, n_bits);
@@ -1037,6 +1039,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       }
       if (syndrome == 0u || ap_recovered) {
         ctx->crc_ok_count++;
+        if (corrected == 0 && !ap_recovered) ctx->crc_ok_clean_count++;
         if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
         if (ap_recovered) ctx->crc_ok_ap_count++;
         if (df == 17u) ctx->df17_ok_count++;
@@ -1050,7 +1053,14 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
         if (debug_enabled) {
           fprintf(debug_file, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u", df, icao, n_bytes);
-          if (corrected > 0) fprintf(debug_file, " corrected=%d", corrected);
+          if (corrected > 0) {
+            fprintf(debug_file, " corrected=%d bits[", corrected);
+            for (int fi = 0; fi < corrected; fi++) {
+              if (fi) fprintf(debug_file, ",");
+              fprintf(debug_file, "%d", fixbits[fi]);
+            }
+            fprintf(debug_file, "]");
+          }
           if (ap_recovered) fprintf(debug_file, " ap_recovered=1");
           if (df == 17u && ap_recovered) fprintf(debug_file, " [DF17 AP RECOVERED]");
           if (df == 18u) fprintf(debug_file, " [DF18]");
@@ -1099,10 +1109,11 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   if (unix_ms - ctx->last_stats_ms >= 10000u) {
     ctx->last_stats_ms = unix_ms;
     fprintf(stderr,
-            "[ADS-B] preamble=%llu  crc_ok=%llu(+%llu korr +%llu ap)  crc_fail=%llu"
+            "[ADS-B] preamble=%llu  crc_ok=%llu(clean=%llu +%llu korr +%llu ap)  crc_fail=%llu"
             "  df17_ok=%llu  df17_fail=%llu  df18_ok=%llu  df18_fail=%llu\n",
             (unsigned long long)ctx->preamble_count,
             (unsigned long long)ctx->crc_ok_count,
+            (unsigned long long)ctx->crc_ok_clean_count,
             (unsigned long long)ctx->crc_ok_corrected_count,
             (unsigned long long)ctx->crc_ok_ap_count,
             (unsigned long long)ctx->crc_fail_count,
