@@ -615,6 +615,73 @@ static inline uint8_t slice_byte_2400(const uint32_t** pPtr, int* phase) {
   return theByte;
 }
 
+/* Try decoding a frame starting at preamble index p with a specific try_phase (4..8).
+ * Returns:
+ *  1: decoded and CRC-valid (or AP recovered)
+ *  0: decoded but CRC invalid
+ * -1: not enough samples in buffer (caller should break and keep remainder)
+ */
+static int decode_candidate_2400(AdsbCtx* ctx,
+                                 uint32_t p,
+                                 int try_phase,
+                                 uint8_t frame_out[MODES_LONG_MSG_BYTES],
+                                 uint32_t* out_n_bytes,
+                                 uint32_t* out_frame_len,
+                                 uint32_t* out_df,
+                                 uint32_t* out_syndrome,
+                                 int* out_corrected,
+                                 int* out_ap_recovered,
+                                 int fixbits_out[MODES_MAX_BITERRORS]) {
+  const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(try_phase / 5);
+  int phase = try_phase % 5;
+  const uint32_t* last_ptr = pPtr;
+
+  frame_out[0] = slice_byte_2400(&pPtr, &phase);
+  last_ptr = pPtr;
+  uint32_t df = (frame_out[0] >> 3u) & 0x1Fu;
+  uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
+  if (n_bytes > MODES_LONG_MSG_BYTES) return 0;
+  uint32_t n_bits = n_bytes * 8u;
+
+  for (uint32_t i = 1; i < n_bytes; ++i) {
+    frame_out[i] = slice_byte_2400(&pPtr, &phase);
+    last_ptr = pPtr;
+  }
+
+  uint32_t frame_len = (uint32_t)(last_ptr - (ctx->mag + p)) + 18u;
+  if (p + frame_len > ctx->mag_len) return -1;
+
+  int corrected = 0;
+  int ap_recovered = 0;
+  if (fixbits_out) { fixbits_out[0] = -1; fixbits_out[1] = -1; }
+
+  uint32_t syndrome = modesChecksum(frame_out, n_bits);
+  if (syndrome != 0u) {
+    int fixed = fixBitErrors(frame_out, n_bits, g_adsb_max_biterrors, fixbits_out);
+    if (fixed > 0) {
+      corrected = fixed;
+      syndrome = modesChecksum(frame_out, n_bits);
+    } else {
+      if (df == 0u || df == 4u || df == 5u || df == 16u ||
+          df == 20u || df == 21u || df == 24u) {
+        if (bruteForceAP(ctx, frame_out, n_bits)) {
+          ap_recovered = 1;
+          corrected = -1;
+        }
+      }
+    }
+  }
+
+  if (out_n_bytes) *out_n_bytes = n_bytes;
+  if (out_frame_len) *out_frame_len = frame_len;
+  if (out_df) *out_df = df;
+  if (out_syndrome) *out_syndrome = syndrome;
+  if (out_corrected) *out_corrected = corrected;
+  if (out_ap_recovered) *out_ap_recovered = ap_recovered;
+
+  return (syndrome == 0u || ap_recovered) ? 1 : 0;
+}
+
 
 /* ------------------------------------------------------------------ */
 /* ICAO 24-bitars adress → land (ICAO Annex 10-tilldelningar)          */
@@ -1277,111 +1344,108 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
   uint32_t p = 0;
   while (p + min_frame <= ctx->mag_len) {
-    int best_phase = -1;
-    uint32_t best_high = 0u;
+    uint32_t cand_high[5];
+    int cand_try_phase[5];
+    int cand_n = 0;
 
-    int best_try_phase = -1;
     for (int pre_ph = 3; pre_ph <= 7; ++pre_ph) {
       uint32_t phase_high = 0u;
       if (preamble_ok_phase(ctx, ctx->mag + p, pre_ph, &phase_high)) {
         if (debug_enabled) {
           fprintf(debug_file, "[adsb_demod] preamble candidate idx=%u phase=%d high=%u\n", p, pre_ph, phase_high);
         }
-        int try_phase = pre_ph + 1; /* dump1090 uses try_phase 4..8 for preamble phases 3..7 */
-        if (best_try_phase < 0 || phase_high > best_high) {
-          best_try_phase = try_phase;
-          best_high = phase_high;
+        int try_phase = pre_ph + 1; /* try_phase 4..8 */
+        if (cand_n < 5) {
+          cand_try_phase[cand_n] = try_phase;
+          cand_high[cand_n] = phase_high;
+          cand_n++;
         }
       }
     }
 
-    if (best_try_phase < 0) {
+    if (cand_n == 0) {
       ++p;
       continue;
     }
 
+    /* Decode all candidate phases and pick the best (CRC-valid beats higher 'high'). */
+    int best_ok = 0;
+    int best_score = -1;
+    int best_try_phase = -1;
+    uint32_t best_high = 0u;
+    uint8_t best_frame[MODES_LONG_MSG_BYTES];
+    uint32_t best_n_bytes = 0u;
+    uint32_t best_frame_len = 0u;
+    uint32_t best_df = 0u;
+    uint32_t best_syndrome = 0u;
+    int best_corrected = 0;
+    int best_ap = 0;
+    int best_fixbits[MODES_MAX_BITERRORS] = {-1, -1};
+
+    for (int ci = 0; ci < cand_n; ++ci) {
+      uint8_t frame_tmp[MODES_LONG_MSG_BYTES];
+      uint32_t n_bytes = 0u, frame_len = 0u, df = 0u, syndrome = 0u;
+      int corrected = 0, ap = 0;
+      int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
+      int rc = decode_candidate_2400(ctx, p, cand_try_phase[ci],
+                                     frame_tmp, &n_bytes, &frame_len, &df,
+                                     &syndrome, &corrected, &ap, fixbits);
+      if (rc < 0) { best_try_phase = -2; break; }
+
+      /* Score: CRC clean best, then corrected CRC, then AP. */
+      int score = 0;
+      if (rc == 1 && corrected == 0 && !ap) score = 3000;
+      else if (rc == 1 && corrected > 0) score = 2000 - corrected;
+      else if (rc == 1 && ap) score = 1500;
+      else score = 0;
+
+      /* Tie-breaker: higher preamble high. */
+      if (score > best_score || (score == best_score && cand_high[ci] > best_high)) {
+        best_score = score;
+        best_ok = (rc == 1);
+        best_try_phase = cand_try_phase[ci];
+        best_high = cand_high[ci];
+        memcpy(best_frame, frame_tmp, n_bytes);
+        best_n_bytes = n_bytes;
+        best_frame_len = frame_len;
+        best_df = df;
+        best_syndrome = syndrome;
+        best_corrected = corrected;
+        best_ap = ap;
+        best_fixbits[0] = fixbits[0];
+        best_fixbits[1] = fixbits[1];
+      }
+    }
+
+    if (best_try_phase == -2) break;
+    if (best_try_phase < 0) { ++p; continue; }
+
     ++ctx->preamble_count;
     if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] preamble selected idx=%u best_phase=%d high=%u\n", p, best_try_phase, best_high);
+      fprintf(debug_file, "[adsb_demod] preamble selected idx=%u best_phase=%d high=%u score=%d\n",
+              p, best_try_phase, best_high, best_score);
       fflush(debug_file);
     }
 
-    /* Decode like dump1090 "demod_2400":
-     * - Start at p+19 with a coarse sample offset by phase bucket (best_phase/5)
-     * - Then advance 19 or 20 samples depending on phase wrap */
-    const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(best_try_phase / 5);
-    int phase = best_try_phase % 5;
+    uint32_t df = best_df;
+    uint32_t n_bytes = best_n_bytes;
+    uint32_t n_bits = n_bytes * 8u;
+    uint32_t syndrome = best_syndrome;
+    int corrected = best_corrected;
+    int ap_recovered = best_ap;
+    int* fixbits = best_fixbits;
 
-    uint8_t frame[MODES_LONG_MSG_BYTES];
-    const uint32_t* last_ptr = pPtr;
-
-    {
-      frame[0] = slice_byte_2400(&pPtr, &phase);
-      last_ptr = pPtr;
-      uint32_t df = (frame[0] >> 3u) & 0x1Fu;
-      uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
-      uint32_t n_bits = n_bytes * 8u;
-
-      if (n_bytes > MODES_LONG_MSG_BYTES) {
-        ++p;
-        continue;
-      }
-
-      if (debug_enabled) {
-        fprintf(debug_file, "[adsb_demod] decode header DF=%u n_bytes=%u first_phase=%d\n",
-                df, n_bytes, phase);
-        fflush(debug_file);
-      }
-
-      for (uint32_t i = 1; i < n_bytes; ++i) {
-        frame[i] = slice_byte_2400(&pPtr, &phase);
-        last_ptr = pPtr;
-      }
-
-      uint32_t frame_len = (uint32_t)(last_ptr - (ctx->mag + p)) + 18u;
-      if (p + frame_len > ctx->mag_len) {
-        break;
-      }
-
-      int corrected = 0;
-      int ap_recovered = 0;
-      int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
-      uint32_t syndrome = modesChecksum(frame, n_bits);
-      if (syndrome != 0u) {
-        int fixed = fixBitErrors(frame, n_bits, g_adsb_max_biterrors, fixbits);
-        if (fixed > 0) {
-          corrected = fixed;
-          syndrome = modesChecksum(frame, n_bits);
-        } else {
-          if (df == 0u || df == 4u || df == 5u || df == 16u ||
-              df == 20u || df == 21u || df == 24u) {
-            if (bruteForceAP(ctx, frame, n_bits)) {
-              ap_recovered = 1;
-              corrected = -1;
-            }
-          }
-        }
-      }
-      /* Förkasta ogiltigt DF efter korrigering — eliminerar bullerfalsklarm */
-      static const uint32_t kValidDF =
-          (1u<<0)|(1u<<4)|(1u<<5)|(1u<<11)|
-          (1u<<16)|(1u<<17)|(1u<<18)|(1u<<19)|
-          (1u<<20)|(1u<<21)|(1u<<24);
-      if (corrected > 0 && !((kValidDF >> df) & 1u)) {
-        ++ctx->crc_fail_count;
-        ++p;
-        continue;
-      }
-      if (syndrome == 0u || ap_recovered) {
+    /* For now, only accept CRC-valid/AP frames. */
+    if (best_ok) {
         ctx->crc_ok_count++;
         if (corrected == 0 && !ap_recovered) ctx->crc_ok_clean_count++;
         if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
         if (ap_recovered) ctx->crc_ok_ap_count++;
         if (df == 17u) ctx->df17_ok_count++;
 
-        uint32_t icao = ((uint32_t)frame[1] << 16) |
-                        ((uint32_t)frame[2] <<  8) |
-                         (uint32_t)frame[3];
+        uint32_t icao = ((uint32_t)best_frame[1] << 16) |
+                        ((uint32_t)best_frame[2] <<  8) |
+                         (uint32_t)best_frame[3];
         if (df == 17u || df == 18u) {
           addRecentlySeenICAOAddr(ctx, icao);
           icaoSeenInsert(ctx, icao);
@@ -1397,7 +1461,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
           }
           fprintf(stderr, "] hex=");
           for (uint32_t x = 0; x < n_bytes; ++x)
-            fprintf(stderr, "%02X", frame[x]);
+            fprintf(stderr, "%02X", best_frame[x]);
           fprintf(stderr, "\n");
         }
         if (debug_enabled) {
@@ -1414,36 +1478,35 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
           if (df == 18u) fprintf(debug_file, " [DF18]");
           fprintf(debug_file, " hex=");
           for (uint32_t x = 0; x < n_bytes; ++x)
-            fprintf(debug_file, "%02X", frame[x]);
+            fprintf(debug_file, "%02X", best_frame[x]);
           fprintf(debug_file, "\n");
           fflush(debug_file);
         }
 
-        emit_frame(frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
-        p += frame_len;
+        emit_frame(best_frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
+        p += best_frame_len;
         continue;
-      } else {
-        if (df == 17u || df == 18u) {
-          if ((df == 17u && ctx->df17_fail_count < 5u) ||
-              (df == 18u && ctx->df18_fail_count < 5u)) {
-            FILE* fail_out = debug_enabled ? debug_file : stderr;
-            fprintf(fail_out, "[ADS-B DBG] DF%u #%llu sr=%u spb=%.3f: ",
-                    df,
-                    (unsigned long long)((df == 17u) ? ctx->df17_fail_count : ctx->df18_fail_count) + 1u,
-                    sr, (double)spb);
-            for (uint32_t x = 0; x < n_bytes; ++x)
-              fprintf(fail_out, "%02X", frame[x]);
-            fprintf(fail_out, "  syndrome=%06X\n", syndrome);
-            if (debug_enabled) fflush(fail_out);
-          }
-          if (df == 17u) ++ctx->df17_fail_count;
-          if (df == 18u) ++ctx->df18_fail_count;
-        }
-        ++ctx->crc_fail_count;
-        ++p;
-        continue;
-      }
     }
+
+    if (df == 17u || df == 18u) {
+      if ((df == 17u && ctx->df17_fail_count < 5u) ||
+          (df == 18u && ctx->df18_fail_count < 5u)) {
+        FILE* fail_out = debug_enabled ? debug_file : stderr;
+        fprintf(fail_out, "[ADS-B DBG] DF%u #%llu sr=%u spb=%.3f: ",
+                df,
+                (unsigned long long)((df == 17u) ? ctx->df17_fail_count : ctx->df18_fail_count) + 1u,
+                sr, (double)spb);
+        for (uint32_t x = 0; x < n_bytes; ++x)
+          fprintf(fail_out, "%02X", best_frame[x]);
+        fprintf(fail_out, "  syndrome=%06X try_phase=%d\n", syndrome, best_try_phase);
+        if (debug_enabled) fflush(fail_out);
+      }
+      if (df == 17u) ++ctx->df17_fail_count;
+      if (df == 18u) ++ctx->df18_fail_count;
+    }
+    ++ctx->crc_fail_count;
+    ++p;
+    continue;
   }
 
   if (p > 0u && p < ctx->mag_len) {
