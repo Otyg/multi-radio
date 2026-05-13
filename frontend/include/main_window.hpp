@@ -29,6 +29,8 @@ class QGridLayout;
 class QLabel;
 class QScrollArea;
 class QTimer;
+class QWidget;
+class QVBoxLayout;
 #if !defined(MR_HAS_QT_MULTIMEDIA)
 #define MR_HAS_QT_MULTIMEDIA 0
 #endif
@@ -112,6 +114,8 @@ class MainWindow : public QMainWindow {
   bool ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* error_text);
   void LoadScanListConfigFromSettings();
   void SaveScanListConfigToSettings() const;
+  void LoadScanListConfigFromSettingsGroup(const QString& group);
+  void SaveScanListConfigToSettingsGroup(const QString& group) const;
 
   struct ScanListChannelConfig {
     QString label;
@@ -208,6 +212,10 @@ class MainWindow : public QMainWindow {
   int scan_list_last_button_width_ = 0;
   QWidget* scan_list_grid_widget_ = nullptr;
   QScrollArea* scan_list_scroll_area_ = nullptr;
+  QWidget* scan_list_panel_ = nullptr;
+  QWidget* radar_radio_group_ = nullptr;
+  QVBoxLayout* radar_radio_layout_ = nullptr;
+  QWidget* scan_list_tab_ = nullptr;
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
   int frozen_scan_channel_index_ = -1;
