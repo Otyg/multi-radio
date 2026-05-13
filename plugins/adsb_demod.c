@@ -1038,6 +1038,16 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
           }
         }
       }
+      /* Förkasta ogiltigt DF efter korrigering — eliminerar bullerfalsklarm */
+      static const uint32_t kValidDF =
+          (1u<<0)|(1u<<4)|(1u<<5)|(1u<<11)|
+          (1u<<16)|(1u<<17)|(1u<<18)|(1u<<19)|
+          (1u<<20)|(1u<<21)|(1u<<24);
+      if (corrected > 0 && !((kValidDF >> df) & 1u)) {
+        ++ctx->crc_fail_count;
+        ++p;
+        continue;
+      }
       if (syndrome == 0u || ap_recovered) {
         ctx->crc_ok_count++;
         if (corrected == 0 && !ap_recovered) ctx->crc_ok_clean_count++;
