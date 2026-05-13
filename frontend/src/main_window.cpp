@@ -1691,22 +1691,27 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_layout->addRow("Signal / Last minutes", signal_minutes_row);
   controls_layout->addRow("Receiver", receiver_filter_combo_);
 
-  decoded_table_ = new QTableWidget(0, 7, air_marine_controls);
-  decoded_table_->setHorizontalHeaderLabels({"Time", "MMSI", "Lat", "Long", "SOG", "COG", "Other"});
-  decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-  decoded_table_->setMinimumHeight(280);
-  controls_layout->addRow(decoded_table_);
-
   radar_widget_ = new RadarMapWidget(air_marine_splitter);
   radar_widget_->SetRangeKm(10.0);
   radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
 
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);
+  visible_objects_widget_ = new VisibleObjectsWidget(air_marine_splitter);
+  air_marine_splitter->addWidget(visible_objects_widget_);
   air_marine_splitter->setStretchFactor(0, 1);
   air_marine_splitter->setStretchFactor(1, 3);
+  air_marine_splitter->setStretchFactor(2, 1);
 
   air_marine_layout->addWidget(air_marine_splitter);
+
+  // Selection wiring.
+  connect(radar_widget_, &RadarMapWidget::TargetSelected, this, [this](const QString& id) {
+    if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetSelectedTarget(id);
+  });
+  connect(visible_objects_widget_, &VisibleObjectsWidget::TargetActivated, this, [this](const QString& id) {
+    if (radar_widget_ != nullptr) radar_widget_->SetSelectedTarget(id);
+  });
 
   // Radar settings controls (persisted).
   {
@@ -1958,15 +1963,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           &MainWindow::OpenVisualizationSettingsDialog);
 
   connect(signal_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-    if (decoded_table_ == nullptr) return;
-    decoded_table_->setRowCount(0);
+    if (decoded_table_ != nullptr) decoded_table_->setRowCount(0);
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
     }
   });
   connect(receiver_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-    if (decoded_table_ == nullptr) return;
-    decoded_table_->setRowCount(0);
+    if (decoded_table_ != nullptr) decoded_table_->setRowCount(0);
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
     }
@@ -3444,6 +3447,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       }
 
       radar_widget_->UpsertTarget(t);
+      if (visible_objects_widget_ != nullptr) visible_objects_widget_->UpsertTarget(t);
     }
   }
 
