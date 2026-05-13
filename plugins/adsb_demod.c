@@ -121,6 +121,7 @@ typedef struct {
   uint64_t  crc_ok_count;
   uint64_t  crc_ok_clean_count;
   uint64_t  crc_ok_corrected_count;
+  uint64_t  corrected_logged_count;
   uint64_t  crc_ok_ap_count;
   uint64_t  crc_fail_count;
   uint64_t  df17_ok_count;
@@ -1051,6 +1052,19 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
           addRecentlySeenICAOAddr(ctx, icao);
         }
 
+        if (corrected > 0 && ctx->corrected_logged_count < 20u) {
+          ctx->corrected_logged_count++;
+          fprintf(stderr, "[adsb_demod] CORR#%llu DF=%u corrected=%d bits[",
+                  (unsigned long long)ctx->corrected_logged_count, df, corrected);
+          for (int fi = 0; fi < corrected; fi++) {
+            if (fi) fprintf(stderr, ",");
+            fprintf(stderr, "%d", fixbits[fi]);
+          }
+          fprintf(stderr, "] hex=");
+          for (uint32_t x = 0; x < n_bytes; ++x)
+            fprintf(stderr, "%02X", frame[x]);
+          fprintf(stderr, "\n");
+        }
         if (debug_enabled) {
           fprintf(debug_file, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u", df, icao, n_bytes);
           if (corrected > 0) {
@@ -1062,7 +1076,6 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
             fprintf(debug_file, "]");
           }
           if (ap_recovered) fprintf(debug_file, " ap_recovered=1");
-          if (df == 17u && ap_recovered) fprintf(debug_file, " [DF17 AP RECOVERED]");
           if (df == 18u) fprintf(debug_file, " [DF18]");
           fprintf(debug_file, " hex=");
           for (uint32_t x = 0; x < n_bytes; ++x)
