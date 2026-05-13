@@ -1020,9 +1020,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
       int corrected = 0;
       int ap_recovered = 0;
+      int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
       uint32_t syndrome = modesChecksum(frame, n_bits);
       if (syndrome != 0u) {
-        int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
         int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, fixbits);
         if (fixed > 0) {
           corrected = fixed;
