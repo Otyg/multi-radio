@@ -226,7 +226,10 @@ class MainWindow : public QMainWindow {
   QGridLayout* radar_scan_list_grid_layout_ = nullptr;
   QWidget* radar_scan_list_grid_widget_ = nullptr;
   QScrollArea* radar_scan_list_scroll_area_ = nullptr;
+  QCheckBox* radar_scan_list_monitor_checkbox_ = nullptr;
+  QDoubleSpinBox* radar_scan_list_default_squelch_spin_ = nullptr;
   int radar_active_scan_list_channel_index_ = -1;
+  ScanListChannelState radar_active_scan_list_channel_state_ = ScanListChannelState::kIdle;
   int radar_frozen_scan_channel_index_ = -1;
 
   int active_scan_list_channel_index_ = -1;
@@ -237,6 +240,7 @@ class MainWindow : public QMainWindow {
     double value = 0.0;
   };
   std::vector<ChannelHeat> scan_channel_heat_;
+  std::vector<ChannelHeat> radar_scan_channel_heat_;
   bool auto_squelch_active_ = false;
   bool auto_squelch_restore_monitor_mode_ = false;
   uint32_t auto_squelch_receiver_id_ = 0;
