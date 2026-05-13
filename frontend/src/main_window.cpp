@@ -1691,34 +1691,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_layout->addRow("Signal / Last minutes", signal_minutes_row);
   controls_layout->addRow("Receiver", receiver_filter_combo_);
 
-  decoded_table_ = new QTableWidget(0, 7, air_marine_controls);
-  decoded_table_->setHorizontalHeaderLabels({"Time", "MMSI", "Lat", "Long", "SOG", "COG", "Other"});
-  decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-  decoded_table_->setMinimumHeight(280);
-  controls_layout->addRow(decoded_table_);
-
   radar_widget_ = new RadarMapWidget(air_marine_splitter);
   radar_widget_->SetRangeKm(10.0);
   radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
 
-  visible_objects_widget_ = new VisibleObjectsWidget(air_marine_splitter);
-
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);
-  air_marine_splitter->addWidget(visible_objects_widget_);
   air_marine_splitter->setStretchFactor(0, 1);
   air_marine_splitter->setStretchFactor(1, 3);
-  air_marine_splitter->setStretchFactor(2, 1);
 
   air_marine_layout->addWidget(air_marine_splitter);
-
-  // Selection wiring.
-  connect(radar_widget_, &RadarMapWidget::TargetSelected, this, [this](const QString& id) {
-    if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetSelectedTarget(id);
-  });
-  connect(visible_objects_widget_, &VisibleObjectsWidget::TargetActivated, this, [this](const QString& id) {
-    if (radar_widget_ != nullptr) radar_widget_->SetSelectedTarget(id);
-  });
 
   // Radar settings controls (persisted).
   {
@@ -1728,12 +1710,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     const bool show_fixed_names = settings.value("show_fixed_names", true).toBool();
     const double range_km = std::clamp(settings.value("range_km", 10.0).toDouble(), 0.2, 500.0);
     const double trail_s = std::clamp(settings.value("trail_seconds", 120.0).toDouble(), 5.0, 3600.0);
+    const double center_lat = settings.value("center_lat", 0.0).toDouble();
+    const double center_lon = settings.value("center_lon", 0.0).toDouble();
     settings.endGroup();
 
     radar_widget_->SetShowLabels(show_labels);
     radar_widget_->SetShowFixedNames(show_fixed_names);
     radar_widget_->SetRangeKm(range_km);
     radar_widget_->SetTrailWindowSeconds(trail_s);
+    if (center_lat != 0.0 || center_lon != 0.0) {
+      radar_widget_->SetCenter(center_lat, center_lon);
+    }
 
     auto* show_labels_cb = new QCheckBox("Show labels", air_marine_controls);
     show_labels_cb->setChecked(show_labels);
@@ -1818,6 +1805,47 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       }
       SaveFixedObjectsToSettings(json);
       if (radar_widget_ != nullptr) radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+    });
+
+    auto* radar_settings_button = new QPushButton("Radar settings...", air_marine_controls);
+    controls_layout->addRow(radar_settings_button);
+    connect(radar_settings_button, &QPushButton::clicked, this, [this]() {
+      if (radar_widget_ == nullptr) return;
+
+      QSettings s("multi-radio", "multi-radio-client");
+      s.beginGroup("radar_view");
+      const double cur_lat = s.value("center_lat", 0.0).toDouble();
+      const double cur_lon = s.value("center_lon", 0.0).toDouble();
+      s.endGroup();
+
+      QDialog dialog(this);
+      dialog.setWindowTitle("Radar settings");
+      auto* layout = new QFormLayout(&dialog);
+      auto* lat_spin = new QDoubleSpinBox(&dialog);
+      lat_spin->setDecimals(7);
+      lat_spin->setRange(-90.0, 90.0);
+      lat_spin->setValue(cur_lat);
+      auto* lon_spin = new QDoubleSpinBox(&dialog);
+      lon_spin->setDecimals(7);
+      lon_spin->setRange(-180.0, 180.0);
+      lon_spin->setValue(cur_lon);
+      layout->addRow("Center latitude", lat_spin);
+      layout->addRow("Center longitude", lon_spin);
+      auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+      layout->addRow(buttons);
+      connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+      connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+      if (dialog.exec() != QDialog::Accepted) return;
+      const double lat = lat_spin->value();
+      const double lon = lon_spin->value();
+
+      QSettings out("multi-radio", "multi-radio-client");
+      out.beginGroup("radar_view");
+      out.setValue("center_lat", lat);
+      out.setValue("center_lon", lon);
+      out.endGroup();
+      radar_widget_->SetCenter(lat, lon);
     });
   }
 
@@ -3372,7 +3400,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
   }
 
   // Live radar targets (AIS / ADS-B with position).
-  if (radar_widget_ != nullptr && visible_objects_widget_ != nullptr) {
+  if (radar_widget_ != nullptr) {
     double lat = 0.0;
     double lon = 0.0;
     const bool has_lat = ParseDoubleField(fields, "lat", &lat) || ParseDoubleField(fields, "latitude", &lat);
@@ -3408,7 +3436,6 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       }
 
       radar_widget_->UpsertTarget(t);
-      visible_objects_widget_->UpsertTarget(t);
     }
   }
 

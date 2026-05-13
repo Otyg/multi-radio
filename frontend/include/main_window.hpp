@@ -22,7 +22,6 @@
 #include "radar_map_widget.hpp"
 #include "scan_range_visualization_widget.hpp"
 #include "signal_visualization_widget.hpp"
-#include "visible_objects_widget.hpp"
 
 class QIODevice;
 class QGridLayout;
@@ -199,7 +198,6 @@ class MainWindow : public QMainWindow {
   QComboBox* receiver_filter_combo_ = nullptr;
   QSpinBox* minutes_filter_spin_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
-  VisibleObjectsWidget* visible_objects_widget_ = nullptr;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
   std::vector<ScanListChannelConfig> scan_list_channels_;
   std::vector<QPushButton*> scan_list_channel_buttons_;
