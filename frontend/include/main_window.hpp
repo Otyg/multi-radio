@@ -149,6 +149,8 @@ class MainWindow : public QMainWindow {
   QSpinBox*       vdes_candidate_bits_spin_ = nullptr;
   QSpinBox*       vdes_sync_errors_spin_ = nullptr;
   QWidget*        gmsk_params_widget_    = nullptr;
+  double          adsb_agc_bandwidth_    = 0.0;
+  double          adsb_agc_target_level_ = 0.0;
   QComboBox*      gmsk_decoder_combo_    = nullptr;
   QComboBox*      gmsk_postproc_combo_   = nullptr;
   QWidget*        ppm_params_widget_           = nullptr;

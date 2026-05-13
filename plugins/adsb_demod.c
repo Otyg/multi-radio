@@ -860,11 +860,25 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->debug_enabled = 0;
   ctx->debug_file = NULL;
 
-  /* Software AGC: normaliserar brusgolvet till ~1000 amplitudenheter.
-   * Bandbredd 1e-5 → tidskonstant ~42 ms @ 2.4 Msps — spårar långsamt
-   * driftande brusgolv men påverkar inte enskilda 120 µs ADS-B-burst. */
+  /* Software AGC: normalize the noise floor to roughly unit magnitude.
+   * Default loop bandwidth 5e-6 → time constant ~84 ms @ 2.4 Msps.
+   * This is intentionally slower to avoid disturbing short 120 µs ADS-B bursts.
+   * The target level is set to 1.0 for normalized IQ before output magnitude scaling. */
+  const char* agc_bw_env = getenv("MR_PLUGIN_AGC_BANDWIDTH");
+  const char* agc_level_env = getenv("MR_PLUGIN_AGC_TARGET_LEVEL");
+  float agc_bandwidth = 5e-6f;
+  float agc_target_level = 1.0f;
+  if (agc_bw_env && agc_bw_env[0] != '\0') {
+    float parsed = strtof(agc_bw_env, NULL);
+    if (parsed > 0.0f) agc_bandwidth = parsed;
+  }
+  if (agc_level_env && agc_level_env[0] != '\0') {
+    float parsed = strtof(agc_level_env, NULL);
+    if (parsed > 0.0f) agc_target_level = parsed;
+  }
   ctx->agc_h = agc_crcf_create();
-  agc_crcf_set_bandwidth(ctx->agc_h, 1e-5f);
+  agc_crcf_set_bandwidth(ctx->agc_h, agc_bandwidth);
+  agc_crcf_set_signal_level(ctx->agc_h, agc_target_level);
 
   const char* debug_env = getenv("MR_PLUGIN_DEBUG");
   const char* debug_file_path = getenv("MR_PLUGIN_DEBUG_FILE");
@@ -879,6 +893,7 @@ MrPluginCtx* mr_plugin_create(void) {
   if (ctx->debug_enabled) {
     FILE* out = debug_out(ctx);
     fprintf(out, "[adsb_demod] Plugin initialized (nominal 2.4 Msps, accepts 2.3-2.5 Msps)\n");
+    fprintf(out, "[adsb_demod] AGC bandwidth=%g target_level=%g\n", agc_bandwidth, agc_target_level);
     if (ctx->debug_file) {
       fprintf(out, "[adsb_demod] Logging debug to file: %s\n", debug_file_path);
     }
@@ -908,7 +923,34 @@ static const MrPluginMeta kMeta = {
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
 int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
-  (void)raw; (void)key; (void)value;
+  if (!raw || !key || !value) return 0;
+  AdsbCtx* ctx = (AdsbCtx*)raw;
+
+  if (strcmp(key, "adsb_agc_bandwidth") == 0) {
+    const float parsed = strtof(value, NULL);
+    if (parsed > 0.0f) {
+      agc_crcf_set_bandwidth(ctx->agc_h, parsed);
+      if (ctx->debug_enabled) {
+        fprintf(debug_out(ctx), "[adsb_demod] Set AGC bandwidth=%g\n", parsed);
+        fflush(debug_out(ctx));
+      }
+      return 1;
+    }
+    return 0;
+  }
+
+  if (strcmp(key, "adsb_agc_target_level") == 0) {
+    const float parsed = strtof(value, NULL);
+    if (parsed > 0.0f) {
+      agc_crcf_set_signal_level(ctx->agc_h, parsed);
+      if (ctx->debug_enabled) {
+        fprintf(debug_out(ctx), "[adsb_demod] Set AGC target_level=%g\n", parsed);
+        fflush(debug_out(ctx));
+      }
+      return 1;
+    }
+    return 0;
+  }
   return 0;
 }
 

@@ -208,6 +208,8 @@ ModeConfig FromProto(const v1::ModeConfig& config) {
   if (config.vdes_asm_pll_bw() > 0.0f) out.vdes_asm_pll_bw = config.vdes_asm_pll_bw();
   if (config.vdes_asm_candidate_bits() > 0) out.vdes_asm_candidate_bits = config.vdes_asm_candidate_bits();
   out.vdes_asm_sync_errors_max = config.vdes_asm_sync_errors_max();
+  if (config.adsb_agc_bandwidth() > 0.0f) out.adsb_agc_bandwidth = config.adsb_agc_bandwidth();
+  if (config.adsb_agc_target_level() > 0.0f) out.adsb_agc_target_level = config.adsb_agc_target_level();
   out.rnnoise_enabled = config.rnnoise_enabled();
   out.rnnoise_strength = config.rnnoise_strength();
   return out;
@@ -251,6 +253,8 @@ void ToProto(const ModeConfig& config, v1::ModeConfig* out) {
   out->set_vdes_asm_pll_bw(config.vdes_asm_pll_bw);
   out->set_vdes_asm_candidate_bits(config.vdes_asm_candidate_bits);
   out->set_vdes_asm_sync_errors_max(config.vdes_asm_sync_errors_max);
+  out->set_adsb_agc_bandwidth(config.adsb_agc_bandwidth);
+  out->set_adsb_agc_target_level(config.adsb_agc_target_level);
   out->set_rnnoise_enabled(config.rnnoise_enabled);
   out->set_rnnoise_strength(config.rnnoise_strength);
   out->clear_frequency_list_hz();

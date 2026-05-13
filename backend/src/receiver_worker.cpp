@@ -518,6 +518,12 @@ void ReceiverWorker::PushPluginConfig() {
   plugin_host_->SetParam("invert",           cfg.gmsk_nrzi_invert ? "1" : "0");
   plugin_host_->SetParam("bit_duration_us",  std::to_string(cfg.ppm_bit_duration_us));
   plugin_host_->SetParam("data_rate",        std::to_string(cfg.ppm_data_rate_bps));
+  if (cfg.adsb_agc_bandwidth > 0.0f) {
+    plugin_host_->SetParam("adsb_agc_bandwidth", std::to_string(cfg.adsb_agc_bandwidth));
+  }
+  if (cfg.adsb_agc_target_level > 0.0f) {
+    plugin_host_->SetParam("adsb_agc_target_level", std::to_string(cfg.adsb_agc_target_level));
+  }
   /* For AIS Dual the decoder chain is fixed:
      NRZI-S -> AIS postproc (AIS channels) + ASM postproc (ASM channels).
      Derive the effective modulation from fixed_modulation; fall back to

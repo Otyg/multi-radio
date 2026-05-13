@@ -92,6 +92,8 @@ struct ModeConfig {
   float vdes_asm_pll_bw = 0.01f;
   uint32_t vdes_asm_candidate_bits = 1056;
   uint32_t vdes_asm_sync_errors_max = 1;
+  float adsb_agc_bandwidth = 0.0f;
+  float adsb_agc_target_level = 0.0f;
   bool rnnoise_enabled = false;
   float rnnoise_strength = 100.0f;
 };

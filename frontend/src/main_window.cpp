@@ -1917,6 +1917,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     vdes_sync_err->setSingleStep(1);
     vdes_sync_err->setValue(vdes_sync_errors_spin_ ? vdes_sync_errors_spin_->value() : 1);
 
+    auto* adsb_agc_bw = new QDoubleSpinBox(&dialog);
+    adsb_agc_bw->setRange(0.000001, 0.1);
+    adsb_agc_bw->setSingleStep(0.000001);
+    adsb_agc_bw->setDecimals(8);
+    adsb_agc_bw->setValue(adsb_agc_bandwidth_ > 0.0 ? adsb_agc_bandwidth_ : 0.000005);
+    adsb_agc_bw->setToolTip("ADS-B AGC bandwidth for libliquid (default 5e-6). Lower is slower.");
+
+    auto* adsb_agc_target = new QDoubleSpinBox(&dialog);
+    adsb_agc_target->setRange(0.1, 10.0);
+    adsb_agc_target->setSingleStep(0.1);
+    adsb_agc_target->setDecimals(2);
+    adsb_agc_target->setValue(adsb_agc_target_level_ > 0.0 ? adsb_agc_target_level_ : 1.0);
+    adsb_agc_target->setToolTip("ADS-B AGC target level for normalized IQ amplitude.");
+
     auto* ppm_bit_us = new QSpinBox(&dialog);
     ppm_bit_us->setRange(1, 100000);
     ppm_bit_us->setSingleStep(1);
@@ -1940,11 +1954,25 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       vdes_cand->setEnabled(use_vdes);
       vdes_sync_err->setEnabled(use_vdes);
     };
+
+    auto update_adsb_enabled = [this, adsb_agc_bw, adsb_agc_target]() {
+      const v1::Modulation mod = FixedModulationFromCombo(fixed_modulation_combo_);
+      const bool use_adsb = (mod == v1::MODULATION_ADSB);
+      adsb_agc_bw->setEnabled(use_adsb);
+      adsb_agc_target->setEnabled(use_adsb);
+    };
+
     connect(decoder_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
             [update_vdes_enabled](int) { update_vdes_enabled(); });
     connect(postproc_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
             [update_vdes_enabled](int) { update_vdes_enabled(); });
+    connect(fixed_modulation_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+            [update_vdes_enabled, update_adsb_enabled](int) {
+              update_vdes_enabled();
+              update_adsb_enabled();
+            });
     update_vdes_enabled();
+    update_adsb_enabled();
 
     layout->addRow("GMSK baudrate", gmsk_baud);
     layout->addRow("GMSK BT", gmsk_bt);
@@ -1955,6 +1983,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
     layout->addRow("VDES PLL BW", vdes_pll);
     layout->addRow("VDES candidate bits", vdes_cand);
     layout->addRow("VDES sync errors", vdes_sync_err);
+    layout->addRow("ADS-B AGC BW", adsb_agc_bw);
+    layout->addRow("ADS-B AGC target", adsb_agc_target);
     layout->addRow("PPM bit duration", ppm_bit_us);
     layout->addRow("PPM data rate", ppm_rate);
 
@@ -2003,6 +2033,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       const QSignalBlocker blocker(vdes_sync_errors_spin_);
       vdes_sync_errors_spin_->setValue(vdes_sync_err->value());
     }
+    adsb_agc_bandwidth_ = adsb_agc_bw->value();
+    adsb_agc_target_level_ = adsb_agc_target->value();
     if (ppm_bit_duration_us_spin_ != nullptr) {
       const QSignalBlocker blocker(ppm_bit_duration_us_spin_);
       ppm_bit_duration_us_spin_->setValue(ppm_bit_us->value());
@@ -2320,6 +2352,8 @@ void MainWindow::RefreshReceivers() {
         vdes_sync_errors_spin_->setValue(
             static_cast<int>(receiver.mode_config().vdes_asm_sync_errors_max()));
       }
+      adsb_agc_bandwidth_ = receiver.mode_config().adsb_agc_bandwidth();
+      adsb_agc_target_level_ = receiver.mode_config().adsb_agc_target_level();
       {
         v1::Modulation fixed_modulation = receiver.mode_config().fixed_modulation();
         if (fixed_modulation == v1::MODULATION_UNSPECIFIED) {
@@ -2558,6 +2592,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
       vdes_candidate_bits_spin_ ? static_cast<uint32_t>(vdes_candidate_bits_spin_->value()) : 1056u);
   config.set_vdes_asm_sync_errors_max(
       vdes_sync_errors_spin_ ? static_cast<uint32_t>(vdes_sync_errors_spin_->value()) : 1u);
+  config.set_adsb_agc_bandwidth(static_cast<float>(adsb_agc_bandwidth_));
+  config.set_adsb_agc_target_level(static_cast<float>(adsb_agc_target_level_));
   config.set_ppm_bit_duration_us(
       ppm_bit_duration_us_spin_ ? static_cast<uint32_t>(ppm_bit_duration_us_spin_->value()) : 10u);
   {
