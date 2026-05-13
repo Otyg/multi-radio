@@ -31,6 +31,7 @@ class RadarMapWidget : public QWidget {
   void SetFixedObjects(const std::vector<RadarFixedObject>& fixed);
 
   void UpsertTarget(const RadarTargetUpdate& update);
+  void UpdateTargetLabel(const QString& id, const QString& label);
   void ClearTargets();
   void SetSelectedTarget(const QString& id);
 

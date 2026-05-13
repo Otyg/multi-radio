@@ -1,6 +1,7 @@
 #include "visible_objects_widget.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include <QHeaderView>
@@ -55,6 +56,14 @@ void VisibleObjectsWidget::UpsertTarget(const RadarTargetUpdate& update) {
   RefreshTable();
 }
 
+void VisibleObjectsWidget::UpdateTargetLabel(const QString& id, const QString& label) {
+  if (id.isEmpty() || label.isEmpty()) return;
+  auto it = rows_.find(ToKey(id));
+  if (it == rows_.end()) return;
+  it->second.last.label = label;
+  RefreshTable();
+}
+
 void VisibleObjectsWidget::RemoveStale(std::uint64_t now_ms, std::uint64_t stale_after_ms) {
   if (stale_after_ms == 0) return;
   for (auto it = rows_.begin(); it != rows_.end();) {
@@ -93,8 +102,8 @@ void VisibleObjectsWidget::RefreshTable() {
     table_->setItem(i, 0, new QTableWidgetItem(KindLabel(t.kind)));
     table_->setItem(i, 1, new QTableWidgetItem(t.id));
     table_->setItem(i, 2, new QTableWidgetItem(t.label));
-    table_->setItem(i, 3, new QTableWidgetItem(QString::number(t.lat, 'f', 5)));
-    table_->setItem(i, 4, new QTableWidgetItem(QString::number(t.lon, 'f', 5)));
+    table_->setItem(i, 3, new QTableWidgetItem(std::isfinite(t.lat) ? QString::number(t.lat, 'f', 5) : QString()));
+    table_->setItem(i, 4, new QTableWidgetItem(std::isfinite(t.lon) ? QString::number(t.lon, 'f', 5) : QString()));
     table_->setItem(i, 5, new QTableWidgetItem(QString::number(t.sog, 'f', 1)));
     table_->setItem(i, 6, new QTableWidgetItem(QString::number(t.cog, 'f', 1)));
 

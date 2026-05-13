@@ -116,6 +116,16 @@ void RadarMapWidget::UpsertTarget(const RadarTargetUpdate& update_in) {
   update();
 }
 
+void RadarMapWidget::UpdateTargetLabel(const QString& id, const QString& label) {
+  if (id.isEmpty()) return;
+  const std::string key = ToKey(id);
+  auto it = targets_.find(key);
+  if (it == targets_.end()) return;
+  if (label.isEmpty()) return;
+  it->second.last.label = label;
+  update();
+}
+
 void RadarMapWidget::TrimTrails(std::uint64_t now_ms) {
   if (trail_window_ms_ == 0) return;
   const std::uint64_t cutoff = (now_ms > trail_window_ms_) ? (now_ms - trail_window_ms_) : 0;
