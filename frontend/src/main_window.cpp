@@ -1444,32 +1444,28 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   range_outer->addWidget(scan_range_viz_);  // fills remaining tab space
   mode_tabs_->addTab(range_tab, "SCAN_RANGE");
 
-  scan_list_tab_ = new QWidget(mode_tabs_);
-  auto* list_tab = scan_list_tab_;
-  auto* list_layout = new QVBoxLayout(scan_list_tab_);
-  scan_list_panel_ = new QWidget(list_tab);
-  auto* scan_list_panel_layout = new QVBoxLayout(scan_list_panel_);
-  scan_list_panel_layout->setContentsMargins(0, 0, 0, 0);
+  auto* list_tab = new QWidget(mode_tabs_);
+  auto* list_layout = new QVBoxLayout(list_tab);
   auto* list_caption = new QLabel(
       "Klicka pa en kanalruta for att konfigurera label, frekvens, modulation, bandbredd, squelch och dwell.",
-      scan_list_panel_);
+      list_tab);
   list_caption->setWordWrap(true);
-  scan_list_panel_layout->addWidget(list_caption);
+  list_layout->addWidget(list_caption);
   auto* controls_row = new QHBoxLayout();
-  scan_list_monitor_checkbox_ = new QCheckBox("Monitor mode", scan_list_panel_);
+  scan_list_monitor_checkbox_ = new QCheckBox("Monitor mode", list_tab);
   scan_list_monitor_checkbox_->setChecked(false);
   scan_list_monitor_checkbox_->setToolTip("Hold scan hopping, treat all channels as open");
-  auto* default_squelch_label = new QLabel("Default squelch:", scan_list_panel_);
-  scan_list_default_squelch_spin_ = new QDoubleSpinBox(scan_list_panel_);
+  auto* default_squelch_label = new QLabel("Default squelch:", list_tab);
+  scan_list_default_squelch_spin_ = new QDoubleSpinBox(list_tab);
   scan_list_default_squelch_spin_->setDecimals(1);
   scan_list_default_squelch_spin_->setRange(-120.0, 0.0);
   scan_list_default_squelch_spin_->setSingleStep(1.0);
   scan_list_default_squelch_spin_->setSuffix(" dB");
   scan_list_default_squelch_spin_->setValue(kDefaultScanListSquelchDb);
-  audio_hpf300_checkbox_ = new QCheckBox("HP 300 Hz", scan_list_panel_);
-  audio_lpf3k5_checkbox_ = new QCheckBox("LP 3.5 kHz", scan_list_panel_);
-  audio_lpf4k5_checkbox_ = new QCheckBox("LP 4.5 kHz", scan_list_panel_);
-  audio_bpf_voice_checkbox_ = new QCheckBox("BP 300–3k Hz", scan_list_panel_);
+  audio_hpf300_checkbox_ = new QCheckBox("HP 300 Hz", list_tab);
+  audio_lpf3k5_checkbox_ = new QCheckBox("LP 3.5 kHz", list_tab);
+  audio_lpf4k5_checkbox_ = new QCheckBox("LP 4.5 kHz", list_tab);
+  audio_bpf_voice_checkbox_ = new QCheckBox("BP 300–3k Hz", list_tab);
   audio_hpf300_checkbox_->setToolTip("High-pass filter at 300 Hz — removes low-frequency hum and rumble");
   audio_lpf3k5_checkbox_->setToolTip("Low-pass filter at 3.5 kHz — aggressive double-pass, very steep rolloff (~96 dB/octave)");
   audio_lpf4k5_checkbox_->setToolTip("Low-pass filter at 4.5 kHz — order-8 Butterworth, cuts noise above wider speech band");
@@ -1484,9 +1480,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_row->addWidget(audio_lpf4k5_checkbox_);
   controls_row->addWidget(audio_bpf_voice_checkbox_);
   controls_row->addSpacing(12);
-  audio_rnnoise_checkbox_ = new QCheckBox("RNNoise", scan_list_panel_);
+  audio_rnnoise_checkbox_ = new QCheckBox("RNNoise", list_tab);
   audio_rnnoise_checkbox_->setToolTip("RNNoise neural network noise reduction");
-  audio_rnnoise_strength_spin_ = new QSpinBox(scan_list_panel_);
+  audio_rnnoise_strength_spin_ = new QSpinBox(list_tab);
   audio_rnnoise_strength_spin_->setRange(0, 100);
   audio_rnnoise_strength_spin_->setValue(100);
   audio_rnnoise_strength_spin_->setSuffix("%");
@@ -1494,31 +1490,29 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_row->addWidget(audio_rnnoise_checkbox_);
   controls_row->addWidget(audio_rnnoise_strength_spin_);
   controls_row->addStretch(1);
-  scan_list_panel_layout->addLayout(controls_row);
+  list_layout->addLayout(controls_row);
 
   auto* list_actions = new QHBoxLayout();
-  auto* add_channel_button = new QPushButton("Add channel", scan_list_panel_);
-  auto* import_csv_button = new QPushButton("Import CSV", scan_list_panel_);
-  auto* auto_squelch_button = new QPushButton("Auto squelch", scan_list_panel_);
-  auto* clear_channels_button = new QPushButton("Clear channels", scan_list_panel_);
+  auto* add_channel_button = new QPushButton("Add channel", list_tab);
+  auto* import_csv_button = new QPushButton("Import CSV", list_tab);
+  auto* auto_squelch_button = new QPushButton("Auto squelch", list_tab);
+  auto* clear_channels_button = new QPushButton("Clear channels", list_tab);
   list_actions->addWidget(add_channel_button);
   list_actions->addWidget(import_csv_button);
   list_actions->addWidget(auto_squelch_button);
   list_actions->addWidget(clear_channels_button);
   list_actions->addStretch(1);
-  scan_list_panel_layout->addLayout(list_actions);
+  list_layout->addLayout(list_actions);
 
-  scan_list_grid_widget_ = new QWidget(scan_list_panel_);
+  scan_list_grid_widget_ = new QWidget(list_tab);
   scan_list_grid_layout_ = new QGridLayout(scan_list_grid_widget_);
   scan_list_grid_layout_->setHorizontalSpacing(8);
   scan_list_grid_layout_->setVerticalSpacing(8);
-  scan_list_scroll_area_ = new QScrollArea(scan_list_panel_);
+  scan_list_scroll_area_ = new QScrollArea(list_tab);
   scan_list_scroll_area_->setWidgetResizable(true);
   scan_list_scroll_area_->setWidget(scan_list_grid_widget_);
   scan_list_scroll_area_->viewport()->installEventFilter(this);
-  scan_list_panel_layout->addWidget(scan_list_scroll_area_);
-
-  list_layout->addWidget(scan_list_panel_);
+  list_layout->addWidget(scan_list_scroll_area_);
 
   connect(add_channel_button, &QPushButton::clicked, this, &MainWindow::AddScanListChannel);
   connect(import_csv_button, &QPushButton::clicked, this, &MainWindow::ImportScanListCsv);
@@ -1672,7 +1666,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       ApplyModeAndConfig();
     }
   });
-  mode_tabs_->addTab(scan_list_tab_, "SCAN_LIST");
+  mode_tabs_->addTab(list_tab, "SCAN_LIST");
 
   auto* air_marine_tab = new QWidget(mode_tabs_);
   auto* air_marine_layout = new QVBoxLayout(air_marine_tab);
@@ -1694,9 +1688,43 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   auto* radio_group = new QGroupBox("Radio", air_marine_controls);
   auto* radio_layout = new QVBoxLayout(radio_group);
   radio_layout->setContentsMargins(8, 8, 8, 8);
-  radar_radio_group_ = radio_group;
-  radar_radio_layout_ = radio_layout;
+  radio_group->setMaximumWidth(340);
   controls_outer->addWidget(radio_group, 1);
+
+  // Radar-view radio scanner (separate from SCAN_LIST).
+  {
+    auto* radar_actions = new QHBoxLayout();
+    auto* radar_add_button = new QPushButton("Add", radio_group);
+    auto* radar_import_button = new QPushButton("Import CSV", radio_group);
+    auto* radar_clear_button = new QPushButton("Clear", radio_group);
+    radar_actions->addWidget(radar_add_button);
+    radar_actions->addWidget(radar_import_button);
+    radar_actions->addWidget(radar_clear_button);
+    radar_actions->addStretch(1);
+    radio_layout->addLayout(radar_actions);
+
+    radar_scan_list_grid_widget_ = new QWidget(radio_group);
+    radar_scan_list_grid_layout_ = new QGridLayout(radar_scan_list_grid_widget_);
+    radar_scan_list_grid_layout_->setHorizontalSpacing(4);
+    radar_scan_list_grid_layout_->setVerticalSpacing(4);
+    radar_scan_list_scroll_area_ = new QScrollArea(radio_group);
+    radar_scan_list_scroll_area_->setWidgetResizable(true);
+    radar_scan_list_scroll_area_->setWidget(radar_scan_list_grid_widget_);
+    radio_layout->addWidget(radar_scan_list_scroll_area_, 1);
+
+    LoadRadarScanListConfigFromSettings();
+    RefreshRadarScanListChannelCards();
+
+    connect(radar_add_button, &QPushButton::clicked, this, &MainWindow::AddRadarScanListChannel);
+    connect(radar_import_button, &QPushButton::clicked, this, &MainWindow::ImportRadarScanListCsv);
+    connect(radar_clear_button, &QPushButton::clicked, this, [this]() {
+      radar_scan_list_channels_.clear();
+      radar_active_scan_list_channel_index_ = -1;
+      SaveRadarScanListConfigToSettings();
+      RefreshRadarScanListChannelCards();
+      if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+    });
+  }
 
   signal_filter_combo_ = new QComboBox(radar_group);
   signal_filter_combo_->addItem("ALL");
@@ -2329,32 +2357,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
       return;
     }
 
-    // Swap scan-list "instance" (config + UI placement) between SCAN_LIST and RADAR_VIEW.
-    if (scan_list_panel_ != nullptr && scan_list_tab_ != nullptr && radar_radio_group_ != nullptr &&
-        radar_radio_layout_ != nullptr) {
-      const bool prev_is_radar = (previous_tab_index == kAirMarineModeTabIndex);
-      const bool next_is_radar = (index == kAirMarineModeTabIndex);
-
-      // Entering RADAR_VIEW: move panel into radar + load radar_scan_list.
-      if (!prev_is_radar && next_is_radar) {
-        SaveScanListConfigToSettingsGroup("scan_list");
-        scan_list_panel_->setParent(radar_radio_group_);
-        radar_radio_layout_->addWidget(scan_list_panel_, 1);
-        LoadScanListConfigFromSettingsGroup("radar_scan_list");
-        RefreshScanListChannelCards();
-      }
-
-      // Leaving RADAR_VIEW: move panel back to scan_list tab + load scan_list.
-      if (prev_is_radar && !next_is_radar) {
-        SaveScanListConfigToSettingsGroup("radar_scan_list");
-        scan_list_panel_->setParent(scan_list_tab_);
-        if (scan_list_tab_->layout() != nullptr) {
-          scan_list_tab_->layout()->addWidget(scan_list_panel_);
-        }
-        LoadScanListConfigFromSettingsGroup("scan_list");
-        RefreshScanListChannelCards();
-      }
-    }
+    // No scan-list UI swapping: RADAR_VIEW has its own independent scanner.
 
     // Show/hide signal_visualization_ and configure scan range viz immediately,
     // before StopReceiver — these are UI-only and safe to do unconditionally.
@@ -2786,6 +2789,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     mode_tab_index = last_mode_tab_index_;
   }
   const v1::RadioMode mode = ModeFromTabIndex(mode_tab_index);
+  const bool radar_scan_list_active = (mode_tab_index == kAirMarineModeTabIndex);
 
   std::string error;
   if (!client_->SetMode(receiver_id, mode, &error)) {
@@ -2820,7 +2824,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
      so the backend selects ais_dual_demod without requiring the user to also
      set the Fixed tab's modulation combo. */
   if (mode == v1::RADIO_MODE_SCAN_LIST && fixed_modulation != v1::MODULATION_AIS_DUAL) {
-    for (const auto& ch : scan_list_channels_) {
+    const auto& channels = radar_scan_list_active ? radar_scan_list_channels_ : scan_list_channels_;
+    for (const auto& ch : channels) {
       if (ch.modulation == v1::MODULATION_AIS_DUAL) {
         fixed_modulation = v1::MODULATION_AIS_DUAL;
         break;
@@ -2852,7 +2857,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
   config.set_scan_list_monitor_mode(
       scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
-  config.set_scan_list_channel_locked(frozen_scan_channel_index_ >= 0);
+  const int locked_index = radar_scan_list_active ? radar_frozen_scan_channel_index_ : frozen_scan_channel_index_;
+  config.set_scan_list_channel_locked(locked_index >= 0);
   config.set_gmsk_baud_rate(gmsk_baud_rate_spin_ ? static_cast<uint32_t>(gmsk_baud_rate_spin_->value()) : 9600u);
   config.set_gmsk_bt(gmsk_bt_spin_ ? static_cast<float>(gmsk_bt_spin_->value()) : 0.4f);
   config.set_gmsk_modulation_index(gmsk_mod_index_spin_ ? static_cast<float>(gmsk_mod_index_spin_->value()) : 0.5f);
@@ -2882,8 +2888,7 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
     config.set_ppm_data_rate_bps(static_cast<uint32_t>(mbit * 1e6));
   }
   config.set_ppm_correction(ppm_correction_spin_ ? ppm_correction_spin_->value() : 0);
-  config.set_scan_list_locked_channel_index(
-      static_cast<uint32_t>(std::max(0, frozen_scan_channel_index_)));
+  config.set_scan_list_locked_channel_index(static_cast<uint32_t>(std::max(0, locked_index)));
   const double default_squelch_db =
       (scan_list_default_squelch_spin_ != nullptr) ? scan_list_default_squelch_spin_->value()
                                                    : kDefaultScanListSquelchDb;
@@ -2916,7 +2921,8 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
 
   config.clear_scan_list_channels();
   config.clear_frequency_list_hz();
-  for (const auto& channel : scan_list_channels_) {
+  const auto& scan_channels = radar_scan_list_active ? radar_scan_list_channels_ : scan_list_channels_;
+  for (const auto& channel : scan_channels) {
     auto* out = config.add_scan_list_channels();
     out->set_label(channel.label.toStdString());
     out->set_frequency_hz(channel.frequency_mhz * 1000000.0);
@@ -3879,6 +3885,85 @@ void MainWindow::RefreshScanListChannelCards() {
   } // end if (layout_changed)
 }
 
+void MainWindow::RefreshRadarScanListChannelCards() {
+  if (radar_scan_list_grid_layout_ == nullptr || radar_scan_list_grid_widget_ == nullptr) return;
+
+  while (radar_scan_list_channel_buttons_.size() > radar_scan_list_channels_.size()) {
+    QPushButton* button = radar_scan_list_channel_buttons_.back();
+    radar_scan_list_channel_buttons_.pop_back();
+    radar_scan_list_grid_layout_->removeWidget(button);
+    button->deleteLater();
+  }
+  while (radar_scan_list_channel_buttons_.size() < radar_scan_list_channels_.size()) {
+    auto* channel_button = new QPushButton(radar_scan_list_grid_widget_);
+    channel_button->setMinimumHeight(56);
+    channel_button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    channel_button->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(channel_button, &QPushButton::clicked, this, [this, channel_button]() {
+      const auto it = std::find(radar_scan_list_channel_buttons_.begin(),
+                                radar_scan_list_channel_buttons_.end(), channel_button);
+      if (it == radar_scan_list_channel_buttons_.end()) return;
+      const int index = static_cast<int>(std::distance(radar_scan_list_channel_buttons_.begin(), it));
+      ConfigureRadarScanListChannel(index);
+    });
+    connect(channel_button, &QPushButton::customContextMenuRequested, this,
+            [this, channel_button](const QPoint& pos) {
+              const auto it = std::find(radar_scan_list_channel_buttons_.begin(),
+                                        radar_scan_list_channel_buttons_.end(), channel_button);
+              if (it == radar_scan_list_channel_buttons_.end()) return;
+              const int index =
+                  static_cast<int>(std::distance(radar_scan_list_channel_buttons_.begin(), it));
+              QMenu menu(this);
+              if (radar_frozen_scan_channel_index_ == index) {
+                menu.addAction("Unfreeze scanner", [this]() {
+                  radar_frozen_scan_channel_index_ = -1;
+                  RefreshRadarScanListChannelCards();
+                  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+                });
+              } else {
+                menu.addAction("Freeze scanner on this channel", [this, index]() {
+                  radar_frozen_scan_channel_index_ = index;
+                  RefreshRadarScanListChannelCards();
+                  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+                });
+              }
+              menu.addSeparator();
+              menu.addAction("Remove channel", [this, index]() { RemoveRadarScanListChannel(index); });
+              menu.exec(channel_button->mapToGlobal(pos));
+            });
+    radar_scan_list_channel_buttons_.push_back(channel_button);
+  }
+
+  for (size_t idx = 0; idx < radar_scan_list_channel_buttons_.size(); ++idx) {
+    QPushButton* button = radar_scan_list_channel_buttons_[idx];
+    if (button == nullptr) continue;
+    const int index = static_cast<int>(idx);
+    const auto& ch = radar_scan_list_channels_[static_cast<size_t>(index)];
+    const QString label = ch.label.trimmed().isEmpty() ? QString("Kanal %1").arg(index + 1) : ch.label.trimmed();
+    const QString freq = ch.frequency_mhz > 0.0 ? QString("%1 MHz").arg(ch.frequency_mhz, 0, 'f', 3) : "Frekvens ej satt";
+    button->setText(QString("%1\n%2").arg(label).arg(freq));
+    const bool frozen = (radar_frozen_scan_channel_index_ == index);
+    const QString border = frozen ? "border:2px solid #00BCD4;" : "border:1px solid #0f4a0f;";
+    button->setStyleSheet(QString("QPushButton { text-align:left; padding:4px 8px; border-radius:6px; %1 "
+                                  "background:#001000; color:#9be89b; }")
+                              .arg(border));
+  }
+
+  // Two-column layout.
+  for (int i = radar_scan_list_grid_layout_->count() - 1; i >= 0; --i) {
+    auto* item = radar_scan_list_grid_layout_->itemAt(i);
+    if (item && item->widget()) {
+      radar_scan_list_grid_layout_->removeWidget(item->widget());
+    }
+  }
+  constexpr int kColumns = 2;
+  for (size_t idx = 0; idx < radar_scan_list_channel_buttons_.size(); ++idx) {
+    const int row = static_cast<int>(idx) / kColumns;
+    const int col = static_cast<int>(idx) % kColumns;
+    radar_scan_list_grid_layout_->addWidget(radar_scan_list_channel_buttons_[idx], row, col, 1, 1);
+  }
+}
+
 void MainWindow::ConfigureScanListChannel(int index) {
   if (index < 0 || static_cast<size_t>(index) >= scan_list_channels_.size()) {
     return;
@@ -3997,6 +4082,60 @@ void MainWindow::ConfigureScanListChannel(int index) {
   }
 }
 
+void MainWindow::ConfigureRadarScanListChannel(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= radar_scan_list_channels_.size()) return;
+  ScanListChannelConfig channel = radar_scan_list_channels_[static_cast<size_t>(index)];
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(QString("Radar scanner channel %1").arg(index + 1));
+  auto* layout = new QFormLayout(&dialog);
+
+  auto* label_edit = new QLineEdit(channel.label, &dialog);
+  auto* freq_spin = new QDoubleSpinBox(&dialog);
+  freq_spin->setDecimals(3);
+  freq_spin->setRange(0.0, 6000.0);
+  freq_spin->setValue(channel.frequency_mhz);
+  freq_spin->setSuffix(" MHz");
+
+  auto* modulation_combo = new QComboBox(&dialog);
+  modulation_combo->addItem("NFM");
+  modulation_combo->addItem("FSK");
+  modulation_combo->addItem("GMSK");
+  modulation_combo->addItem("VDES ASM");
+  modulation_combo->addItem("AIS Dual");
+  modulation_combo->addItem("ADS-B");
+  modulation_combo->setCurrentText(ModulationLabel(channel.modulation));
+
+  auto* bandwidth_spin = new QSpinBox(&dialog);
+  bandwidth_spin->setRange(0, 5000000);
+  bandwidth_spin->setSingleStep(1000);
+  bandwidth_spin->setValue(channel.bandwidth_hz);
+  bandwidth_spin->setSuffix(" Hz");
+
+  layout->addRow("Label", label_edit);
+  layout->addRow("Frequency", freq_spin);
+  layout->addRow("Modulation", modulation_combo);
+  layout->addRow("Bandwidth", bandwidth_spin);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  layout->addRow(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() != QDialog::Accepted) return;
+
+  channel.label = label_edit->text().trimmed();
+  channel.frequency_mhz = freq_spin->value();
+  channel.modulation = ModulationFromText(modulation_combo->currentText());
+  channel.bandwidth_hz = bandwidth_spin->value();
+  if (channel.bandwidth_hz <= 0) channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
+
+  radar_scan_list_channels_[static_cast<size_t>(index)] = channel;
+  SaveRadarScanListConfigToSettings();
+  RefreshRadarScanListChannelCards();
+  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+}
+
 void MainWindow::AddScanListChannel() {
   ScanListChannelConfig channel;
   channel.label = QString("Kanal %1").arg(scan_list_channels_.size() + 1);
@@ -4009,6 +4148,16 @@ void MainWindow::AddScanListChannel() {
   scan_list_channels_.push_back(channel);
   SaveScanListConfigToSettingsGroup(ActiveScanListSettingsGroup(mode_tabs_));
   RefreshScanListChannelCards();
+}
+
+void MainWindow::AddRadarScanListChannel() {
+  ScanListChannelConfig channel;
+  channel.label = QString("Kanal %1").arg(radar_scan_list_channels_.size() + 1);
+  channel.modulation = v1::MODULATION_NFM;
+  channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
+  radar_scan_list_channels_.push_back(channel);
+  SaveRadarScanListConfigToSettings();
+  RefreshRadarScanListChannelCards();
 }
 
 void MainWindow::RemoveScanListChannel(int index) {
@@ -4032,6 +4181,15 @@ void MainWindow::RemoveScanListChannel(int index) {
   if (receiver_combo_->currentIndex() >= 0) {
     ApplyModeAndConfig();
   }
+}
+
+void MainWindow::RemoveRadarScanListChannel(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= radar_scan_list_channels_.size()) return;
+  radar_scan_list_channels_.erase(radar_scan_list_channels_.begin() + index);
+  if (radar_active_scan_list_channel_index_ == index) radar_active_scan_list_channel_index_ = -1;
+  SaveRadarScanListConfigToSettings();
+  RefreshRadarScanListChannelCards();
+  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
 }
 
 void MainWindow::ImportScanListCsv() {
@@ -4132,6 +4290,58 @@ void MainWindow::ImportScanListCsv() {
   if (!errors.isEmpty()) {
     AppendLog(QString("CSV import warnings:\n%1").arg(errors.mid(0, 10).join("\n")));
   }
+}
+
+void MainWindow::ImportRadarScanListCsv() {
+  const QString path = QFileDialog::getOpenFileName(
+      this, "Import radar scan-list CSV", QString(), "CSV files (*.csv);;All files (*)");
+  if (path.isEmpty()) return;
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    QMessageBox::warning(this, "CSV import", QString("Could not open %1").arg(path));
+    return;
+  }
+  QTextStream stream(&file);
+  std::vector<ScanListChannelConfig> imported;
+  QStringList errors;
+  int line_number = 0;
+  while (!stream.atEnd()) {
+    const QString raw_line = stream.readLine();
+    ++line_number;
+    const QString line = raw_line.trimmed();
+    if (line.isEmpty() || line.startsWith('#')) continue;
+    const QStringList columns = line.split(';', Qt::KeepEmptyParts);
+    if (columns.size() < 3) {
+      errors.push_back(QString("Line %1: expected format MHz;modulation;label").arg(line_number));
+      continue;
+    }
+    bool frequency_ok = false;
+    const double frequency_mhz = columns[0].trimmed().toDouble(&frequency_ok);
+    if (!frequency_ok || frequency_mhz <= 0.0) {
+      errors.push_back(QString("Line %1: invalid frequency '%2'").arg(line_number).arg(columns[0].trimmed()));
+      continue;
+    }
+    v1::Modulation modulation = v1::MODULATION_NFM;
+    if (!TryParseCsvModulation(columns[1], &modulation)) {
+      errors.push_back(QString("Line %1: invalid modulation '%2'").arg(line_number).arg(columns[1].trimmed()));
+      continue;
+    }
+    ScanListChannelConfig channel;
+    channel.frequency_mhz = frequency_mhz;
+    channel.modulation = modulation;
+    channel.label = columns.mid(2).join(";").trimmed();
+    channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
+    imported.push_back(std::move(channel));
+  }
+  if (imported.empty()) {
+    const QString details = errors.isEmpty() ? "No channels found in file." : errors.mid(0, 10).join("\n");
+    QMessageBox::warning(this, "CSV import", details);
+    return;
+  }
+  radar_scan_list_channels_ = std::move(imported);
+  SaveRadarScanListConfigToSettings();
+  RefreshRadarScanListChannelCards();
+  if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
 }
 
 void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message) {
@@ -4756,6 +4966,82 @@ void MainWindow::LoadScanListConfigFromSettings() {
 
 void MainWindow::SaveScanListConfigToSettings() const {
   SaveScanListConfigToSettingsGroup("scan_list");
+}
+
+void MainWindow::LoadRadarScanListConfigFromSettings() {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("radar_scan_list");
+  int channel_count = settings.value("count", 0).toInt();
+  if (channel_count <= 0) channel_count = 3;
+
+  radar_scan_list_channels_.clear();
+  radar_scan_list_channels_.reserve(static_cast<size_t>(channel_count));
+  for (int index = 0; index < channel_count; ++index) {
+    ScanListChannelConfig channel;
+    settings.beginGroup(QString("channel_%1").arg(index));
+    channel.label = settings.value("label", channel.label).toString();
+    channel.frequency_mhz = settings.value("frequency_mhz", 0.0).toDouble();
+    channel.bandwidth_hz = settings.value("bandwidth_hz", 0).toInt();
+    channel.dwell_ms = settings.value("dwell_ms", 0).toInt();
+    channel.use_default_squelch = settings.value("use_default_squelch", true).toBool();
+    channel.squelch_threshold_db = settings.value("squelch_threshold_db", kDefaultScanListSquelchDb).toDouble();
+    channel.audio_gain_db = settings.value("audio_gain_db", 0.0).toDouble();
+    const int modulation = settings.value("modulation", static_cast<int>(channel.modulation)).toInt();
+    channel.modulation = static_cast<v1::Modulation>(modulation);
+    settings.endGroup();
+    radar_scan_list_channels_.push_back(std::move(channel));
+  }
+  settings.endGroup();
+
+  // Seed defaults if empty/unconfigured.
+  bool any_freq = false;
+  for (const auto& ch : radar_scan_list_channels_) {
+    if (ch.frequency_mhz > 0.0) { any_freq = true; break; }
+  }
+  if (!any_freq) {
+    radar_scan_list_channels_.clear();
+    radar_scan_list_channels_.reserve(3);
+    ScanListChannelConfig ais;
+    ais.label = "AIS Dual";
+    ais.frequency_mhz = 162.000;
+    ais.modulation = v1::MODULATION_AIS_DUAL;
+    ais.bandwidth_hz = DefaultBandwidthHzForModulation(ais.modulation);
+    radar_scan_list_channels_.push_back(ais);
+    ScanListChannelConfig dsc;
+    dsc.label = "DSC Ch 70";
+    dsc.frequency_mhz = 156.525;
+    dsc.modulation = v1::MODULATION_FSK;
+    dsc.bandwidth_hz = DefaultBandwidthHzForModulation(dsc.modulation);
+    radar_scan_list_channels_.push_back(dsc);
+    ScanListChannelConfig adsb;
+    adsb.label = "ADS-B";
+    adsb.frequency_mhz = 1090.000;
+    adsb.modulation = v1::MODULATION_ADSB;
+    adsb.bandwidth_hz = DefaultBandwidthHzForModulation(adsb.modulation);
+    radar_scan_list_channels_.push_back(adsb);
+    SaveRadarScanListConfigToSettings();
+  }
+}
+
+void MainWindow::SaveRadarScanListConfigToSettings() const {
+  QSettings settings("multi-radio", "multi-radio-client");
+  settings.beginGroup("radar_scan_list");
+  settings.remove("");
+  settings.setValue("count", static_cast<int>(radar_scan_list_channels_.size()));
+  for (size_t index = 0; index < radar_scan_list_channels_.size(); ++index) {
+    const ScanListChannelConfig& channel = radar_scan_list_channels_[index];
+    settings.beginGroup(QString("channel_%1").arg(static_cast<qulonglong>(index)));
+    settings.setValue("label", channel.label);
+    settings.setValue("frequency_mhz", channel.frequency_mhz);
+    settings.setValue("modulation", static_cast<int>(channel.modulation));
+    settings.setValue("bandwidth_hz", channel.bandwidth_hz);
+    settings.setValue("dwell_ms", channel.dwell_ms);
+    settings.setValue("use_default_squelch", channel.use_default_squelch);
+    settings.setValue("squelch_threshold_db", channel.squelch_threshold_db);
+    settings.setValue("audio_gain_db", channel.audio_gain_db);
+    settings.endGroup();
+  }
+  settings.endGroup();
 }
 
 void MainWindow::OnStreamError(const QString& error) {

@@ -100,6 +100,11 @@ class MainWindow : public QMainWindow {
   void AddScanListChannel();
   void ImportScanListCsv();
   void RemoveScanListChannel(int index);
+  void RefreshRadarScanListChannelCards();
+  void ConfigureRadarScanListChannel(int index);
+  void AddRadarScanListChannel();
+  void ImportRadarScanListCsv();
+  void RemoveRadarScanListChannel(int index);
   void ApplyScanListStatusEvent(uint32_t receiver_id, const QString& message);
   void StartAutoSquelchCalibration();
   void CompleteAutoSquelchCalibration();
@@ -116,6 +121,8 @@ class MainWindow : public QMainWindow {
   void SaveScanListConfigToSettings() const;
   void LoadScanListConfigFromSettingsGroup(const QString& group);
   void SaveScanListConfigToSettingsGroup(const QString& group) const;
+  void LoadRadarScanListConfigFromSettings();
+  void SaveRadarScanListConfigToSettings() const;
 
   struct ScanListChannelConfig {
     QString label;
@@ -212,10 +219,16 @@ class MainWindow : public QMainWindow {
   int scan_list_last_button_width_ = 0;
   QWidget* scan_list_grid_widget_ = nullptr;
   QScrollArea* scan_list_scroll_area_ = nullptr;
-  QWidget* scan_list_panel_ = nullptr;
-  QWidget* radar_radio_group_ = nullptr;
-  QVBoxLayout* radar_radio_layout_ = nullptr;
-  QWidget* scan_list_tab_ = nullptr;
+
+  // Separate scan-list instance for RADAR_VIEW radio panel.
+  std::vector<ScanListChannelConfig> radar_scan_list_channels_;
+  std::vector<QPushButton*> radar_scan_list_channel_buttons_;
+  QGridLayout* radar_scan_list_grid_layout_ = nullptr;
+  QWidget* radar_scan_list_grid_widget_ = nullptr;
+  QScrollArea* radar_scan_list_scroll_area_ = nullptr;
+  int radar_active_scan_list_channel_index_ = -1;
+  int radar_frozen_scan_channel_index_ = -1;
+
   int active_scan_list_channel_index_ = -1;
   ScanListChannelState active_scan_list_channel_state_ = ScanListChannelState::kIdle;
   int frozen_scan_channel_index_ = -1;
