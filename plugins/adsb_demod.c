@@ -32,6 +32,13 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* Extra preamble gating to avoid drowning in noise-triggered candidates.
+ * Tunables:
+ * - MR_PLUGIN_ADSB_PREAMBLE_RATIO (float, default 3.0)
+ * - MR_PLUGIN_ADSB_PREAMBLE_MIN_HIGH (uint, default 0 = disabled) */
+static float g_adsb_preamble_ratio = 3.0f;
+static uint32_t g_adsb_preamble_min_high = 0u;
+
 /* ------------------------------------------------------------------ */
 /* Mode S-konstanter från dump1090                                     */
 /* ------------------------------------------------------------------ */
@@ -120,6 +127,8 @@ typedef struct {
   uint32_t  mag_cap;
   uint32_t  mag_len;
   uint64_t  preamble_count;
+  uint64_t  preamble_reject_min_high;
+  uint64_t  preamble_reject_ratio;
   uint64_t  crc_ok_count;
   uint64_t  crc_ok_clean_count;
   uint64_t  crc_ok_corrected_count;
@@ -368,10 +377,11 @@ static uint32_t crc24(const uint8_t* data, uint32_t n) {
 
 
 
-static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
+static int preamble_ok_phase(AdsbCtx* ctx, const uint32_t* m, int phase, uint32_t* out_high) {
     uint32_t high;
     uint32_t base_signal;
     uint32_t base_noise;
+    uint32_t base_noise_n;
 
     if (! (m[0] < m[1] && m[12] > m[13]))
         return 0;
@@ -383,6 +393,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         high = (m[1] + m[3] + m[9] + m[11] + m[12]) / 4u;
         base_signal = m[1] + m[3] + m[9];
         base_noise = m[5] + m[6] + m[7];
+        base_noise_n = 3u;
     } else if (phase == 4) {
         if (!(m[1] > m[2] && m[2] < m[3] && m[3] > m[4] &&
               m[8] < m[9] && m[9] > m[10] && m[11] < m[12]))
@@ -390,6 +401,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         high = (m[1] + m[3] + m[9] + m[12]) / 4u;
         base_signal = m[1] + m[3] + m[9] + m[12];
         base_noise = m[5] + m[6] + m[7] + m[8];
+        base_noise_n = 4u;
     } else if (phase == 5) {
         if (!(m[1] > m[2] && m[2] < m[3] && m[4] > m[5] &&
               m[8] < m[9] && m[10] > m[11] && m[11] < m[12]))
@@ -397,6 +409,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         high = (m[1] + m[3] + m[4] + m[9] + m[10] + m[12]) / 4u;
         base_signal = m[1] + m[12];
         base_noise = m[6] + m[7];
+        base_noise_n = 2u;
     } else if (phase == 6) {
         if (!(m[1] > m[2] && m[3] < m[4] && m[4] > m[5] &&
               m[9] < m[10] && m[10] > m[11] && m[11] < m[12]))
@@ -404,6 +417,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         high = (m[1] + m[4] + m[10] + m[12]) / 4u;
         base_signal = m[1] + m[4] + m[10] + m[12];
         base_noise = m[5] + m[6] + m[7] + m[8];
+        base_noise_n = 4u;
     } else if (phase == 7) {
         if (!(m[2] > m[3] && m[3] < m[4] && m[4] > m[5] &&
               m[9] < m[10] && m[10] > m[11] && m[11] < m[12]))
@@ -411,12 +425,27 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         high = (m[1] + m[2] + m[4] + m[10] + m[12]) / 4u;
         base_signal = m[4] + m[10] + m[12];
         base_noise = m[6] + m[7] + m[8];
+        base_noise_n = 3u;
     } else {
         return 0;
     }
 
     if (base_signal * 2 < 3 * base_noise)
         return 0;
+
+    /* Stronger local SNR gate: require peak ("high") to exceed local noise floor.
+     * This dramatically reduces false preambles in purely noisy regions when AGC is enabled. */
+    if (g_adsb_preamble_min_high > 0u && high < g_adsb_preamble_min_high) {
+        if (ctx) ++ctx->preamble_reject_min_high;
+        return 0;
+    }
+    if (base_noise_n > 0u && base_noise > 0u && g_adsb_preamble_ratio > 0.0f) {
+        const float noise_avg = (float)base_noise / (float)base_noise_n;
+        if ((float)high < g_adsb_preamble_ratio * noise_avg) {
+            if (ctx) ++ctx->preamble_reject_ratio;
+            return 0;
+        }
+    }
 
     if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
         m[14] >= high || m[15] >= high || m[16] >= high || m[17] >= high ||
@@ -862,6 +891,18 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->debug_enabled = 0;
   ctx->debug_file = NULL;
 
+  /* ADS-B preamble gating controls (global, because preamble_ok_phase() is hot). */
+  const char* pre_ratio_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_RATIO");
+  const char* pre_min_high_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_MIN_HIGH");
+  if (pre_ratio_env && pre_ratio_env[0] != '\0') {
+    float parsed = strtof(pre_ratio_env, NULL);
+    if (parsed > 0.0f) g_adsb_preamble_ratio = parsed;
+  }
+  if (pre_min_high_env && pre_min_high_env[0] != '\0') {
+    unsigned long parsed = strtoul(pre_min_high_env, NULL, 10);
+    if (parsed > 0ul) g_adsb_preamble_min_high = (uint32_t)parsed;
+  }
+
   /* Software AGC: normalize the noise floor to roughly unit magnitude.
    * Default loop bandwidth 5e-6 → time constant ~84 ms @ 2.4 Msps.
    * This is intentionally slower to avoid disturbing short 120 µs ADS-B bursts.
@@ -896,6 +937,8 @@ MrPluginCtx* mr_plugin_create(void) {
     FILE* out = debug_out(ctx);
     fprintf(out, "[adsb_demod] Plugin initialized (nominal 2.4 Msps, accepts 2.3-2.5 Msps)\n");
     fprintf(out, "[adsb_demod] AGC bandwidth=%g target_level=%g\n", agc_bandwidth, agc_target_level);
+    fprintf(out, "[adsb_demod] preamble_ratio=%g preamble_min_high=%u\n",
+            g_adsb_preamble_ratio, g_adsb_preamble_min_high);
     if (ctx->debug_file) {
       fprintf(out, "[adsb_demod] Logging debug to file: %s\n", debug_file_path);
     }
@@ -927,6 +970,33 @@ const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   if (!raw || !key || !value) return 0;
   AdsbCtx* ctx = (AdsbCtx*)raw;
+
+  if (strcmp(key, "adsb_preamble_ratio") == 0) {
+    const float parsed = strtof(value, NULL);
+    if (parsed > 0.0f) {
+      g_adsb_preamble_ratio = parsed;
+      if (ctx->debug_enabled) {
+        fprintf(debug_out(ctx), "[adsb_demod] Set preamble_ratio=%g\n", g_adsb_preamble_ratio);
+        fflush(debug_out(ctx));
+      }
+      return 1;
+    }
+    return 0;
+  }
+
+  if (strcmp(key, "adsb_preamble_min_high") == 0) {
+    const unsigned long parsed = strtoul(value, NULL, 10);
+    if (parsed > 0ul) {
+      g_adsb_preamble_min_high = (uint32_t)parsed;
+      if (ctx->debug_enabled) {
+        fprintf(debug_out(ctx), "[adsb_demod] Set preamble_min_high=%u\n", g_adsb_preamble_min_high);
+        fflush(debug_out(ctx));
+      }
+      return 1;
+    }
+    g_adsb_preamble_min_high = 0u;
+    return 1;
+  }
 
   if (strcmp(key, "adsb_agc_bandwidth") == 0) {
     const float parsed = strtof(value, NULL);
@@ -1022,7 +1092,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     for (int ph = 3; ph <= 7; ++ph) {
       uint32_t phase_high = 0u;
-      if (preamble_ok_phase(ctx->mag + p, ph, &phase_high)) {
+      if (preamble_ok_phase(ctx, ctx->mag + p, ph, &phase_high)) {
         if (debug_enabled) {
           fprintf(debug_file, "[adsb_demod] preamble candidate idx=%u phase=%d high=%u\n", p, ph, phase_high);
         }
@@ -1215,6 +1285,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     fprintf(stderr,
             "[ADS-B] preamble=%llu  crc_ok=%llu(clean=%llu +%llu korr +%llu ap)  crc_fail=%llu"
             "  df17_ok=%llu  df17_fail=%llu  df18_ok=%llu  df18_fail=%llu"
+            "  gate_rej(min_high=%llu ratio=%llu)"
             "  icao_unique=%u icao_frames=%llu\n",
             (unsigned long long)ctx->preamble_count,
             (unsigned long long)ctx->crc_ok_count,
@@ -1226,6 +1297,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
             (unsigned long long)ctx->df17_fail_count,
             (unsigned long long)ctx->df18_ok_count,
             (unsigned long long)ctx->df18_fail_count,
+            (unsigned long long)ctx->preamble_reject_min_high,
+            (unsigned long long)ctx->preamble_reject_ratio,
             ctx->icao_seen_count,
             (unsigned long long)ctx->icao_frames_total);
   }
