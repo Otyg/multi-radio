@@ -39,6 +39,8 @@
 static float g_adsb_preamble_ratio = 3.0f;
 static uint32_t g_adsb_preamble_min_high = 0u;
 static float g_adsb_preamble_base_snr_ratio = 1.5f; /* base_signal / base_noise */
+static int g_adsb_agc_enable = 1;
+static int g_adsb_max_biterrors = 2;
 
 /* ------------------------------------------------------------------ */
 /* Mode S-konstanter från dump1090                                     */
@@ -903,6 +905,8 @@ MrPluginCtx* mr_plugin_create(void) {
   const char* pre_ratio_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_RATIO");
   const char* pre_min_high_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_MIN_HIGH");
   const char* pre_base_snr_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_BASE_SNR_RATIO");
+  const char* agc_enable_env = getenv("MR_PLUGIN_ADSB_AGC_ENABLE");
+  const char* max_biterrors_env = getenv("MR_PLUGIN_ADSB_MAX_BITERRORS");
   if (pre_ratio_env && pre_ratio_env[0] != '\0') {
     float parsed = strtof(pre_ratio_env, NULL);
     if (parsed > 0.0f) g_adsb_preamble_ratio = parsed;
@@ -914,6 +918,16 @@ MrPluginCtx* mr_plugin_create(void) {
   if (pre_base_snr_env && pre_base_snr_env[0] != '\0') {
     float parsed = strtof(pre_base_snr_env, NULL);
     if (parsed > 0.0f) g_adsb_preamble_base_snr_ratio = parsed;
+  }
+  if (agc_enable_env && agc_enable_env[0] != '\0') {
+    /* Accept 0/1, default is enabled. */
+    g_adsb_agc_enable = (agc_enable_env[0] != '0');
+  }
+  if (max_biterrors_env && max_biterrors_env[0] != '\0') {
+    long parsed = strtol(max_biterrors_env, NULL, 10);
+    if (parsed < 0) parsed = 0;
+    if (parsed > MODES_MAX_BITERRORS) parsed = MODES_MAX_BITERRORS;
+    g_adsb_max_biterrors = (int)parsed;
   }
 
   /* Software AGC: normalize the noise floor to roughly unit magnitude.
@@ -950,8 +964,9 @@ MrPluginCtx* mr_plugin_create(void) {
     FILE* out = debug_out(ctx);
     fprintf(out, "[adsb_demod] Plugin initialized (nominal 2.4 Msps, accepts 2.3-2.5 Msps)\n");
     fprintf(out, "[adsb_demod] AGC bandwidth=%g target_level=%g\n", agc_bandwidth, agc_target_level);
-    fprintf(out, "[adsb_demod] preamble_ratio=%g preamble_min_high=%u preamble_base_snr_ratio=%g\n",
-            g_adsb_preamble_ratio, g_adsb_preamble_min_high, g_adsb_preamble_base_snr_ratio);
+    fprintf(out, "[adsb_demod] preamble_ratio=%g preamble_min_high=%u preamble_base_snr_ratio=%g agc_enable=%d max_biterrors=%d\n",
+            g_adsb_preamble_ratio, g_adsb_preamble_min_high, g_adsb_preamble_base_snr_ratio,
+            g_adsb_agc_enable, g_adsb_max_biterrors);
     if (ctx->debug_file) {
       fprintf(out, "[adsb_demod] Logging debug to file: %s\n", debug_file_path);
     }
@@ -1022,6 +1037,28 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
       return 1;
     }
     return 0;
+  }
+
+  if (strcmp(key, "adsb_agc_enable") == 0) {
+    /* Treat any leading '0' as disable; anything else enables. */
+    g_adsb_agc_enable = !(value[0] == '0');
+    if (ctx->debug_enabled) {
+      fprintf(debug_out(ctx), "[adsb_demod] Set agc_enable=%d\n", g_adsb_agc_enable);
+      fflush(debug_out(ctx));
+    }
+    return 1;
+  }
+
+  if (strcmp(key, "adsb_max_biterrors") == 0) {
+    long parsed = strtol(value, NULL, 10);
+    if (parsed < 0) parsed = 0;
+    if (parsed > MODES_MAX_BITERRORS) parsed = MODES_MAX_BITERRORS;
+    g_adsb_max_biterrors = (int)parsed;
+    if (ctx->debug_enabled) {
+      fprintf(debug_out(ctx), "[adsb_demod] Set max_biterrors=%d\n", g_adsb_max_biterrors);
+      fflush(debug_out(ctx));
+    }
+    return 1;
   }
 
   if (strcmp(key, "adsb_agc_bandwidth") == 0) {
@@ -1101,7 +1138,11 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     __real__ iq_in = (float)iq[n * 2u]      * (1.0f / 32768.0f);
     __imag__ iq_in = (float)iq[n * 2u + 1u] * (1.0f / 32768.0f);
     liquid_float_complex iq_out;
-    agc_crcf_execute(ctx->agc_h, iq_in, &iq_out);
+    if (g_adsb_agc_enable) {
+      agc_crcf_execute(ctx->agc_h, iq_in, &iq_out);
+    } else {
+      iq_out = iq_in;
+    }
     float ri = crealf(iq_out);
     float rq = cimagf(iq_out);
     /* Use power (I^2+Q^2) like dump1090. This improves dynamic range and keeps
@@ -1206,7 +1247,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
       uint32_t syndrome = modesChecksum(frame, n_bits);
       if (syndrome != 0u) {
-        int fixed = fixBitErrors(frame, n_bits, MODES_MAX_BITERRORS, fixbits);
+        int fixed = fixBitErrors(frame, n_bits, g_adsb_max_biterrors, fixbits);
         if (fixed > 0) {
           corrected = fixed;
           syndrome = modesChecksum(frame, n_bits);
