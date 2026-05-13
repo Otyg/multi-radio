@@ -131,6 +131,10 @@ typedef struct {
   uint64_t  df18_ok_count;
   uint64_t  df18_fail_count;
   uint64_t  last_stats_ms;
+  uint64_t  icao_frames_total;   /* alla godkända ramar med ICAO-adress */
+  uint32_t  icao_seen_count;     /* antal unika ICAO-adresser */
+#define ICAO_SEEN_SIZE 4096u
+  uint32_t  icao_seen[ICAO_SEEN_SIZE]; /* öppen-adressering hashset */
   uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
   int      error_info_initialized;
   int      debug_enabled;
@@ -224,6 +228,23 @@ static void addRecentlySeenICAOAddr(AdsbCtx *ctx, uint32_t addr) {
     uint32_t h = ICAOCacheHashAddress(addr);
     ctx->icao_cache[h*2]   = addr;
     ctx->icao_cache[h*2+1] = (uint32_t)time(NULL);
+}
+
+/* Registrera ICAO i hashset; ökar icao_seen_count om adressen är ny. */
+static void icaoSeenInsert(AdsbCtx* ctx, uint32_t icao) {
+    if (icao == 0u) return;
+    ctx->icao_frames_total++;
+    uint32_t h = ICAOCacheHashAddress(icao) & (ICAO_SEEN_SIZE - 1u);
+    for (uint32_t i = 0; i < ICAO_SEEN_SIZE; ++i) {
+        uint32_t slot = (h + i) & (ICAO_SEEN_SIZE - 1u);
+        if (ctx->icao_seen[slot] == 0u) {
+            ctx->icao_seen[slot] = icao;
+            ctx->icao_seen_count++;
+            return;
+        }
+        if (ctx->icao_seen[slot] == icao) return; /* redan känd */
+    }
+    /* Tabellen full — ignorera; set är tillräckligt stort för normalt bruk */
 }
 
 static int ICAOAddressWasRecentlySeen(AdsbCtx *ctx, uint32_t addr) {
@@ -394,7 +415,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         return 0;
     }
 
-    if (base_signal < 4 * base_noise)
+    if (base_signal < 6 * base_noise)
         return 0;
 
     if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
@@ -1077,6 +1098,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
                          (uint32_t)frame[3];
         if (df == 17u || df == 18u) {
           addRecentlySeenICAOAddr(ctx, icao);
+          icaoSeenInsert(ctx, icao);
         }
 
         if (corrected > 0 && ctx->corrected_logged_count < 20u) {
@@ -1150,7 +1172,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->last_stats_ms = unix_ms;
     fprintf(stderr,
             "[ADS-B] preamble=%llu  crc_ok=%llu(clean=%llu +%llu korr +%llu ap)  crc_fail=%llu"
-            "  df17_ok=%llu  df17_fail=%llu  df18_ok=%llu  df18_fail=%llu\n",
+            "  df17_ok=%llu  df17_fail=%llu  df18_ok=%llu  df18_fail=%llu"
+            "  icao_unique=%u icao_frames=%llu\n",
             (unsigned long long)ctx->preamble_count,
             (unsigned long long)ctx->crc_ok_count,
             (unsigned long long)ctx->crc_ok_clean_count,
@@ -1160,6 +1183,8 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
             (unsigned long long)ctx->df17_ok_count,
             (unsigned long long)ctx->df17_fail_count,
             (unsigned long long)ctx->df18_ok_count,
-            (unsigned long long)ctx->df18_fail_count);
+            (unsigned long long)ctx->df18_fail_count,
+            ctx->icao_seen_count,
+            (unsigned long long)ctx->icao_frames_total);
   }
 }
