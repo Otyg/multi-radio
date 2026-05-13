@@ -25,6 +25,8 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <complex.h>
+#include <liquid/liquid.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -133,6 +135,7 @@ typedef struct {
   int      error_info_initialized;
   int      debug_enabled;
   FILE*    debug_file;
+  agc_crcf agc_h;
 } AdsbCtx;
 
 static FILE* debug_out(AdsbCtx* ctx) {
@@ -391,7 +394,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         return 0;
     }
 
-    if (base_signal * 2 < 3 * base_noise)
+    if (base_signal < 4 * base_noise)
         return 0;
 
     if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
@@ -836,6 +839,12 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->debug_enabled = 0;
   ctx->debug_file = NULL;
 
+  /* Software AGC: normaliserar brusgolvet till ~1000 amplitudenheter.
+   * Bandbredd 1e-5 → tidskonstant ~42 ms @ 2.4 Msps — spårar långsamt
+   * driftande brusgolv men påverkar inte enskilda 120 µs ADS-B-burst. */
+  ctx->agc_h = agc_crcf_create();
+  agc_crcf_set_bandwidth(ctx->agc_h, 1e-5f);
+
   const char* debug_env = getenv("MR_PLUGIN_DEBUG");
   const char* debug_file_path = getenv("MR_PLUGIN_DEBUG_FILE");
   if (debug_file_path && debug_file_path[0] != '\0') {
@@ -865,6 +874,7 @@ void mr_plugin_destroy(MrPluginCtx* raw) {
     fclose(ctx->debug_file);
     ctx->debug_file = NULL;
   }
+  if (ctx->agc_h) agc_crcf_destroy(ctx->agc_h);
   free(ctx->mag);
   free(ctx);
 }
@@ -922,13 +932,18 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* Amplitude magnitude skalad till ~0-65535 som dump1090:s uint16-tabell.
-   * Faktorn 363 = 65535 / (127.4 * sqrt(2)) -- ger samma SNR-resolution som
-   * dump1090:s förberäknade magnitudtabell för 8-bitars IQ (±127-intervall). */
+  /* Software AGC normaliserar till brusgolv ≈ 1000 amplitudenheter.
+   * Skalar IQ till ±1.0 innan AGC så att agc_crcf-internt gain-mål är
+   * dimensionslöst; output×1000 ger bekväma heltal för preambeldetektion. */
   for (uint32_t n = 0; n < num_pairs; ++n) {
-    int32_t i = (int32_t)iq[n * 2u];
-    int32_t q = (int32_t)iq[n * 2u + 1u];
-    uint32_t mag = (uint32_t)(sqrtf((float)(i * i + q * q)) * 363.0f);
+    liquid_float_complex iq_in;
+    __real__ iq_in = (float)iq[n * 2u]      * (1.0f / 32768.0f);
+    __imag__ iq_in = (float)iq[n * 2u + 1u] * (1.0f / 32768.0f);
+    liquid_float_complex iq_out;
+    agc_crcf_execute(ctx->agc_h, iq_in, &iq_out);
+    float ri = crealf(iq_out);
+    float rq = cimagf(iq_out);
+    uint32_t mag = (uint32_t)(sqrtf(ri * ri + rq * rq) * 1000.0f);
     ctx->mag[ctx->mag_len++] = mag;
   }
 
