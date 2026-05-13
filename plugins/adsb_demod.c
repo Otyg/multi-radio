@@ -1186,10 +1186,9 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     }
 
     /* Decode like dump1090 "demod_2400":
-     * - Start at p+19 plus coarse sample for the latest phase (phase 7)
+     * - Start at p+19 with a coarse sample offset by phase bucket (best_phase/5)
      * - Then advance 19 or 20 samples depending on phase wrap */
-    const uint32_t coarse = (best_phase == 7) ? 1u : 0u;
-    const uint32_t* pPtr = (ctx->mag + p + 19u) + coarse;
+    const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(best_phase / 5);
     int phase = best_phase % 5;   /* 3→3, 4→4, 5→0, 6→1, 7→2 */
 
     uint8_t frame[MODES_LONG_MSG_BYTES];
@@ -1221,7 +1220,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       }
 
       phase = (phase + 1) % 5;
-      pPtr += 19u;
+      pPtr += (phase == 0) ? 20u : 19u;
 
       for (uint32_t i = 1; i < n_bytes; ++i) {
         ptr = pPtr;
