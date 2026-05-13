@@ -472,23 +472,25 @@ static int preamble_ok_phase(AdsbCtx* ctx, const uint32_t* m, int phase, uint32_
 /* ------------------------------------------------------------------ */
 
 static int slice_phase0(const uint32_t* m) {
-  return (int)((int32_t)(5u*m[0]) - (int32_t)(3u*m[1]) - (int32_t)(2u*m[2]));
+  /* Coefficients from readsb/dump1090 demod_2400.c (tuned for 2.4Msps) */
+  return (int)((int32_t)(18u*m[0]) - (int32_t)(15u*m[1]) - (int32_t)(3u*m[2]));
 }
 
 static int slice_phase1(const uint32_t* m) {
-  return (int)((int32_t)(4u*m[0]) - (int32_t)(m[1]) - (int32_t)(3u*m[2]));
+  return (int)((int32_t)(14u*m[0]) - (int32_t)(5u*m[1]) - (int32_t)(9u*m[2]));
 }
 
 static int slice_phase2(const uint32_t* m) {
-  return (int)((int32_t)(3u*m[0]) + (int32_t)(m[1]) - (int32_t)(4u*m[2]));
+  /* Slightly DC unbalanced but better results (per readsb comment) */
+  return (int)((int32_t)(16u*m[0]) + (int32_t)(5u*m[1]) - (int32_t)(20u*m[2]));
 }
 
 static int slice_phase3(const uint32_t* m) {
-  return (int)((int32_t)(2u*m[0]) + (int32_t)(3u*m[1]) - (int32_t)(5u*m[2]));
+  return (int)((int32_t)(7u*m[0]) + (int32_t)(11u*m[1]) - (int32_t)(18u*m[2]));
 }
 
 static int slice_phase4(const uint32_t* m) {
-  return (int)((int32_t)(m[0]) + (int32_t)(5u*m[1]) - (int32_t)(5u*m[2]) - (int32_t)(m[3]));
+  return (int)((int32_t)(4u*m[0]) + (int32_t)(15u*m[1]) - (int32_t)(20u*m[2]) + (int32_t)(1u*m[3]));
 }
 
 /* Phase-specific bit offsets and correlator mappings for Manchester decoding
