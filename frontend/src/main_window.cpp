@@ -1691,6 +1691,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   controls_layout->addRow("Signal / Last minutes", signal_minutes_row);
   controls_layout->addRow("Receiver", receiver_filter_combo_);
 
+  decoded_table_ = new QTableWidget(0, 7, air_marine_controls);
+  decoded_table_->setHorizontalHeaderLabels({"Time", "MMSI", "Lat", "Long", "SOG", "COG", "Other"});
+  decoded_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+  decoded_table_->setMinimumHeight(280);
+  controls_layout->addRow(decoded_table_);
+
   radar_widget_ = new RadarMapWidget(air_marine_splitter);
   radar_widget_->SetRangeKm(10.0);
   radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
@@ -1952,12 +1958,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
           &MainWindow::OpenVisualizationSettingsDialog);
 
   connect(signal_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+    if (decoded_table_ == nullptr) return;
     decoded_table_->setRowCount(0);
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
     }
   });
   connect(receiver_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+    if (decoded_table_ == nullptr) return;
     decoded_table_->setRowCount(0);
     for (const auto& row : all_rows_) {
       AddMessageRow(row);
@@ -4777,6 +4785,7 @@ void MainWindow::OpenVisualizationSettingsDialog() {
 }
 
 void MainWindow::AddMessageRow(const MessageRow& row) {
+  if (decoded_table_ == nullptr) return;
   if (!PassesFilter(row)) {
     return;
   }
