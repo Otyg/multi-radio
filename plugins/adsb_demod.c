@@ -649,7 +649,7 @@ static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
       kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
                        ",\"callsign\":\"%s\"", cs);
       tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       "Anrop: %s", cs);
+                       "CS: %s", cs);
 
     } else if (tc >= 9u && tc <= 18u) {
       /* ---- Luftläge (barometrisk höjd) ---- */
@@ -922,11 +922,13 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     ctx->mag_cap = new_cap;
   }
 
-  /* Amplitude magnitude: |IQ| = sqrt(I²+Q²), som dump1090 */
+  /* Amplitude magnitude skalad till ~0-65535 som dump1090:s uint16-tabell.
+   * Faktorn 363 = 65535 / (127.4 * sqrt(2)) -- ger samma SNR-resolution som
+   * dump1090:s förberäknade magnitudtabell för 8-bitars IQ (±127-intervall). */
   for (uint32_t n = 0; n < num_pairs; ++n) {
     int32_t i = (int32_t)iq[n * 2u];
     int32_t q = (int32_t)iq[n * 2u + 1u];
-    uint32_t mag = (uint32_t)sqrtf((float)(i * i + q * q));
+    uint32_t mag = (uint32_t)(sqrtf((float)(i * i + q * q)) * 363.0f);
     ctx->mag[ctx->mag_len++] = mag;
   }
 
