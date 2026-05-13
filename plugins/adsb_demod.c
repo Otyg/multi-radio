@@ -415,7 +415,7 @@ static int preamble_ok_phase(const uint32_t* m, int phase, uint32_t* out_high) {
         return 0;
     }
 
-    if (base_signal < 6 * base_noise)
+    if (base_signal * 2 < 3 * base_noise)
         return 0;
 
     if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
@@ -1042,7 +1042,7 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
       fflush(debug_file);
     }
 
-    uint32_t msg_offset = (best_phase >= 4) ? 20u : 19u;
+    uint32_t msg_offset = (best_phase == 7) ? 20u : 19u;
     const uint32_t* pPtr = ctx->mag + p + msg_offset;
     int phase = (best_phase + 1) % 5;   /* maps 3→4, 4→0, 5→1, 6→2, 7→3 */
 
