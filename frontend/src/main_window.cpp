@@ -3602,18 +3602,45 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     const QString ts   = row.timestamp.toString("HH:mm:ss");
     const QString df   = fields.value("df").toString();
     const QString icao = fields.value("icao").toString();
-    const QString bits = fields.value("bits").toString();
-    AppendLog(QString("[%1] RX%2 ADS-B f=%3Hz DF=%4 ICAO=%5 bits=%6: %7")
+
+    QString decoded;
+    if (fields.contains("metype"))
+      decoded += QString(" ME=%1/%2").arg(fields.value("metype").toString())
+                                     .arg(fields.value("mesub").toString());
+    if (fields.contains("callsign"))
+      decoded += QString(" CS=%1").arg(fields.value("callsign").toString().trimmed());
+    if (fields.contains("alt_baro"))
+      decoded += QString(" alt=%1ft").arg(fields.value("alt_baro").toString());
+    else if (fields.contains("alt_geom"))
+      decoded += QString(" alt_geom=%1ft").arg(fields.value("alt_geom").toString());
+    if (fields.contains("lat"))
+      decoded += QString(" lat=%1 lon=%2").arg(fields.value("lat").toString())
+                                          .arg(fields.value("lon").toString());
+    if (fields.contains("gs"))
+      decoded += QString(" gs=%1kn").arg(fields.value("gs").toString());
+    if (fields.contains("heading"))
+      decoded += QString(" hdg=%1").arg(fields.value("heading").toString());
+    if (fields.contains("squawk"))
+      decoded += QString(" sqwk=%1").arg(fields.value("squawk").toString());
+    if (fields.contains("baro_rate"))
+      decoded += QString(" vr=%1").arg(fields.value("baro_rate").toString());
+    else if (fields.contains("geom_rate"))
+      decoded += QString(" vr=%1").arg(fields.value("geom_rate").toString());
+    const QString correctedbits = fields.value("correctedbits").toString();
+    if (!correctedbits.isEmpty() && correctedbits != "0")
+      decoded += QString(" corrected=%1").arg(correctedbits);
+
+    AppendLog(QString("[%1] RX%2 ADS-B f=%3Hz DF=%4 ICAO=%5%6 %7")
                   .arg(ts)
                   .arg(receiver_id)
                   .arg(frequency_hz, 0, 'f', 0)
                   .arg(df)
                   .arg(icao)
-                  .arg(bits)
+                  .arg(decoded)
                   .arg(payload));
     if (fixed_hdlc_log_ != nullptr)
       fixed_hdlc_log_->appendPlainText(
-          QString("[%1] DF%2 %3 %4").arg(ts).arg(df).arg(icao).arg(payload));
+          QString("[%1] DF%2 %3%4 %5").arg(ts).arg(df).arg(icao).arg(decoded).arg(payload));
     return;
   }
 
