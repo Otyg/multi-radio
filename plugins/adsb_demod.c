@@ -14,6 +14,7 @@
 #include <libmodes/demod_2400.h>
 #include <libmodes/convert.h>
 #include <libmodes/crc.h>
+#include <libmodes/cpr.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -23,6 +24,23 @@
 /* Leading overlap samples preserved between successive IQ blocks.
  * dump1090 uses 400; MODES_OS_PREAMBLE_SAMPLES (20) is the minimum. */
 #define MAG_OVERLAP 400u
+
+/* ------------------------------------------------------------------ */
+/* CPR position cache                                                   */
+/* ------------------------------------------------------------------ */
+
+/* Airborne CPR requires one even and one odd frame from the same aircraft,
+ * received within CPR_MAX_AGE_MS of each other. */
+#define CPR_CACHE_SIZE 512u   /* must be a power of two */
+#define CPR_MAX_AGE_MS 10000u /* 10-second window per ICAO 9684 */
+
+typedef struct {
+    uint32_t   icao;
+    uint64_t   ts[2];    /* unix_ms of last even[0] and odd[1] frame */
+    unsigned   lat[2];   /* raw CPR latitude  */
+    unsigned   lon[2];   /* raw CPR longitude */
+    int        valid[2]; /* 1 once a frame of that parity has been stored */
+} cpr_entry_t;
 
 /* ------------------------------------------------------------------ */
 /* Plugin context                                                        */
@@ -48,7 +66,20 @@ typedef struct {
     emit_state_t            *emit_state; /* valid only during demodulate2400() */
 
     struct modes_demod_stats stats;
+    cpr_entry_t              cpr_cache[CPR_CACHE_SIZE];
 } adsb_ctx_t;
+
+/* Fetch (or create) the CPR cache entry for this ICAO address.
+ * Collisions evict the older entry. */
+static cpr_entry_t *cpr_get(adsb_ctx_t *ctx, uint32_t icao)
+{
+    cpr_entry_t *e = &ctx->cpr_cache[icao & (CPR_CACHE_SIZE - 1)];
+    if (e->icao != icao) {
+        memset(e, 0, sizeof(*e));
+        e->icao = icao;
+    }
+    return e;
+}
 
 /* ------------------------------------------------------------------ */
 /* libmodes message callback                                            */
@@ -65,6 +96,33 @@ static void on_message(struct modesMessage *mm, void *userdata)
     char hex[29];
     for (int i = 0; i < nbytes; i++)
         snprintf(hex + i * 2, 3, "%02X", mm->msg[i]);
+
+    /* CPR position decode — must happen before the KV block so that
+     * mm->cpr_decoded / decoded_lat / decoded_lon are set when we emit them. */
+    if (mm->cpr_valid && mm->cpr_type == CPR_AIRBORNE && !mm->cpr_decoded) {
+        int parity = mm->cpr_odd ? 1 : 0;
+        cpr_entry_t *entry = cpr_get(ctx, mm->addr);
+
+        entry->ts[parity]    = es->unix_ms;
+        entry->lat[parity]   = mm->cpr_lat;
+        entry->lon[parity]   = mm->cpr_lon;
+        entry->valid[parity] = 1;
+
+        int other = 1 - parity;
+        if (entry->valid[other] &&
+            es->unix_ms - entry->ts[other] <= CPR_MAX_AGE_MS) {
+            double out_lat, out_lon;
+            /* fflag = 1 when the most-recently-received frame is odd */
+            if (decodeCPRairborne(
+                    (int)entry->lat[0], (int)entry->lon[0],
+                    (int)entry->lat[1], (int)entry->lon[1],
+                    parity, &out_lat, &out_lon) == 0) {
+                mm->decoded_lat = out_lat;
+                mm->decoded_lon = out_lon;
+                mm->cpr_decoded = 1;
+            }
+        }
+    }
 
     /* Build decoded key:value JSON — all fields governed by their _valid flag. */
     char  meta[2048];
