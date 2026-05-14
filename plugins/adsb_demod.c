@@ -1,1543 +1,241 @@
 /**
- * adsb_demod.c — ADS-B / Mode S demodulator
+ * libmodes_adsb_demod.c — ADS-B / Mode S demodulator plugin backed by libmodes
  *
- * Anpassad från dump1090 (https://github.com/antirez/dump1090)
- * för kompatibilitet med multi-radio plugin-struktur.
+ * Accepts int16_t SC16 IQ at 2.3–2.5 Msps (nominal 2.4 Msps) tuned to 1090 MHz.
+ * Uses dump1090's proven demodulate2400() pipeline via libmodes.a.
  *
- * Kräver IQ vid ~2.4 Msps (accepterar 2.3–2.5 Msps) inställt på 1090 MHz.
- *
- * Algoritm:
- *   1. Beräkna magnituden (I²+Q²) per sampel.
- *   2. Sök efter Mode S-preambel med fas-korrigering.
- *   3. PPM-avkoda bitar med felkorrigering.
- *   4. Validera CRC-24 med felkorrigeringstabell.
- *   5. Avkoda meddelandetyper (DF17, etc.).
- *   6. Emittera godkänd ram som "ADSB" med råhex som payload.
- *
- * Normaliserade fält: df, icao, bits, crc_ok, errorbit
+ * Emits signal_type "ADSB" with the raw message bytes as an uppercase hex string.
+ * Metadata JSON: {"df":"<n>","icao":"<hex6>","correctedbits":"<n>","rssi":"<f>"}
  */
 
 #include "mr_plugin_api.h"
+
+#include <libmodes/libmodes.h>
+#include <libmodes/demod_2400.h>
+#include <libmodes/convert.h>
+#include <libmodes/crc.h>
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <time.h>
-#include <limits.h>
-#include <complex.h>
-#include <liquid/liquid.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-/* Extra preamble gating to avoid drowning in noise-triggered candidates.
- * Tunables:
- * - MR_PLUGIN_ADSB_PREAMBLE_RATIO (float, default 3.0)
- * - MR_PLUGIN_ADSB_PREAMBLE_MIN_HIGH (uint, default 0 = disabled) */
-static float g_adsb_preamble_ratio = 3.0f;
-static uint32_t g_adsb_preamble_min_high = 0u;
-static float g_adsb_preamble_base_snr_ratio = 1.5f; /* base_signal / base_noise */
-static int g_adsb_agc_enable = 1;
-static int g_adsb_max_biterrors = 2;
-static float g_adsb_mag_scale = 1000.0f;
+/* Leading overlap samples preserved between successive IQ blocks.
+ * dump1090 uses 400; MODES_OS_PREAMBLE_SAMPLES (20) is the minimum. */
+#define MAG_OVERLAP 400u
 
 /* ------------------------------------------------------------------ */
-/* Mode S-konstanter från dump1090                                     */
+/* Plugin context                                                        */
 /* ------------------------------------------------------------------ */
 
-#define MODES_DEFAULT_RATE         2000000
-#define MODES_PREAMBLE_US 8       /* microseconds */
-#define MODES_LONG_MSG_BITS 112
-#define MODES_SHORT_MSG_BITS 56
-
-/* This demod follows dump1090's 2.4 Msps "demod_2400" timing, which uses
- * a 19/20 sample stride pattern (since 2.4 samples/us is non-integer). */
-#define MODES_NOMINAL_SR          2400000u
-#define MODES_FRAME_SAMPS_MAX      512u  /* generous cap for mag buffer sizing */
-
-#define SHORT_BITS      56u
-#define LONG_BITS      112u
-#define MODES_FULL_LEN (MODES_PREAMBLE_US+MODES_LONG_MSG_BITS)
-#define MODES_LONG_MSG_BYTES (112/8)
-#define MODES_SHORT_MSG_BYTES (56/8)
-#define MODES_MAX_BITERRORS 2     /* Maximum correctable bit errors. */
-
-/* Number of entries in error syndrome table:
- * Single bit errors: 107 (bits 5-111)
- * Two-bit errors: 107*106/2 = 5671
- * Total: 5778 */
-#define NERRORINFO 5778
-#define MODES_ICAO_CACHE_LEN 1024
-#define MODES_ICAO_CACHE_TTL 60
-
-/* ------------------------------------------------------------------ */
-/* Datastrukturer från dump1090                                       */
-/* ------------------------------------------------------------------ */
-
-/* Structure for error syndrome lookup table entries. */
-struct errorinfo {
-    uint32_t syndrome;          /* CRC syndrome for this error pattern. */
-    int bits;                   /* Number of bit errors (1 or 2). */
-    int pos[MODES_MAX_BITERRORS]; /* Bit positions to correct. */
-};
-
-/* Error syndrome lookup table, sorted by syndrome for binary search. */
-static struct errorinfo bitErrorTable[NERRORINFO];
-
-/* The struct we use to store information about a decoded message. */
-struct modesMessage {
-    /* Generic fields */
-    unsigned char msg[MODES_LONG_MSG_BYTES]; /* Binary message. */
-    int msgbits;                /* Number of bits in message */
-    int msgtype;                /* Downlink format # */
-    int crcok;                  /* True if CRC was valid */
-    uint32_t crc;               /* Message CRC */
-    int errorbit;               /* Bit corrected. -1 if no bit corrected. */
-    int aa1, aa2, aa3;          /* ICAO Address bytes 1 2 and 3 */
-    int phase_corrected;        /* True if phase correction was applied. */
-
-    /* DF 17, 18 */
-    int metype;                 /* Extended squitter message type. */
-    int mesub;                  /* Extended squitter message subtype. */
-    int fflag;                  /* 1 = Odd, 0 = Even CPR message. */
-    int raw_latitude;           /* Non decoded latitude */
-    int raw_longitude;          /* Non decoded longitude */
-    char flight[9];             /* 8 chars flight number. */
-    int ew_dir;                 /* 0 = East, 1 = West. */
-    int ew_velocity;            /* E/W velocity. */
-    int ns_dir;                 /* 0 = North, 1 = South. */
-    int ns_velocity;            /* N/S velocity. */
-    int vert_rate_source;       /* Vertical rate source. */
-    int vert_rate_sign;         /* Vertical rate sign. */
-    int vert_rate;              /* Vertical rate. */
-    int velocity;               /* Computed from EW and NS velocity. */
-
-    /* DF4, DF5, DF20, DF21 */
-    int fs;                     /* Flight status for DF4,5,20,21 */
-    int dr;                     /* Request extraction of downlink request. */
-    int um;                     /* Request extraction of downlink request. */
-    int identity;               /* 13 bits identity (Squawk). */
-
-    /* Fields used by multiple message types. */
-    int altitude, unit;
-};
-
-/* ------------------------------------------------------------------ */
-/* Kontext                                                              */
-/* ------------------------------------------------------------------ */
+/* State threaded through the libmodes callback during a single process_iq call. */
+typedef struct {
+    MrEmitFn emit_fn;
+    void    *user_data;
+    double   center_freq_hz;
+    uint64_t unix_ms;
+} emit_state_t;
 
 typedef struct {
-  uint32_t* mag;
-  uint32_t  mag_cap;
-  uint32_t  mag_len;
-  uint64_t  preamble_count;
-  uint64_t  preamble_reject_base_snr;
-  uint64_t  preamble_reject_min_high;
-  uint64_t  preamble_reject_ratio;
-  uint64_t  crc_ok_count;
-  uint64_t  crc_ok_clean_count;
-  uint64_t  crc_ok_corrected_count;
-  uint64_t  corrected_logged_count;
-  uint64_t  crc_ok_ap_count;
-  uint64_t  crc_fail_count;
-  uint64_t  df17_ok_count;
-  uint64_t  df17_fail_count;
-  uint64_t  df18_ok_count;
-  uint64_t  df18_fail_count;
-  uint64_t  last_stats_ms;
-  uint64_t  icao_frames_total;   /* alla godkända ramar med ICAO-adress */
-  uint32_t  icao_seen_count;     /* antal unika ICAO-adresser */
-#define ICAO_SEEN_SIZE 4096u
-  uint32_t  icao_seen[ICAO_SEEN_SIZE]; /* öppen-adressering hashset */
-  uint32_t icao_cache[MODES_ICAO_CACHE_LEN * 2];
-  int      error_info_initialized;
-  int      debug_enabled;
-  FILE*    debug_file;
-  agc_crcf agc_h;
-} AdsbCtx;
+    struct modes_decoder    *decoder;
+    struct converter_state  *conv_state;
+    iq_convert_fn            converter;
 
-static FILE* debug_out(AdsbCtx* ctx) {
-  return ctx->debug_file ? ctx->debug_file : stderr;
+    uint16_t                *mag_buf;    /* [MAG_OVERLAP | payload] */
+    unsigned                 mag_buf_cap;
+
+    uint32_t                 current_sr;
+    emit_state_t            *emit_state; /* valid only during demodulate2400() */
+
+    struct modes_demod_stats stats;
+} adsb_ctx_t;
+
+/* ------------------------------------------------------------------ */
+/* libmodes message callback                                            */
+/* ------------------------------------------------------------------ */
+
+static void on_message(struct modesMessage *mm, void *userdata)
+{
+    adsb_ctx_t  *ctx = (adsb_ctx_t *)userdata;
+    emit_state_t *es  = ctx->emit_state;
+    if (!es || !es->emit_fn) return;
+
+    int nbytes = mm->msgbits / 8;
+
+    /* Hex-encode raw message bytes (max 14 bytes = 28 hex chars + NUL). */
+    char hex[29];
+    for (int i = 0; i < nbytes; i++)
+        snprintf(hex + i * 2, 3, "%02X", mm->msg[i]);
+
+    char meta[128];
+    snprintf(meta, sizeof(meta),
+             "{\"df\":\"%d\",\"icao\":\"%06X\","
+             "\"correctedbits\":\"%d\",\"rssi\":\"%.4f\"}",
+             mm->msgtype, mm->addr, mm->correctedbits, mm->signalLevel);
+
+    es->emit_fn("ADSB", hex, es->center_freq_hz, es->unix_ms, meta, es->user_data);
 }
 
 /* ------------------------------------------------------------------ */
-/* CRC-24 från dump1090                                                 */
+/* Converter initialisation                                             */
 /* ------------------------------------------------------------------ */
 
-/* Parity table for MODE S Messages.
- * The table contains 112 elements, every element corresponds to a bit set
- * in the message, starting from the first bit of actual data after the
- * preamble.
- *
- * For messages of 112 bit, the whole table is used.
- * For messages of 56 bits only the last 56 elements are used.
- */
-static uint32_t modes_checksum_table[112] = {
-0x3935ea, 0x1c9af5, 0xf1b77e, 0x78dbbf, 0xc397db, 0x9e31e9, 0xb0e2f0, 0x587178,
-0x2c38bc, 0x161c5e, 0x0b0e2f, 0xfa7d13, 0x82c48d, 0xbe9842, 0x5f4c21, 0xd05c14,
-0x682e0a, 0x341705, 0xe5f186, 0x72f8c3, 0xc68665, 0x9cb936, 0x4e5c9b, 0xd8d449,
-0x939020, 0x49c810, 0x24e408, 0x127204, 0x093902, 0x049c81, 0xfdb444, 0x7eda22,
-0x3f6d11, 0xe04c8c, 0x702646, 0x381323, 0xe3f395, 0x8e03ce, 0x4701e7, 0xdc7af7,
-0x91c77f, 0xb719bb, 0xa476d9, 0xadc168, 0x56e0b4, 0x2bfd53, 0xea04ad, 0x8af852,
-0x457c29, 0xdd4410, 0x6ea208, 0x375104, 0x1ba882, 0x0dd441, 0xf91024, 0x7c8812,
-0x3e4409, 0xe0d800, 0x706c00, 0x383600, 0x1c1b00, 0x0e0d80, 0x0706c0, 0x038360,
-0x01c1b0, 0x00e0d8, 0x00706c, 0x003836, 0x001c1b, 0xfff409, 0x000000, 0x000000,
-0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
-0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
-0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000
-};
-
-/* Compute the CRC syndrome of a Mode S message. */
-static uint32_t modesChecksum(unsigned char *msg, int bits) {
-    uint32_t crc = 0;
-    int offset = (bits == 112) ? 0 : (112-56);
-    int j;
-
-    for(j = 0; j < bits-24; j++) {
-        int byte = j/8;
-        int bit = j%8;
-        int bitmask = 1 << (7-bit);
-        if (msg[byte] & bitmask)
-            crc ^= modes_checksum_table[j+offset];
+static int reinit_converter(adsb_ctx_t *ctx, uint32_t sr)
+{
+    if (ctx->conv_state) {
+        cleanup_converter(ctx->conv_state);
+        ctx->conv_state = NULL;
+        ctx->converter  = NULL;
     }
-
-    uint32_t rem = ((uint32_t)msg[(bits/8)-3] << 16) |
-          ((uint32_t)msg[(bits/8)-2] << 8) |
-           (uint32_t)msg[(bits/8)-1];
-    return (crc ^ rem) & 0x00FFFFFF;
-}
-
-/* Given the Downlink Format (DF) of the message, return the message length in bits. */
-static int modesMessageLenByType(int type) {
-    if (type == 16 || type == 17 || type == 18 || type == 19 ||
-        type == 20 || type == 21)
-        return MODES_LONG_MSG_BITS;
-    else
-        return MODES_SHORT_MSG_BITS;
-}
-
-/* Comparison function for qsort/bsearch on errorinfo by syndrome. */
-static int cmpErrorInfo(const void *a, const void *b) {
-    const struct errorinfo *ea = (const struct errorinfo *)a;
-    const struct errorinfo *eb = (const struct errorinfo *)b;
-    if (ea->syndrome < eb->syndrome) return -1;
-    if (ea->syndrome > eb->syndrome) return 1;
-    return 0;
-}
-
-static uint32_t crc24(const uint8_t* data, uint32_t n);
-
-static uint32_t modesComputeCRC(const uint8_t *msg, int bits) {
-    return crc24(msg, (bits/8) - 3);
-}
-
-static uint32_t ICAOCacheHashAddress(uint32_t a) {
-    a = ((a >> 16) ^ a) * 0x45d9f3b;
-    a = ((a >> 16) ^ a) * 0x45d9f3b;
-    a = ((a >> 16) ^ a);
-    return a & (MODES_ICAO_CACHE_LEN - 1u);
-}
-
-static void addRecentlySeenICAOAddr(AdsbCtx *ctx, uint32_t addr) {
-    uint32_t h = ICAOCacheHashAddress(addr);
-    ctx->icao_cache[h*2]   = addr;
-    ctx->icao_cache[h*2+1] = (uint32_t)time(NULL);
-}
-
-/* Registrera ICAO i hashset; ökar icao_seen_count om adressen är ny. */
-static void icaoSeenInsert(AdsbCtx* ctx, uint32_t icao) {
-    if (icao == 0u) return;
-    ctx->icao_frames_total++;
-    uint32_t h = ICAOCacheHashAddress(icao) & (ICAO_SEEN_SIZE - 1u);
-    for (uint32_t i = 0; i < ICAO_SEEN_SIZE; ++i) {
-        uint32_t slot = (h + i) & (ICAO_SEEN_SIZE - 1u);
-        if (ctx->icao_seen[slot] == 0u) {
-            ctx->icao_seen[slot] = icao;
-            ctx->icao_seen_count++;
-            return;
-        }
-        if (ctx->icao_seen[slot] == icao) return; /* redan känd */
-    }
-    /* Tabellen full — ignorera; set är tillräckligt stort för normalt bruk */
-}
-
-static int ICAOAddressWasRecentlySeen(AdsbCtx *ctx, uint32_t addr) {
-    uint32_t h = ICAOCacheHashAddress(addr);
-    uint32_t a = ctx->icao_cache[h*2];
-    uint32_t t = ctx->icao_cache[h*2+1];
-    return a && a == addr && time(NULL) - t <= MODES_ICAO_CACHE_TTL;
-}
-
-static int bruteForceAP(AdsbCtx *ctx, uint8_t *frame, uint32_t n_bits) {
-    uint32_t addr;
-    uint32_t crc = modesComputeCRC(frame, n_bits);
-    uint32_t lastbyte = (n_bits/8) - 1u;
-    uint8_t aux[MODES_LONG_MSG_BYTES];
-
-    memcpy(aux, frame, n_bits/8);
-    aux[lastbyte]   ^= crc & 0xffu;
-    aux[lastbyte-1] ^= (crc >> 8) & 0xffu;
-    aux[lastbyte-2] ^= (crc >> 16) & 0xffu;
-
-    addr = ((uint32_t)aux[lastbyte-2] << 16) |
-           ((uint32_t)aux[lastbyte-1] << 8) |
-            (uint32_t)aux[lastbyte];
-
-    return ICAOAddressWasRecentlySeen(ctx, addr);
-}
-
-/* Initialize the error correction syndrome table. */
-static void modesInitErrorInfo(void) {
-    unsigned char msg[MODES_LONG_MSG_BYTES];
-    int i, j, n;
-    uint32_t crc;
-
-    n = 0;
-    memset(bitErrorTable, 0, sizeof(bitErrorTable));
-    memset(msg, 0, MODES_LONG_MSG_BYTES);
-
-    for (i = 5; i < MODES_LONG_MSG_BITS; i++) {
-        int bytepos0 = (i >> 3);
-        int mask0 = 1 << (7 - (i & 7));
-        msg[bytepos0] ^= mask0;
-        crc = modesChecksum(msg, MODES_LONG_MSG_BITS);
-
-        bitErrorTable[n].syndrome = crc;
-        bitErrorTable[n].bits = 1;
-        bitErrorTable[n].pos[0] = i;
-        bitErrorTable[n].pos[1] = -1;
-        n++;
-
-        for (j = i + 1; j < MODES_LONG_MSG_BITS; j++) {
-            int bytepos1 = (j >> 3);
-            int mask1 = 1 << (7 - (j & 7));
-            msg[bytepos1] ^= mask1;
-            crc = modesChecksum(msg, MODES_LONG_MSG_BITS);
-
-            if (n >= NERRORINFO) break;
-
-            bitErrorTable[n].syndrome = crc;
-            bitErrorTable[n].bits = 2;
-            bitErrorTable[n].pos[0] = i;
-            bitErrorTable[n].pos[1] = j;
-            n++;
-
-            msg[bytepos1] ^= mask1;
-        }
-        msg[bytepos0] ^= mask0;
-    }
-
-    qsort(bitErrorTable, NERRORINFO, sizeof(struct errorinfo), cmpErrorInfo);
-}
-
-/* Fix bit errors using the syndrome table. */
-static int fixBitErrors(unsigned char *msg, int bits, int maxfix, int *fixedbits) {
-    struct errorinfo *pei;
-    struct errorinfo ei;
-    int bitpos, offset, i, res;
-
-    memset(&ei, 0, sizeof(struct errorinfo));
-    ei.syndrome = modesChecksum(msg, bits);
-
-    pei = bsearch(&ei, bitErrorTable, NERRORINFO,
-                  sizeof(struct errorinfo), cmpErrorInfo);
-    if (pei == NULL) return 0;
-
-    if (pei->bits > maxfix) return 0;
-
-    offset = MODES_LONG_MSG_BITS - bits;
-    for (i = 0; i < pei->bits; i++) {
-        bitpos = pei->pos[i] - offset;
-        if ((bitpos < 0) || (bitpos >= bits)) return 0;
-    }
-
-    res = 0;
-    for (i = 0; i < pei->bits; i++) {
-        bitpos = pei->pos[i] - offset;
-        msg[bitpos >> 3] ^= (1 << (7 - (bitpos & 7)));
-        if (fixedbits) {
-            fixedbits[res++] = bitpos;
-        } else {
-            res++;
-        }
-    }
-    return res;
-}
-
-/* ------------------------------------------------------------------ */
-/* Preamble detection and decoding helpers                            */
-/* ------------------------------------------------------------------ */
-
-static uint32_t crc24(const uint8_t* data, uint32_t n) {
-    uint32_t crc = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        crc ^= (uint32_t)data[i] << 16;
-        for (int b = 0; b < 8; ++b) {
-            crc = (crc & 0x800000u) ? (crc << 1) ^ 0x800409u : crc << 1;
-            crc &= 0xFFFFFFu;
-        }
-    }
-    return crc;
-}
-
-
-
-static int preamble_ok_phase(AdsbCtx* ctx, const uint32_t* m, int phase, uint32_t* out_high) {
-    uint32_t high;
-    uint32_t base_signal;
-    uint32_t base_noise;
-    uint32_t base_noise_n;
-
-    if (! (m[0] < m[1] && m[12] > m[13]))
-        return 0;
-
-    if (phase == 3) {
-        if (!(m[1] > m[2] && m[2] < m[3] && m[3] > m[4] &&
-              m[8] < m[9] && m[9] > m[10] && m[10] < m[11]))
-            return 0;
-        high = (m[1] + m[3] + m[9] + m[11] + m[12]) / 4u;
-        base_signal = m[1] + m[3] + m[9];
-        base_noise = m[5] + m[6] + m[7];
-        base_noise_n = 3u;
-    } else if (phase == 4) {
-        if (!(m[1] > m[2] && m[2] < m[3] && m[3] > m[4] &&
-              m[8] < m[9] && m[9] > m[10] && m[11] < m[12]))
-            return 0;
-        high = (m[1] + m[3] + m[9] + m[12]) / 4u;
-        base_signal = m[1] + m[3] + m[9] + m[12];
-        base_noise = m[5] + m[6] + m[7] + m[8];
-        base_noise_n = 4u;
-    } else if (phase == 5) {
-        if (!(m[1] > m[2] && m[2] < m[3] && m[4] > m[5] &&
-              m[8] < m[9] && m[10] > m[11] && m[11] < m[12]))
-            return 0;
-        high = (m[1] + m[3] + m[4] + m[9] + m[10] + m[12]) / 4u;
-        base_signal = m[1] + m[12];
-        base_noise = m[6] + m[7];
-        base_noise_n = 2u;
-    } else if (phase == 6) {
-        if (!(m[1] > m[2] && m[3] < m[4] && m[4] > m[5] &&
-              m[9] < m[10] && m[10] > m[11] && m[11] < m[12]))
-            return 0;
-        high = (m[1] + m[4] + m[10] + m[12]) / 4u;
-        base_signal = m[1] + m[4] + m[10] + m[12];
-        base_noise = m[5] + m[6] + m[7] + m[8];
-        base_noise_n = 4u;
-    } else if (phase == 7) {
-        if (!(m[2] > m[3] && m[3] < m[4] && m[4] > m[5] &&
-              m[9] < m[10] && m[10] > m[11] && m[11] < m[12]))
-            return 0;
-        high = (m[1] + m[2] + m[4] + m[10] + m[12]) / 4u;
-        base_signal = m[4] + m[10] + m[12];
-        base_noise = m[6] + m[7] + m[8];
-        base_noise_n = 3u;
-    } else {
-        return 0;
-    }
-
-    if (base_noise > 0u && g_adsb_preamble_base_snr_ratio > 0.0f) {
-        if ((float)base_signal < g_adsb_preamble_base_snr_ratio * (float)base_noise) {
-            if (ctx) ++ctx->preamble_reject_base_snr;
-            return 0;
-        }
-    }
-
-    /* Stronger local SNR gate: require peak ("high") to exceed local noise floor.
-     * This dramatically reduces false preambles in purely noisy regions when AGC is enabled. */
-    if (g_adsb_preamble_min_high > 0u && high < g_adsb_preamble_min_high) {
-        if (ctx) ++ctx->preamble_reject_min_high;
-        return 0;
-    }
-    if (base_noise_n > 0u && base_noise > 0u && g_adsb_preamble_ratio > 0.0f) {
-        const float noise_avg = (float)base_noise / (float)base_noise_n;
-        if ((float)high < g_adsb_preamble_ratio * noise_avg) {
-            if (ctx) ++ctx->preamble_reject_ratio;
-            return 0;
-        }
-    }
-
-    if (m[5] >= high || m[6] >= high || m[7] >= high || m[8] >= high ||
-        m[14] >= high || m[15] >= high || m[16] >= high || m[17] >= high ||
-        m[18] >= high)
-        return 0;
-
-    if (out_high) *out_high = high;
+    ctx->converter = init_converter(INPUT_SC16, (double)sr, /*filter_dc=*/1,
+                                    &ctx->conv_state);
+    if (!ctx->converter) return 0;
+    ctx->current_sr = sr;
     return 1;
 }
 
 /* ------------------------------------------------------------------ */
-/* Manchester matched filters (dump1090-style phase correlators)        */
+/* Mandatory plugin exports                                             */
 /* ------------------------------------------------------------------ */
 
-static int slice_phase0(const uint32_t* m) {
-  /* Coefficients from readsb/dump1090 demod_2400.c (tuned for 2.4Msps) */
-  int64_t v = 18*(int64_t)m[0] - 15*(int64_t)m[1] - 3*(int64_t)m[2];
-  if (v > INT32_MAX) v = INT32_MAX;
-  if (v < INT32_MIN) v = INT32_MIN;
-  return (int)v;
+MrPluginCtx *mr_plugin_create(void)
+{
+    adsb_ctx_t *ctx = calloc(1, sizeof(adsb_ctx_t));
+    if (!ctx) return NULL;
+
+    modesChecksumInit(/*fixBits=*/2);
+
+    struct modes_decoder_config cfg = {
+        .nfix_crc    = 1,
+        .fix_df      = 1,
+        .enable_df24 = 0,
+    };
+    ctx->decoder = modes_decoder_create(&cfg);
+    if (!ctx->decoder) { free(ctx); return NULL; }
+
+    modes_decoder_set_callback(ctx->decoder, on_message, ctx);
+    return ctx;
 }
 
-static int slice_phase1(const uint32_t* m) {
-  int64_t v = 14*(int64_t)m[0] - 5*(int64_t)m[1] - 9*(int64_t)m[2];
-  if (v > INT32_MAX) v = INT32_MAX;
-  if (v < INT32_MIN) v = INT32_MIN;
-  return (int)v;
+void mr_plugin_destroy(MrPluginCtx *ctx_)
+{
+    adsb_ctx_t *ctx = (adsb_ctx_t *)ctx_;
+    if (!ctx) return;
+    if (ctx->decoder)    modes_decoder_destroy(ctx->decoder);
+    if (ctx->conv_state) cleanup_converter(ctx->conv_state);
+    free(ctx->mag_buf);
+    free(ctx);
 }
 
-static int slice_phase2(const uint32_t* m) {
-  /* Slightly DC unbalanced but better results (per readsb comment) */
-  int64_t v = 16*(int64_t)m[0] + 5*(int64_t)m[1] - 20*(int64_t)m[2];
-  if (v > INT32_MAX) v = INT32_MAX;
-  if (v < INT32_MIN) v = INT32_MIN;
-  return (int)v;
-}
-
-static int slice_phase3(const uint32_t* m) {
-  int64_t v = 7*(int64_t)m[0] + 11*(int64_t)m[1] - 18*(int64_t)m[2];
-  if (v > INT32_MAX) v = INT32_MAX;
-  if (v < INT32_MIN) v = INT32_MIN;
-  return (int)v;
-}
-
-static int slice_phase4(const uint32_t* m) {
-  int64_t v = 4*(int64_t)m[0] + 15*(int64_t)m[1] - 20*(int64_t)m[2] + 1*(int64_t)m[3];
-  if (v > INT32_MAX) v = INT32_MAX;
-  if (v < INT32_MIN) v = INT32_MIN;
-  return (int)v;
-}
-
-/* Phase-specific bit offsets and correlator mappings for Manchester decoding
- * Indexed by phase % 5: phase 0→[0], 1→[1], 2→[2], 3→[3], 4→[4]
- * From dump1090 demod_2400.c (phases 4-8 map to 4,0,1,2,3 after %5) */
-static const uint32_t bit_offsets[5][8] = {
-  {0, 2, 5, 7, 10, 12, 14, 17}, /* phase 0 (from try_phase=5): slice phase 0,2,4,1,3,0,2,4 */
-  {0, 2, 5, 7, 9, 12, 14, 17},  /* phase 1 (from try_phase=6): slice phase 3,0,2,4,1,3,0,2 */
-  {0, 3, 5, 8, 10, 12, 15, 17}, /* phase 2 (from try_phase=7): slice phase 4,1,3,0,2,4,1,3 */
-  {0, 2, 4, 7, 9, 12, 14, 16},  /* phase 3 (from try_phase=3): slice phase 0,2,4,1,3,0,2,4 */
-  {0, 2, 5, 7, 9, 12, 14, 17},  /* phase 4 (from try_phase=4): slice phase 1,3,0,2,4,1,3,0 */
+static const MrPluginMeta s_meta = {
+    .name        = "libmodes_adsb_demod",
+    .version     = "1.0.0",
+    .api_version = MR_PLUGIN_API_VERSION,
+    .description = "ADS-B/Mode S demodulator via libmodes (dump1090)",
+    .role        = MR_PLUGIN_ROLE_DEMODULATOR,
 };
 
-static const int bit_funcs[5][8] = {
-  {2, 4, 1, 3, 0, 2, 4, 1},     /* phase 0: slice_phase2,4,1,3,0,2,4,1 */
-  {3, 0, 2, 4, 1, 3, 0, 2},     /* phase 1: slice_phase3,0,2,4,1,3,0,2 */
-  {4, 1, 3, 0, 2, 4, 1, 3},     /* phase 2: slice_phase4,1,3,0,2,4,1,3 */
-  {0, 2, 4, 1, 3, 0, 2, 4},     /* phase 3: slice_phase0,2,4,1,3,0,2,4 */
-  {1, 3, 0, 2, 4, 1, 3, 0},     /* phase 4: slice_phase1,3,0,2,4,1,3,0 */
-};
+const MrPluginMeta *mr_plugin_get_meta(void) { return &s_meta; }
 
-static int apply_correlator(int func_idx, const uint32_t* m) {
-  switch (func_idx) {
-    case 0: return slice_phase0(m);
-    case 1: return slice_phase1(m);
-    case 2: return slice_phase2(m);
-    case 3: return slice_phase3(m);
-    case 4: return slice_phase4(m);
-    default: return 0;
-  }
-}
+void mr_plugin_process_iq(MrPluginCtx      *ctx_,
+                          const int16_t    *iq_samples,
+                          uint32_t          num_pairs,
+                          uint32_t          sample_rate_hz,
+                          double            center_freq_hz,
+                          uint64_t          unix_ms,
+                          MrEmitFn          emit_fn,
+                          void             *user_data)
+{
+    adsb_ctx_t *ctx = (adsb_ctx_t *)ctx_;
 
-/* Extract one byte using dump1090/readsb 2.4Msps slicing pattern.
- * Advances pPtr and updates phase (0..4). */
-static inline uint8_t slice_byte_2400(const uint32_t** pPtr, int* phase) {
-  const uint32_t* p = *pPtr;
-  uint8_t theByte = 0u;
-  switch (*phase) {
-    case 0:
-      theByte =
-          (slice_phase0(p) > 0 ? 0x80u : 0) |
-          (slice_phase2(p + 2) > 0 ? 0x40u : 0) |
-          (slice_phase4(p + 4) > 0 ? 0x20u : 0) |
-          (slice_phase1(p + 7) > 0 ? 0x10u : 0) |
-          (slice_phase3(p + 9) > 0 ? 0x08u : 0) |
-          (slice_phase0(p + 12) > 0 ? 0x04u : 0) |
-          (slice_phase2(p + 14) > 0 ? 0x02u : 0) |
-          (slice_phase4(p + 16) > 0 ? 0x01u : 0);
-      *phase = 1;
-      *pPtr = p + 19;
-      break;
-    case 1:
-      theByte =
-          (slice_phase1(p) > 0 ? 0x80u : 0) |
-          (slice_phase3(p + 2) > 0 ? 0x40u : 0) |
-          (slice_phase0(p + 5) > 0 ? 0x20u : 0) |
-          (slice_phase2(p + 7) > 0 ? 0x10u : 0) |
-          (slice_phase4(p + 9) > 0 ? 0x08u : 0) |
-          (slice_phase1(p + 12) > 0 ? 0x04u : 0) |
-          (slice_phase3(p + 14) > 0 ? 0x02u : 0) |
-          (slice_phase0(p + 17) > 0 ? 0x01u : 0);
-      *phase = 2;
-      *pPtr = p + 19;
-      break;
-    case 2:
-      theByte =
-          (slice_phase2(p) > 0 ? 0x80u : 0) |
-          (slice_phase4(p + 2) > 0 ? 0x40u : 0) |
-          (slice_phase1(p + 5) > 0 ? 0x20u : 0) |
-          (slice_phase3(p + 7) > 0 ? 0x10u : 0) |
-          (slice_phase0(p + 10) > 0 ? 0x08u : 0) |
-          (slice_phase2(p + 12) > 0 ? 0x04u : 0) |
-          (slice_phase4(p + 14) > 0 ? 0x02u : 0) |
-          (slice_phase1(p + 17) > 0 ? 0x01u : 0);
-      *phase = 3;
-      *pPtr = p + 19;
-      break;
-    case 3:
-      theByte =
-          (slice_phase3(p) > 0 ? 0x80u : 0) |
-          (slice_phase0(p + 3) > 0 ? 0x40u : 0) |
-          (slice_phase2(p + 5) > 0 ? 0x20u : 0) |
-          (slice_phase4(p + 7) > 0 ? 0x10u : 0) |
-          (slice_phase1(p + 10) > 0 ? 0x08u : 0) |
-          (slice_phase3(p + 12) > 0 ? 0x04u : 0) |
-          (slice_phase0(p + 15) > 0 ? 0x02u : 0) |
-          (slice_phase2(p + 17) > 0 ? 0x01u : 0);
-      *phase = 4;
-      *pPtr = p + 19;
-      break;
-    case 4:
-    default:
-      theByte =
-          (slice_phase4(p) > 0 ? 0x80u : 0) |
-          (slice_phase1(p + 3) > 0 ? 0x40u : 0) |
-          (slice_phase3(p + 5) > 0 ? 0x20u : 0) |
-          (slice_phase0(p + 8) > 0 ? 0x10u : 0) |
-          (slice_phase2(p + 10) > 0 ? 0x08u : 0) |
-          (slice_phase4(p + 12) > 0 ? 0x04u : 0) |
-          (slice_phase1(p + 15) > 0 ? 0x02u : 0) |
-          (slice_phase3(p + 17) > 0 ? 0x01u : 0);
-      *phase = 0;
-      *pPtr = p + 20;
-      break;
-  }
-  return theByte;
-}
+    if (sample_rate_hz < 2300000u || sample_rate_hz > 2500000u) return;
+    if (num_pairs == 0) return;
 
-/* Try decoding a frame starting at preamble index p with a specific try_phase (4..8).
- * Returns:
- *  1: decoded and CRC-valid (or AP recovered)
- *  0: decoded but CRC invalid
- * -1: not enough samples in buffer (caller should break and keep remainder)
- */
-static int decode_candidate_2400(AdsbCtx* ctx,
-                                 uint32_t p,
-                                 int try_phase,
-                                 uint8_t frame_out[MODES_LONG_MSG_BYTES],
-                                 uint32_t* out_n_bytes,
-                                 uint32_t* out_frame_len,
-                                 uint32_t* out_df,
-                                 uint32_t* out_syndrome,
-                                 int* out_corrected,
-                                 int* out_ap_recovered,
-                                 int fixbits_out[MODES_MAX_BITERRORS]) {
-  const uint32_t* pPtr = (ctx->mag + p + 19u) + (uint32_t)(try_phase / 5);
-  int phase = try_phase % 5;
-  const uint32_t* last_ptr = pPtr;
+    if (sample_rate_hz != ctx->current_sr || !ctx->converter)
+        if (!reinit_converter(ctx, sample_rate_hz)) return;
 
-  frame_out[0] = slice_byte_2400(&pPtr, &phase);
-  last_ptr = pPtr;
-  uint32_t df = (frame_out[0] >> 3u) & 0x1Fu;
-  uint32_t n_bytes = (df >= 16u) ? 14u : 7u;
-  if (n_bytes > MODES_LONG_MSG_BYTES) return 0;
-  uint32_t n_bits = n_bytes * 8u;
+    /* Ensure magnitude buffer is large enough for overlap + payload. */
+    unsigned needed = MAG_OVERLAP + num_pairs;
+    if (needed > ctx->mag_buf_cap) {
+        uint16_t *nb = realloc(ctx->mag_buf, needed * sizeof(uint16_t));
+        if (!nb) return;
+        if (ctx->mag_buf_cap == 0)
+            memset(nb, 0, MAG_OVERLAP * sizeof(uint16_t)); /* clear initial overlap */
+        ctx->mag_buf     = nb;
+        ctx->mag_buf_cap = needed;
+    }
 
-  for (uint32_t i = 1; i < n_bytes; ++i) {
-    frame_out[i] = slice_byte_2400(&pPtr, &phase);
-    last_ptr = pPtr;
-  }
+    /* Convert SC16 IQ → uint16_t magnitudes, placed after the overlap region. */
+    double mean_level, mean_power;
+    ctx->converter((void *)iq_samples,
+                   ctx->mag_buf + MAG_OVERLAP,
+                   num_pairs,
+                   ctx->conv_state,
+                   &mean_level,
+                   &mean_power);
 
-  uint32_t frame_len = (uint32_t)(last_ptr - (ctx->mag + p)) + 18u;
-  if (p + frame_len > ctx->mag_len) return -1;
+    struct mag_buf mbuf = {
+        .data            = ctx->mag_buf,
+        .totalLength     = needed,
+        .validLength     = needed,
+        .overlap         = MAG_OVERLAP,
+        .sampleTimestamp = 0,
+        .sysTimestamp    = unix_ms,
+        .flags           = 0,
+        .mean_level      = mean_level,
+        .mean_power      = mean_power,
+        .dropped         = 0,
+        .next            = NULL,
+    };
 
-  int corrected = 0;
-  int ap_recovered = 0;
-  if (fixbits_out) { fixbits_out[0] = -1; fixbits_out[1] = -1; }
+    emit_state_t es = {
+        .emit_fn        = emit_fn,
+        .user_data      = user_data,
+        .center_freq_hz = center_freq_hz,
+        .unix_ms        = unix_ms,
+    };
+    ctx->emit_state = &es;
 
-  uint32_t syndrome = modesChecksum(frame_out, n_bits);
-  if (syndrome != 0u) {
-    int fixed = fixBitErrors(frame_out, n_bits, g_adsb_max_biterrors, fixbits_out);
-    if (fixed > 0) {
-      corrected = fixed;
-      syndrome = modesChecksum(frame_out, n_bits);
+    demodulate2400(ctx->decoder, &mbuf, &ctx->stats);
+
+    ctx->emit_state = NULL;
+
+    /*
+     * Preserve the last MAG_OVERLAP samples of the payload as the leading
+     * overlap for the next call.  If the payload is smaller than MAG_OVERLAP
+     * we slide the existing overlap window instead.
+     */
+    if (num_pairs >= MAG_OVERLAP) {
+        memcpy(ctx->mag_buf,
+               ctx->mag_buf + num_pairs,
+               MAG_OVERLAP * sizeof(uint16_t));
     } else {
-      if (df == 0u || df == 4u || df == 5u || df == 16u ||
-          df == 20u || df == 21u || df == 24u) {
-        if (bruteForceAP(ctx, frame_out, n_bits)) {
-          ap_recovered = 1;
-          corrected = -1;
-        }
-      }
+        memmove(ctx->mag_buf,
+                ctx->mag_buf + num_pairs,
+                MAG_OVERLAP * sizeof(uint16_t));
     }
-  }
-
-  if (out_n_bytes) *out_n_bytes = n_bytes;
-  if (out_frame_len) *out_frame_len = frame_len;
-  if (out_df) *out_df = df;
-  if (out_syndrome) *out_syndrome = syndrome;
-  if (out_corrected) *out_corrected = corrected;
-  if (out_ap_recovered) *out_ap_recovered = ap_recovered;
-
-  return (syndrome == 0u || ap_recovered) ? 1 : 0;
-}
-
-
-/* ------------------------------------------------------------------ */
-/* ICAO 24-bitars adress → land (ICAO Annex 10-tilldelningar)          */
-/* ------------------------------------------------------------------ */
-
-typedef struct { uint32_t lo; uint32_t hi; const char* cc; } IcaoBlock;
-
-/* Sorterade block; binärsökning i icao_country() */
-static const IcaoBlock kIcaoBlocks[] = {
-  {0x004000,0x0043FF,"MZ"},{0x006000,0x006FFF,"ZA"},{0x008000,0x00FFFF,"ZA"},
-  {0x010000,0x017FFF,"EG"},{0x018000,0x01FFFF,"LY"},{0x020000,0x027FFF,"MA"},
-  {0x028000,0x02FFFF,"TN"},{0x030000,0x0303FF,"BW"},{0x032000,0x032FFF,"BI"},
-  {0x034000,0x034FFF,"CM"},{0x038000,0x03FFFF,"CG"},
-  {0x040000,0x043FFF,"DZ"},
-  {0x060000,0x067FFF,"KE"},{0x068000,0x06FFFF,"NG"},
-  {0x100000,0x1FFFFF,"RU"},
-  {0x201000,0x2013FF,"NA"},{0x202000,0x2023FF,"ER"},
-  {0x300000,0x33FFFF,"IT"},{0x340000,0x37FFFF,"ES"},
-  {0x380000,0x3BFFFF,"FR"},{0x3C0000,0x3FFFFF,"DE"},
-  {0x400000,0x43FFFF,"GB"},
-  {0x440000,0x447FFF,"AT"},{0x448000,0x44FFFF,"BE"},
-  {0x450000,0x457FFF,"BG"},{0x458000,0x45FFFF,"DK"},
-  {0x460000,0x467FFF,"FI"},{0x468000,0x46FFFF,"GR"},
-  {0x470000,0x477FFF,"HU"},{0x478000,0x47FFFF,"IE"},
-  {0x480000,0x487FFF,"IT"},{0x488000,0x48FFFF,"LU"},
-  {0x490000,0x497FFF,"MT"},{0x498000,0x49FFFF,"MC"},
-  {0x4A0000,0x4A7FFF,"NL"},{0x4A8000,0x4AFFFF,"NO"},
-  {0x4B0000,0x4B7FFF,"PL"},{0x4B8000,0x4BFFFF,"PT"},
-  {0x4C0000,0x4C7FFF,"RO"},{0x4C8000,0x4CFFFF,"CZ"},
-  {0x4D0000,0x4D7FFF,"SE"},{0x4D8000,0x4DFFFF,"CH"},
-  {0x4E0000,0x4E7FFF,"TR"},{0x4E8000,0x4EFFFF,"RS"},
-  {0x500000,0x5003FF,"UA"},{0x501000,0x5013FF,"BY"},
-  {0x504000,0x504FFF,"SK"},{0x508000,0x50FFFF,"UA"},
-  {0x510000,0x5103FF,"KZ"},{0x511000,0x5113FF,"GE"},
-  {0x600000,0x6003FF,"AM"},{0x600800,0x6008FF,"AZ"},
-  {0x601000,0x6013FF,"KG"},{0x601800,0x6018FF,"TJ"},
-  {0x680000,0x6803FF,"LV"},{0x681000,0x6813FF,"LT"},
-  {0x682000,0x6823FF,"EE"},
-  {0x700000,0x7003FF,"BA"},{0x701000,0x7013FF,"MK"},
-  {0x702000,0x7023FF,"ME"},{0x710000,0x717FFF,"SA"},
-  {0x720000,0x72FFFF,"IL"},{0x730000,0x737FFF,"IR"},
-  {0x740000,0x747FFF,"PK"},{0x748000,0x74FFFF,"AF"},
-  {0x750000,0x757FFF,"KW"},{0x758000,0x75FFFF,"AE"},
-  {0x760000,0x767FFF,"IQ"},{0x768000,0x76FFFF,"QA"},
-  {0x770000,0x777FFF,"BH"},{0x778000,0x77FFFF,"OM"},
-  {0x780000,0x7BFFFF,"CN"},{0x7C0000,0x7FFFFF,"AU"},
-  {0x800000,0x83FFFF,"IN"},{0x840000,0x87FFFF,"JP"},
-  {0x880000,0x887FFF,"TH"},{0x888000,0x88FFFF,"VN"},
-  {0x890000,0x890FFF,"SG"},{0x895000,0x8953FF,"MY"},
-  {0x898000,0x898FFF,"PH"},{0x8A0000,0x8AFFFF,"KR"},
-  {0x900000,0x9003FF,"NZ"},
-  {0xA00000,0xAFFFFF,"US"},
-  {0xB00000,0xB03FFF,"MX"},
-  {0xC00000,0xC3FFFF,"CA"},
-  {0xC80000,0xC83FFF,"AR"},{0xC84000,0xC87FFF,"BO"},
-  {0xC88000,0xC8BFFF,"BR"},{0xC8C000,0xC8FFFF,"CL"},
-  {0xC90000,0xC9001F,"CO"},
-  {0xE80000,0xE80FFF,"LK"},{0xE84000,0xE84FFF,"KH"},
-  {0xE8C000,0xE8CFFF,"BD"},
-};
-
-#define ICAO_NBLOCKS ((uint32_t)(sizeof(kIcaoBlocks)/sizeof(kIcaoBlocks[0])))
-
-static const char* icao_country(uint32_t icao) {
-  uint32_t lo = 0, hi = ICAO_NBLOCKS - 1u;
-  while (lo <= hi) {
-    uint32_t mid = (lo + hi) >> 1u;
-    if      (icao < kIcaoBlocks[mid].lo) { if (mid == 0) break; hi = mid - 1u; }
-    else if (icao > kIcaoBlocks[mid].hi) lo = mid + 1u;
-    else return kIcaoBlocks[mid].cc;
-  }
-  return "??";
 }
 
 /* ------------------------------------------------------------------ */
-/* ME-fältavkodning + ramemission                                       */
+/* Optional exports (stubs)                                             */
 /* ------------------------------------------------------------------ */
 
-/* ADS-B 6-bitars teckentabell (ICAO Annex 10) */
-static const char kAdsbCS[64] =
-    " ABCDEFGHIJKLMNOPQRSTUVWXYZ     "   /* index  0-31 */
-    "                0123456789      ";  /* index 32-63 */
-
-/* Extrahera len bitar med start (MSB-first) ur ME-fält */
-static uint32_t me_bits(const uint8_t* me, uint32_t start, uint32_t len) {
-  uint32_t val = 0;
-  for (uint32_t i = 0; i < len; ++i) {
-    uint32_t idx = start + i;
-    val = (val << 1u) | ((me[idx >> 3u] >> (7u - (idx & 7u))) & 1u);
-  }
-  return val;
+void mr_plugin_process_bits(MrPluginCtx  *ctx,
+                            const uint8_t *bit_bytes,
+                            uint32_t       bit_count,
+                            double         freq_hz,
+                            uint64_t       unix_ms,
+                            const char    *source_type,
+                            MrEmitFn       emit_fn,
+                            void          *user_data)
+{
+    (void)ctx; (void)bit_bytes; (void)bit_count;
+    (void)freq_hz; (void)unix_ms; (void)source_type;
+    (void)emit_fn; (void)user_data;
 }
 
-/* AC13-fält (DF4/DF20): bits 15-27 i 56/112-bitarsram */
-static uint32_t extract_ac13(const uint8_t* f) {
-  return ((f[1] & 0x01u) << 12) | ((uint32_t)f[2] << 4) | ((f[3] >> 4) & 0x0Fu);
-}
-
-/* Avkoda 13-bitars höjdkod (returnerar 1 vid lyckad avkodning) */
-static int decode_ac13(uint32_t ac, int* alt_ft) {
-  if ((ac >> 6u) & 1u) return 0;         /* M-bit = metrisk, ej hanterat */
-  if (!((ac >> 4u) & 1u)) return 0;      /* Q-bit = 0 → Gillham, ej hanterat */
-  int n = (int)(((ac & 0x1F80u) >> 2u) | ((ac & 0x0020u) >> 1u) | (ac & 0x000Fu));
-  *alt_ft = n * 25 - 1200;
-  return 1;
-}
-
-/* Avkoda 13-bitars squawk (Mode C identitetskod) → 4 oktala siffror */
-static uint32_t decode_squawk(uint32_t id) {
-  uint32_t c1=(id>>12)&1, a1=(id>>11)&1, c2=(id>>10)&1, a2=(id>>9)&1;
-  uint32_t c4=(id>>8)&1,  a4=(id>>7)&1,  b1=(id>>6)&1,  d1=(id>>5)&1;
-  uint32_t b2=(id>>4)&1,  d2=(id>>3)&1,  b4=(id>>2)&1,  d4=(id>>1)&1;
-  return (a4*4+a2*2+a1)*1000 + (b4*4+b2*2+b1)*100
-       + (c4*4+c2*2+c1)*10   + (d4*4+d2*2+d1);
-}
-
-static const char* df_name(uint32_t df) {
-  switch (df) {
-    case  0: return "ACAS";
-    case  4: return "SurveillanceAlt";
-    case  5: return "SurveillanceId";
-    case 11: return "AllCall";
-    case 16: return "ACAS-Long";
-    case 17: return "ADS-B";
-    case 18: return "ADS-B/NT";
-    case 19: return "ADS-B/Mil";
-    case 20: return "CommB-Alt";
-    case 21: return "CommB-Id";
-    case 24: return "CommD";
-    default: return "Mode-S";
-  }
-}
-
-static const char* tc_type(uint32_t tc) {
-  if (tc == 0)              return "no-info";
-  if (tc >= 5u && tc <= 8u) return "surface-pos";
-  if (tc == 28u)            return "aircraft-status";
-  if (tc == 29u)            return "target-state";
-  if (tc == 31u)            return "op-status";
-  return "reserved";
-}
-
-/* emit_frame bygger:
- *   payload  — läsbar text som syns i host-utskriften
- *   kv JSON  — maskinavläsbar, inkl. råhex och avkodade fält              */
-static void emit_frame(const uint8_t* frame, uint32_t n_bytes,
-                       double freq_hz, uint64_t unix_ms,
-                       MrEmitFn emit_fn, void* user_data,
-                       int corrected, int ap_recovered) {
-  /* Råhex — läggs i kv */
-  char* raw = (char*)malloc(n_bytes * 2u + 1u);
-  if (!raw) return;
-  for (uint32_t i = 0; i < n_bytes; ++i)
-    snprintf(raw + i * 2u, 3, "%02X", (unsigned)frame[i]);
-
-  uint32_t df   = (frame[0] >> 3) & 0x1Fu;
-  uint32_t icao = ((uint32_t)frame[1] << 16) |
-                  ((uint32_t)frame[2] <<  8) |
-                   (uint32_t)frame[3];
-
-  char text[256];   /* läsbar payload — visas av hosten */
-  char kv[512];     /* JSON — maskinavläsbar             */
-
-  const char* cc = icao_country(icao);
-  int kpos = snprintf(kv, sizeof(kv),
-                      "{\"df\":\"%u\",\"icao\":\"%06X\",\"country\":\"%s\","
-                      "\"bits\":\"%u\",\"raw\":\"%s\"",
-                      df, icao, cc, n_bytes * 8u, raw);
-  if (corrected > 0) {
-    kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                     ",\"corrected_bits\":%d", corrected);
-  }
-  if (ap_recovered) {
-    kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                     ",\"ap_recovered\":1");
-  }
-  int tpos = snprintf(text, sizeof(text), "[%s] ", cc);
-
-  if ((df == 17u || df == 18u) && n_bytes == 14u) {
-    const uint8_t* me = frame + 4;
-    uint32_t tc = me_bits(me, 0u, 5u);
-    kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, ",\"tc\":\"%u\"", tc);
-
-    if (tc >= 1u && tc <= 4u) {
-      /* ---- Identifiering (anropssignal) ---- */
-      char cs[9];
-      for (int i = 0; i < 8; ++i)
-        cs[i] = kAdsbCS[me_bits(me, 8u + (uint32_t)i * 6u, 6u) & 0x3Fu];
-      int end = 7;
-      while (end > 0 && cs[end] == ' ') --end;
-      cs[end + 1] = '\0';
-      kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                       ",\"callsign\":\"%s\"", cs);
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       "CS: %s", cs);
-
-    } else if (tc >= 9u && tc <= 18u) {
-      /* ---- Luftläge (barometrisk höjd) ---- */
-      uint32_t alt12 = me_bits(me, 8u, 12u);
-      uint32_t F     = me_bits(me, 21u, 1u);
-      uint32_t lat17 = me_bits(me, 22u, 17u);
-      uint32_t lon17 = me_bits(me, 39u, 17u);
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "Luftläge:");
-      if ((alt12 >> 4u) & 1u) {
-        int32_t N   = (int32_t)(((alt12 & 0xFE0u) >> 1u) | (alt12 & 0xFu));
-        int32_t alt = N * 25 - 1000;
-        kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                         ",\"alt_ft\":\"%d\"", alt);
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                         " %d ft,", alt);
-      }
-      kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                       ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
-                       F, lat17, lon17);
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       " CPR %s lat %u lon %u",
-                       F ? "udda" : "j\xc3\xa4mn", lat17, lon17);
-
-    } else if (tc >= 20u && tc <= 22u) {
-      /* ---- Luftläge (GNSS-höjd) ---- */
-      uint32_t F     = me_bits(me, 21u, 1u);
-      uint32_t lat17 = me_bits(me, 22u, 17u);
-      uint32_t lon17 = me_bits(me, 39u, 17u);
-      kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                       ",\"cpr_odd\":\"%u\",\"cpr_lat\":\"%u\",\"cpr_lon\":\"%u\"",
-                       F, lat17, lon17);
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       "Luftläge(GNSS): CPR %s lat %u lon %u",
-                       F ? "udda" : "j\xc3\xa4mn", lat17, lon17);
-
-    } else if (tc == 19u) {
-      /* ---- Hastighet ---- */
-      uint32_t st = me_bits(me, 5u, 3u);
-      if (st == 1u || st == 2u) {
-        uint32_t dew   = me_bits(me, 13u, 1u);
-        uint32_t vew_r = me_bits(me, 14u, 10u);
-        uint32_t dns   = me_bits(me, 24u, 1u);
-        uint32_t vns_r = me_bits(me, 25u, 10u);
-        uint32_t vrsgn = me_bits(me, 36u, 1u);
-        uint32_t vr_r  = me_bits(me, 37u, 9u);
-        double   mult  = (st == 2u) ? 4.0 : 1.0;
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "Hastighet:");
-        if (vew_r > 0u && vns_r > 0u) {
-          double vew = (double)(vew_r - 1u) * mult * (dew ? -1.0 :  1.0);
-          double vns = (double)(vns_r - 1u) * mult * (dns ? -1.0 :  1.0);
-          double spd = sqrt(vew * vew + vns * vns);
-          double hdg = atan2(vew, vns) * (180.0 / M_PI);
-          if (hdg < 0.0) hdg += 360.0;
-          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                           ",\"spd_kt\":\"%.0f\",\"hdg_deg\":\"%.1f\"", spd, hdg);
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " %.0f kt, kurs %.0f\xc2\xb0", spd, hdg);
-        }
-        if (vr_r > 0u) {
-          int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
-          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                           ",\"vrate_fpm\":\"%d\"", vrate);
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           ", stig %+d fpm", vrate);
-        }
-      } else if (st == 3u || st == 4u) {
-        uint32_t hdg_ok = me_bits(me, 13u, 1u);
-        uint32_t hdg_r  = me_bits(me, 14u, 10u);
-        uint32_t is_tas = me_bits(me, 24u, 1u);
-        uint32_t as_r   = me_bits(me, 25u, 10u);
-        uint32_t vrsgn  = me_bits(me, 36u, 1u);
-        uint32_t vr_r   = me_bits(me, 37u, 9u);
-        double   mult   = (st == 4u) ? 4.0 : 1.0;
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "Hastighet:");
-        if (hdg_ok) {
-          double hdg = hdg_r * (360.0 / 1024.0);
-          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                           ",\"hdg_deg\":\"%.1f\"", hdg);
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " kurs %.0f\xc2\xb0,", hdg);
-        }
-        if (as_r > 0u) {
-          int spd = (int)((as_r - 1u) * mult);
-          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                           ",\"%s\":\"%d\"", is_tas ? "tas_kt" : "ias_kt", spd);
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           " %s %d kt", is_tas ? "TAS" : "IAS", spd);
-        }
-        if (vr_r > 0u) {
-          int32_t vrate = (int32_t)(vr_r - 1u) * 64 * (vrsgn ? -1 : 1);
-          kpos += snprintf(kv + kpos, sizeof(kv) - (size_t)kpos,
-                           ",\"vrate_fpm\":\"%d\"", vrate);
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           ", stig %+d fpm", vrate);
-        }
-      }
-    } else {
-      /* TC utan specifik avkodning */
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                       "TC%u (%s)", tc, tc_type(tc));
-    }
-    if (df == 18u) {
-      tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, " [DF18]");
-    }
-  } else {
-    /* Ej DF17/18 — avkoda standardformat, visa "DF-n okänt" för övriga */
-    switch (df) {
-
-      case 0:  /* Short Air-Air Surveillance (ACAS) */
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "ACAS");
-        break;
-
-      case 4:   /* Surveillance Altitude Reply */
-      case 20: { /* Comm-B Altitude Reply */
-        uint32_t ac = extract_ac13(frame);
-        int alt; int ok = decode_ac13(ac, &alt);
-        if (ok)
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           "%s: %d ft",
-                           df == 4 ? "H\xc3\xb6jdssvar" : "CommB-h\xc3\xb6jd", alt);
-        else
-          tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                           "%s (h\xc3\xb6jd ej avkodbar)",
-                           df == 4 ? "H\xc3\xb6jdssvar" : "CommB-h\xc3\xb6jd");
-        break;
-      }
-
-      case 5:   /* Surveillance Identity Reply */
-      case 21: { /* Comm-B Identity Reply */
-        uint32_t id = extract_ac13(frame);  /* ID13 på samma position som AC13 */
-        uint32_t sq = decode_squawk(id);
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                         "%s: squawk %04u",
-                         df == 5 ? "Identitetssvar" : "CommB-identitet", sq);
-        break;
-      }
-
-      case 11: { /* All-Call Reply */
-        static const char* ca_desc[] = {
-          "nivå 1", "reserverad", "reserverad", "reserverad",
-          "ACAS (mark)", "ACAS (luft)", "ACAS (ok\xc3\xa4nd)", "full Mode-S"
-        };
-        uint32_t ca = frame[0] & 0x07u;
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                         "Rollkall: CA=%u (%s)", ca, ca_desc[ca]);
-        break;
-      }
-
-      case 16: /* Long Air-Air Surveillance (ACAS) */
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "ACAS-Long");
-        break;
-
-      case 19: /* Military Extended Squitter */
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "ADS-B/Milit\xc3\xa4r");
-        break;
-
-      case 24: /* Comm-D Extended Length Message */
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos, "CommD (ELM)");
-        break;
-
-      default:
-        tpos += snprintf(text + tpos, sizeof(text) - (size_t)tpos,
-                         "Mode-S (DF%u, reserverad/ok\xc3\xa4nd)", df);
-        break;
-    }
-  }
-
-  snprintf(kv + kpos, sizeof(kv) - (size_t)kpos, "}");
-  emit_fn("ADSB", text, freq_hz, unix_ms, kv, user_data);
-  free(raw);
-}
-
-/* ================================================================== */
-/* Plugin-gränssnitt                                                    */
-/* ================================================================== */
-
-MrPluginCtx* mr_plugin_create(void) {
-  AdsbCtx* ctx = (AdsbCtx*)calloc(1, sizeof(AdsbCtx));
-  if (!ctx) return NULL;
-  ctx->mag_cap = MODES_FRAME_SAMPS_MAX + 65536u;
-  ctx->mag = (uint32_t*)malloc(ctx->mag_cap * sizeof(uint32_t));
-  if (!ctx->mag) { free(ctx); return NULL; }
-  ctx->error_info_initialized = 0;
-  ctx->debug_enabled = 0;
-  ctx->debug_file = NULL;
-
-  /* ADS-B preamble gating controls (global, because preamble_ok_phase() is hot). */
-  const char* pre_ratio_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_RATIO");
-  const char* pre_min_high_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_MIN_HIGH");
-  const char* pre_base_snr_env = getenv("MR_PLUGIN_ADSB_PREAMBLE_BASE_SNR_RATIO");
-  const char* agc_enable_env = getenv("MR_PLUGIN_ADSB_AGC_ENABLE");
-  const char* max_biterrors_env = getenv("MR_PLUGIN_ADSB_MAX_BITERRORS");
-  const char* mag_scale_env = getenv("MR_PLUGIN_ADSB_MAG_SCALE");
-  if (pre_ratio_env && pre_ratio_env[0] != '\0') {
-    float parsed = strtof(pre_ratio_env, NULL);
-    if (parsed > 0.0f) g_adsb_preamble_ratio = parsed;
-  }
-  if (pre_min_high_env && pre_min_high_env[0] != '\0') {
-    unsigned long parsed = strtoul(pre_min_high_env, NULL, 10);
-    if (parsed > 0ul) g_adsb_preamble_min_high = (uint32_t)parsed;
-  }
-  if (pre_base_snr_env && pre_base_snr_env[0] != '\0') {
-    float parsed = strtof(pre_base_snr_env, NULL);
-    if (parsed > 0.0f) g_adsb_preamble_base_snr_ratio = parsed;
-  }
-  if (agc_enable_env && agc_enable_env[0] != '\0') {
-    /* Accept 0/1, default is enabled. */
-    g_adsb_agc_enable = (agc_enable_env[0] != '0');
-  }
-  /* If AGC is disabled, the normalized IQ values are typically tiny; power needs
-   * a much larger scaling factor to avoid truncating to 0. */
-  g_adsb_mag_scale = g_adsb_agc_enable ? 1000.0f : 100000000.0f;
-  if (max_biterrors_env && max_biterrors_env[0] != '\0') {
-    long parsed = strtol(max_biterrors_env, NULL, 10);
-    if (parsed < 0) parsed = 0;
-    if (parsed > MODES_MAX_BITERRORS) parsed = MODES_MAX_BITERRORS;
-    g_adsb_max_biterrors = (int)parsed;
-  }
-  if (mag_scale_env && mag_scale_env[0] != '\0') {
-    float parsed = strtof(mag_scale_env, NULL);
-    if (parsed > 0.0f) g_adsb_mag_scale = parsed;
-  }
-
-  /* Software AGC: normalize the noise floor to roughly unit magnitude.
-   * Default loop bandwidth 5e-6 → time constant ~84 ms @ 2.4 Msps.
-   * This is intentionally slower to avoid disturbing short 120 µs ADS-B bursts.
-   * The target level is set to 1.0 for normalized IQ before output magnitude scaling. */
-  const char* agc_bw_env = getenv("MR_PLUGIN_AGC_BANDWIDTH");
-  const char* agc_level_env = getenv("MR_PLUGIN_AGC_TARGET_LEVEL");
-  float agc_bandwidth = 5e-6f;
-  float agc_target_level = 1.0f;
-  if (agc_bw_env && agc_bw_env[0] != '\0') {
-    float parsed = strtof(agc_bw_env, NULL);
-    if (parsed > 0.0f) agc_bandwidth = parsed;
-  }
-  if (agc_level_env && agc_level_env[0] != '\0') {
-    float parsed = strtof(agc_level_env, NULL);
-    if (parsed > 0.0f) agc_target_level = parsed;
-  }
-  ctx->agc_h = agc_crcf_create();
-  agc_crcf_set_bandwidth(ctx->agc_h, agc_bandwidth);
-  agc_crcf_set_signal_level(ctx->agc_h, agc_target_level);
-
-  const char* debug_env = getenv("MR_PLUGIN_DEBUG");
-  const char* debug_file_path = getenv("MR_PLUGIN_DEBUG_FILE");
-  if (debug_file_path && debug_file_path[0] != '\0') {
-    ctx->debug_file = fopen(debug_file_path, "a");
-    if (!ctx->debug_file) {
-      fprintf(stderr, "[adsb_demod] WARNING: could not open debug file '%s'\n", debug_file_path);
-    }
-  }
-  ctx->debug_enabled = (debug_env && debug_env[0] != '0') || (ctx->debug_file != NULL);
-
-  if (ctx->debug_enabled) {
-    FILE* out = debug_out(ctx);
-    fprintf(out, "[adsb_demod] Plugin initialized (nominal 2.4 Msps, accepts 2.3-2.5 Msps)\n");
-    fprintf(out, "[adsb_demod] AGC bandwidth=%g target_level=%g\n", agc_bandwidth, agc_target_level);
-    fprintf(out, "[adsb_demod] preamble_ratio=%g preamble_min_high=%u preamble_base_snr_ratio=%g agc_enable=%d max_biterrors=%d mag_scale=%g\n",
-            g_adsb_preamble_ratio, g_adsb_preamble_min_high, g_adsb_preamble_base_snr_ratio,
-            g_adsb_agc_enable, g_adsb_max_biterrors, g_adsb_mag_scale);
-    if (ctx->debug_file) {
-      fprintf(out, "[adsb_demod] Logging debug to file: %s\n", debug_file_path);
-    }
-    fflush(out);
-  }
-
-  return (MrPluginCtx*)ctx;
-}
-
-void mr_plugin_destroy(MrPluginCtx* raw) {
-  if (!raw) return;
-  AdsbCtx* ctx = (AdsbCtx*)raw;
-  if (ctx->debug_file) {
-    fclose(ctx->debug_file);
-    ctx->debug_file = NULL;
-  }
-  if (ctx->agc_h) agc_crcf_destroy(ctx->agc_h);
-  free(ctx->mag);
-  free(ctx);
-}
-
-static const MrPluginMeta kMeta = {
-  "adsb_demod", "1.0.0", MR_PLUGIN_API_VERSION,
-  "ADS-B / Mode S-demodulator (2 Msps, CRC-24)",
-  MR_PLUGIN_ROLE_DEMODULATOR
-};
-const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
-
-int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
-  if (!raw || !key || !value) return 0;
-  AdsbCtx* ctx = (AdsbCtx*)raw;
-
-  if (strcmp(key, "adsb_preamble_ratio") == 0) {
-    const float parsed = strtof(value, NULL);
-    if (parsed > 0.0f) {
-      g_adsb_preamble_ratio = parsed;
-      if (ctx->debug_enabled) {
-        fprintf(debug_out(ctx), "[adsb_demod] Set preamble_ratio=%g\n", g_adsb_preamble_ratio);
-        fflush(debug_out(ctx));
-      }
-      return 1;
-    }
+int mr_plugin_set_param(MrPluginCtx *ctx, const char *key, const char *value)
+{
+    (void)ctx; (void)key; (void)value;
     return 0;
-  }
-
-  if (strcmp(key, "adsb_preamble_min_high") == 0) {
-    const unsigned long parsed = strtoul(value, NULL, 10);
-    if (parsed > 0ul) {
-      g_adsb_preamble_min_high = (uint32_t)parsed;
-      if (ctx->debug_enabled) {
-        fprintf(debug_out(ctx), "[adsb_demod] Set preamble_min_high=%u\n", g_adsb_preamble_min_high);
-        fflush(debug_out(ctx));
-      }
-      return 1;
-    }
-    g_adsb_preamble_min_high = 0u;
-    return 1;
-  }
-
-  if (strcmp(key, "adsb_preamble_base_snr_ratio") == 0) {
-    const float parsed = strtof(value, NULL);
-    if (parsed > 0.0f) {
-      g_adsb_preamble_base_snr_ratio = parsed;
-      if (ctx->debug_enabled) {
-        fprintf(debug_out(ctx), "[adsb_demod] Set preamble_base_snr_ratio=%g\n", g_adsb_preamble_base_snr_ratio);
-        fflush(debug_out(ctx));
-      }
-      return 1;
-    }
-    return 0;
-  }
-
-  if (strcmp(key, "adsb_agc_enable") == 0) {
-    /* Treat any leading '0' as disable; anything else enables. */
-    g_adsb_agc_enable = !(value[0] == '0');
-    if (ctx->debug_enabled) {
-      fprintf(debug_out(ctx), "[adsb_demod] Set agc_enable=%d\n", g_adsb_agc_enable);
-      fflush(debug_out(ctx));
-    }
-    return 1;
-  }
-
-  if (strcmp(key, "adsb_max_biterrors") == 0) {
-    long parsed = strtol(value, NULL, 10);
-    if (parsed < 0) parsed = 0;
-    if (parsed > MODES_MAX_BITERRORS) parsed = MODES_MAX_BITERRORS;
-    g_adsb_max_biterrors = (int)parsed;
-    if (ctx->debug_enabled) {
-      fprintf(debug_out(ctx), "[adsb_demod] Set max_biterrors=%d\n", g_adsb_max_biterrors);
-      fflush(debug_out(ctx));
-    }
-    return 1;
-  }
-
-  if (strcmp(key, "adsb_mag_scale") == 0) {
-    const float parsed = strtof(value, NULL);
-    if (parsed > 0.0f) {
-      g_adsb_mag_scale = parsed;
-      if (ctx->debug_enabled) {
-        fprintf(debug_out(ctx), "[adsb_demod] Set mag_scale=%g\n", g_adsb_mag_scale);
-        fflush(debug_out(ctx));
-      }
-      return 1;
-    }
-    return 0;
-  }
-
-  if (strcmp(key, "adsb_agc_bandwidth") == 0) {
-    const float parsed = strtof(value, NULL);
-    if (parsed > 0.0f) {
-      agc_crcf_set_bandwidth(ctx->agc_h, parsed);
-      if (ctx->debug_enabled) {
-        fprintf(debug_out(ctx), "[adsb_demod] Set AGC bandwidth=%g\n", parsed);
-        fflush(debug_out(ctx));
-      }
-      return 1;
-    }
-    return 0;
-  }
-
-  if (strcmp(key, "adsb_agc_target_level") == 0) {
-    const float parsed = strtof(value, NULL);
-    if (parsed > 0.0f) {
-      agc_crcf_set_signal_level(ctx->agc_h, parsed);
-      if (ctx->debug_enabled) {
-        fprintf(debug_out(ctx), "[adsb_demod] Set AGC target_level=%g\n", parsed);
-        fflush(debug_out(ctx));
-      }
-      return 1;
-    }
-    return 0;
-  }
-  return 0;
-}
-
-void mr_plugin_process_iq(MrPluginCtx* raw,
-                          const int16_t* iq, uint32_t num_pairs,
-                          uint32_t sr, double freq_hz, uint64_t unix_ms,
-                          MrEmitFn emit_fn, void* user_data) {
-  if (!raw || !iq || !num_pairs || !emit_fn) return;
-  AdsbCtx* ctx = (AdsbCtx*)raw;
-
-  /* Initialize error correction table if not done */
-  if (!ctx->error_info_initialized) {
-    modesInitErrorInfo();
-    ctx->error_info_initialized = 1;
-  }
-
-  FILE* debug_file = debug_out(ctx);
-  int debug_enabled = ctx->debug_enabled;
-
-  static uint32_t last_sr = 0u;
-  if (sr != last_sr) {
-    last_sr = sr;
-    if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] Sample rate: %u Hz (%.3f Msps)\n", sr, (double)sr / 1e6);
-      fflush(debug_file);
-    }
-  }
-
-  /* This demod is tuned for ~2.4 Msps (dump1090 "demod_2400"). */
-  if (sr < 2300000u || sr > 2500000u) {
-    fprintf(stderr, "[adsb_demod] WARNING: sample rate %u Hz rejected (expected 2.3-2.5 Msps)\n", sr);
-    return;
-  }
-
-  /* Utöka buffert vid behov */
-  const uint32_t needed = ctx->mag_len + num_pairs;
-  if (needed > ctx->mag_cap) {
-    uint32_t new_cap = needed + 65536u;
-    uint32_t* nb = (uint32_t*)realloc(ctx->mag, new_cap * sizeof(uint32_t));
-    if (!nb) { ctx->mag_len = 0u; return; }
-    ctx->mag = nb;
-    ctx->mag_cap = new_cap;
-  }
-
-  /* Software AGC normaliserar till brusgolv ≈ 1000 amplitudenheter.
-   * Skalar IQ till ±1.0 innan AGC så att agc_crcf-internt gain-mål är
-   * dimensionslöst; output×1000 ger bekväma heltal för preambeldetektion. */
-  for (uint32_t n = 0; n < num_pairs; ++n) {
-    liquid_float_complex iq_in;
-    __real__ iq_in = (float)iq[n * 2u]      * (1.0f / 32768.0f);
-    __imag__ iq_in = (float)iq[n * 2u + 1u] * (1.0f / 32768.0f);
-    liquid_float_complex iq_out;
-    if (g_adsb_agc_enable) {
-      agc_crcf_execute(ctx->agc_h, iq_in, &iq_out);
-    } else {
-      iq_out = iq_in;
-    }
-    float ri = crealf(iq_out);
-    float rq = cimagf(iq_out);
-    /* Power magnitude; scaling is tunable (and must be large if AGC is disabled
-     * to avoid truncation to 0 due to small normalized IQ). */
-    float mp = (ri * ri + rq * rq) * g_adsb_mag_scale;
-    if (mp < 0.0f) mp = 0.0f;
-    if (mp > 4294967295.0f) mp = 4294967295.0f;
-    uint32_t mag = (uint32_t)(mp);
-    ctx->mag[ctx->mag_len++] = mag;
-  }
-
-  float spb = (float)sr * 1e-6f;
-  /* 8us preamble + 112us payload ~= 120us. At 2.4 spb => ~288 samples.
-   * Keep a bit of margin for phase-stride and partial buffers. */
-  uint32_t min_frame = 320u;
-
-  uint32_t p = 0;
-  while (p + min_frame <= ctx->mag_len) {
-    uint32_t cand_high[5];
-    int cand_try_phase[5];
-    int cand_n = 0;
-
-    for (int pre_ph = 3; pre_ph <= 7; ++pre_ph) {
-      uint32_t phase_high = 0u;
-      if (preamble_ok_phase(ctx, ctx->mag + p, pre_ph, &phase_high)) {
-        if (debug_enabled) {
-          fprintf(debug_file, "[adsb_demod] preamble candidate idx=%u phase=%d high=%u\n", p, pre_ph, phase_high);
-        }
-        int try_phase = pre_ph + 1; /* try_phase 4..8 */
-        if (cand_n < 5) {
-          cand_try_phase[cand_n] = try_phase;
-          cand_high[cand_n] = phase_high;
-          cand_n++;
-        }
-      }
-    }
-
-    if (cand_n == 0) {
-      ++p;
-      continue;
-    }
-
-    /* Decode all candidate phases and pick the best (CRC-valid beats higher 'high'). */
-    int best_ok = 0;
-    int best_score = -1;
-    int best_try_phase = -1;
-    uint32_t best_high = 0u;
-    uint8_t best_frame[MODES_LONG_MSG_BYTES];
-    uint32_t best_n_bytes = 0u;
-    uint32_t best_frame_len = 0u;
-    uint32_t best_df = 0u;
-    uint32_t best_syndrome = 0u;
-    int best_corrected = 0;
-    int best_ap = 0;
-    int best_fixbits[MODES_MAX_BITERRORS] = {-1, -1};
-
-    for (int ci = 0; ci < cand_n; ++ci) {
-      uint8_t frame_tmp[MODES_LONG_MSG_BYTES];
-      uint32_t n_bytes = 0u, frame_len = 0u, df = 0u, syndrome = 0u;
-      int corrected = 0, ap = 0;
-      int fixbits[MODES_MAX_BITERRORS] = {-1, -1};
-      int rc = decode_candidate_2400(ctx, p, cand_try_phase[ci],
-                                     frame_tmp, &n_bytes, &frame_len, &df,
-                                     &syndrome, &corrected, &ap, fixbits);
-      if (rc < 0) { best_try_phase = -2; break; }
-
-      /* Score: CRC clean best, then corrected CRC, then AP. */
-      int score = 0;
-      if (rc == 1 && corrected == 0 && !ap) score = 3000;
-      else if (rc == 1 && corrected > 0) score = 2000 - corrected;
-      else if (rc == 1 && ap) score = 1500;
-      else score = 0;
-
-      /* Tie-breaker: higher preamble high. */
-      if (score > best_score || (score == best_score && cand_high[ci] > best_high)) {
-        best_score = score;
-        best_ok = (rc == 1);
-        best_try_phase = cand_try_phase[ci];
-        best_high = cand_high[ci];
-        memcpy(best_frame, frame_tmp, n_bytes);
-        best_n_bytes = n_bytes;
-        best_frame_len = frame_len;
-        best_df = df;
-        best_syndrome = syndrome;
-        best_corrected = corrected;
-        best_ap = ap;
-        best_fixbits[0] = fixbits[0];
-        best_fixbits[1] = fixbits[1];
-      }
-    }
-
-    if (best_try_phase == -2) break;
-    if (best_try_phase < 0) { ++p; continue; }
-
-    ++ctx->preamble_count;
-    if (debug_enabled) {
-      fprintf(debug_file, "[adsb_demod] preamble selected idx=%u best_phase=%d high=%u score=%d\n",
-              p, best_try_phase, best_high, best_score);
-      fflush(debug_file);
-    }
-
-    uint32_t df = best_df;
-    uint32_t n_bytes = best_n_bytes;
-    uint32_t n_bits = n_bytes * 8u;
-    uint32_t syndrome = best_syndrome;
-    int corrected = best_corrected;
-    int ap_recovered = best_ap;
-    int* fixbits = best_fixbits;
-
-    /* For now, only accept CRC-valid/AP frames. */
-    if (best_ok) {
-        ctx->crc_ok_count++;
-        if (corrected == 0 && !ap_recovered) ctx->crc_ok_clean_count++;
-        if (corrected > 0) ctx->crc_ok_corrected_count += (uint64_t)corrected;
-        if (ap_recovered) ctx->crc_ok_ap_count++;
-        if (df == 17u) ctx->df17_ok_count++;
-
-        uint32_t icao = ((uint32_t)best_frame[1] << 16) |
-                        ((uint32_t)best_frame[2] <<  8) |
-                         (uint32_t)best_frame[3];
-        if (df == 17u || df == 18u) {
-          addRecentlySeenICAOAddr(ctx, icao);
-          icaoSeenInsert(ctx, icao);
-        }
-
-        if (corrected > 0 && ctx->corrected_logged_count < 20u) {
-          ctx->corrected_logged_count++;
-          fprintf(stderr, "[adsb_demod] CORR#%llu DF=%u corrected=%d bits[",
-                  (unsigned long long)ctx->corrected_logged_count, df, corrected);
-          for (int fi = 0; fi < corrected; fi++) {
-            if (fi) fprintf(stderr, ",");
-            fprintf(stderr, "%d", fixbits[fi]);
-          }
-          fprintf(stderr, "] hex=");
-          for (uint32_t x = 0; x < n_bytes; ++x)
-            fprintf(stderr, "%02X", best_frame[x]);
-          fprintf(stderr, "\n");
-        }
-        if (debug_enabled) {
-          fprintf(debug_file, "[adsb_demod] OK: DF=%u ICAO=%06X bytes=%u", df, icao, n_bytes);
-          if (corrected > 0) {
-            fprintf(debug_file, " corrected=%d bits[", corrected);
-            for (int fi = 0; fi < corrected; fi++) {
-              if (fi) fprintf(debug_file, ",");
-              fprintf(debug_file, "%d", fixbits[fi]);
-            }
-            fprintf(debug_file, "]");
-          }
-          if (ap_recovered) fprintf(debug_file, " ap_recovered=1");
-          if (df == 18u) fprintf(debug_file, " [DF18]");
-          fprintf(debug_file, " hex=");
-          for (uint32_t x = 0; x < n_bytes; ++x)
-            fprintf(debug_file, "%02X", best_frame[x]);
-          fprintf(debug_file, "\n");
-          fflush(debug_file);
-        }
-
-        emit_frame(best_frame, n_bytes, freq_hz, unix_ms, emit_fn, user_data, corrected, ap_recovered);
-        p += best_frame_len;
-        continue;
-    }
-
-    if (df == 17u || df == 18u) {
-      if ((df == 17u && ctx->df17_fail_count < 5u) ||
-          (df == 18u && ctx->df18_fail_count < 5u)) {
-        FILE* fail_out = debug_enabled ? debug_file : stderr;
-        fprintf(fail_out, "[ADS-B DBG] DF%u #%llu sr=%u spb=%.3f: ",
-                df,
-                (unsigned long long)((df == 17u) ? ctx->df17_fail_count : ctx->df18_fail_count) + 1u,
-                sr, (double)spb);
-        for (uint32_t x = 0; x < n_bytes; ++x)
-          fprintf(fail_out, "%02X", best_frame[x]);
-        fprintf(fail_out, "  syndrome=%06X try_phase=%d\n", syndrome, best_try_phase);
-        if (debug_enabled) fflush(fail_out);
-      }
-      if (df == 17u) ++ctx->df17_fail_count;
-      if (df == 18u) ++ctx->df18_fail_count;
-    }
-    ++ctx->crc_fail_count;
-    ++p;
-    continue;
-  }
-
-  if (p > 0u && p < ctx->mag_len) {
-    uint32_t keep = ctx->mag_len - p;
-    memmove(ctx->mag, ctx->mag + p, keep * sizeof(uint32_t));
-    ctx->mag_len = keep;
-  } else if (p > 0u) {
-    ctx->mag_len = 0u;
-  }
-
-  if (unix_ms - ctx->last_stats_ms >= 10000u) {
-    ctx->last_stats_ms = unix_ms;
-    fprintf(stderr,
-            "[ADS-B] preamble=%llu  crc_ok=%llu(clean=%llu +%llu korr +%llu ap)  crc_fail=%llu"
-            "  df17_ok=%llu  df17_fail=%llu  df18_ok=%llu  df18_fail=%llu"
-            "  gate_rej(base_snr=%llu min_high=%llu ratio=%llu)"
-            "  icao_unique=%u icao_frames=%llu\n",
-            (unsigned long long)ctx->preamble_count,
-            (unsigned long long)ctx->crc_ok_count,
-            (unsigned long long)ctx->crc_ok_clean_count,
-            (unsigned long long)ctx->crc_ok_corrected_count,
-            (unsigned long long)ctx->crc_ok_ap_count,
-            (unsigned long long)ctx->crc_fail_count,
-            (unsigned long long)ctx->df17_ok_count,
-            (unsigned long long)ctx->df17_fail_count,
-            (unsigned long long)ctx->df18_ok_count,
-            (unsigned long long)ctx->df18_fail_count,
-            (unsigned long long)ctx->preamble_reject_base_snr,
-            (unsigned long long)ctx->preamble_reject_min_high,
-            (unsigned long long)ctx->preamble_reject_ratio,
-            ctx->icao_seen_count,
-            (unsigned long long)ctx->icao_frames_total);
-  }
 }

@@ -61,7 +61,6 @@ file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/plugin_exports.ld"
 mr_add_plugin(fsk_demod      fsk_demod.c)
 mr_add_plugin(gmsk_demod     gmsk_demod.c)
 mr_add_plugin(ppm_demod      ppm_demod.c)
-mr_add_plugin(adsb_demod     adsb_demod.c)
 mr_add_plugin(nrzi_decoder   nrzi_decoder.c)
 mr_add_plugin(hdlc_postproc  hdlc_postproc.c)
 mr_add_plugin(ais_decoder     ais_decoder.c)
@@ -72,7 +71,7 @@ mr_add_plugin(vdes_asm_decoder vdes_asm_decoder.c)
 mr_add_plugin(vdes_asm_postproc vdes_asm_postproc.c)
 
 # ---------------------------------------------------------------------------
-# libmodes_adsb_demod: ADS-B demodulator backed by libmodes (dump1090)
+# adsb_demod: ADS-B demodulator backed by libmodes (dump1090)
 # ---------------------------------------------------------------------------
 # Prefer the system-installed archive; fall back to a locally-built one.
 set(_LIBMODES_CANDIDATES
@@ -90,10 +89,10 @@ endforeach()
 find_path(LIBMODES_INC libmodes/libmodes.h PATHS /usr/local/include /usr/include NO_DEFAULT_PATH)
 
 if(LIBMODES_LIB AND LIBMODES_INC)
-  mr_add_plugin(libmodes_adsb_demod libmodes_adsb_demod.c)
-  target_include_directories(libmodes_adsb_demod PRIVATE ${LIBMODES_INC})
-  target_link_libraries(libmodes_adsb_demod PRIVATE ${LIBMODES_LIB})
-  message(STATUS "libmodes_adsb_demod: using ${LIBMODES_LIB}")
+  mr_add_plugin(adsb_demod adsb_demod.c)
+  target_include_directories(adsb_demod PRIVATE ${LIBMODES_INC})
+  target_link_libraries(adsb_demod PRIVATE ${LIBMODES_LIB})
+  message(STATUS "adsb_demod: using libmodes from ${LIBMODES_LIB}")
 else()
-  message(WARNING "libmodes not found — skipping libmodes_adsb_demod plugin")
+  message(FATAL_ERROR "libmodes not found — cannot build adsb_demod. Install libmodes or check /usr/local/lib.")
 endif()
