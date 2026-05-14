@@ -3569,10 +3569,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       t.lat = lat;
       t.lon = lon;
       t.unix_ms = static_cast<std::uint64_t>(unix_ms);
-      ParseDoubleField(fields, "sog", &t.sog);
-      ParseDoubleField(fields, "cog", &t.cog);
 
       if (plugin_type.startsWith("AIS_")) {
+        ParseDoubleField(fields, "sog", &t.sog);
+        ParseDoubleField(fields, "cog", &t.cog);
         const QString mmsi = FieldString(fields, "mmsi");
         t.id = mmsi.isEmpty() ? QString("AIS@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : mmsi;
         t.kind = RadarTargetKind::kVessel;
@@ -3580,6 +3580,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
         if (!t.label.isEmpty()) SaveNameAlias(t.id, t.label);
         if (t.label.isEmpty()) t.label = t.id;
       } else if (plugin_type == "ADSB") {
+        ParseDoubleField(fields, "gs", &t.sog);
+        ParseDoubleField(fields, "heading", &t.cog);
+        if (!ParseDoubleField(fields, "alt_baro", &t.altitude))
+          ParseDoubleField(fields, "alt_geom", &t.altitude);
         const QString icao = FieldString(fields, "icao");
         t.id = icao.isEmpty() ? QString("ADSB@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : icao;
         t.kind = RadarTargetKind::kAircraft;
@@ -3594,6 +3598,17 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
       radar_widget_->UpsertTarget(t);
       if (visible_objects_widget_ != nullptr) visible_objects_widget_->UpsertTarget(t);
+    }
+
+    // For ADS-B messages that carry altitude but no decoded position, update
+    // the altitude of any existing list entry without overwriting lat/lon.
+    if (plugin_type == "ADSB" && !(has_lat && has_lon) && visible_objects_widget_ != nullptr) {
+      double alt = std::numeric_limits<double>::quiet_NaN();
+      if (ParseDoubleField(fields, "alt_baro", &alt) || ParseDoubleField(fields, "alt_geom", &alt)) {
+        const QString icao = FieldString(fields, "icao");
+        if (!icao.isEmpty())
+          visible_objects_widget_->UpdateTargetAltitude(icao, alt);
+      }
     }
   }
 

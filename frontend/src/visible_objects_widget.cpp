@@ -33,8 +33,8 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
   auto* layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
 
-  table_ = new QTableWidget(0, 7, this);
-  table_->setHorizontalHeaderLabels({"Kind", "ID", "Label", "Lat", "Lon", "SOG", "COG"});
+  table_ = new QTableWidget(0, 8, this);
+  table_->setHorizontalHeaderLabels({"Kind", "ID", "Label", "Lat", "Lon", "SOG", "COG", "Alt"});
   table_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
   table_->horizontalHeader()->setStretchLastSection(true);
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -61,6 +61,14 @@ void VisibleObjectsWidget::UpdateTargetLabel(const QString& id, const QString& l
   auto it = rows_.find(ToKey(id));
   if (it == rows_.end()) return;
   it->second.last.label = label;
+  RefreshTable();
+}
+
+void VisibleObjectsWidget::UpdateTargetAltitude(const QString& id, double altitude_ft) {
+  if (id.isEmpty()) return;
+  auto it = rows_.find(ToKey(id));
+  if (it == rows_.end()) return;
+  it->second.last.altitude = altitude_ft;
   RefreshTable();
 }
 
@@ -106,6 +114,8 @@ void VisibleObjectsWidget::RefreshTable() {
     table_->setItem(i, 4, new QTableWidgetItem(std::isfinite(t.lon) ? QString::number(t.lon, 'f', 5) : QString()));
     table_->setItem(i, 5, new QTableWidgetItem(QString::number(t.sog, 'f', 1)));
     table_->setItem(i, 6, new QTableWidgetItem(QString::number(t.cog, 'f', 1)));
+    table_->setItem(i, 7, new QTableWidgetItem(
+        std::isfinite(t.altitude) ? QString::number(static_cast<int>(t.altitude)) + " ft" : QString()));
 
     if (!selected_id_.isEmpty() && t.id == selected_id_) {
       table_->selectRow(i);
