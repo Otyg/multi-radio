@@ -87,7 +87,7 @@ static int reinit_converter(adsb_ctx_t *ctx, uint32_t sr)
         ctx->conv_state = NULL;
         ctx->converter  = NULL;
     }
-    ctx->converter = init_converter(INPUT_SC16, (double)sr, /*filter_dc=*/1,
+    ctx->converter = init_converter(INPUT_SC16, (double)sr, /*filter_dc=*/0,
                                     &ctx->conv_state);
     if (!ctx->converter) return 0;
     ctx->current_sr = sr;
