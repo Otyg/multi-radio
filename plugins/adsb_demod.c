@@ -56,7 +56,7 @@ typedef struct {
 
 static void on_message(struct modesMessage *mm, void *userdata)
 {
-    adsb_ctx_t  *ctx = (adsb_ctx_t *)userdata;
+    adsb_ctx_t   *ctx = (adsb_ctx_t *)userdata;
     emit_state_t *es  = ctx->emit_state;
     if (!es || !es->emit_fn) return;
 
@@ -67,11 +67,48 @@ static void on_message(struct modesMessage *mm, void *userdata)
     for (int i = 0; i < nbytes; i++)
         snprintf(hex + i * 2, 3, "%02X", mm->msg[i]);
 
-    char meta[128];
-    snprintf(meta, sizeof(meta),
-             "{\"df\":\"%d\",\"icao\":\"%06X\","
-             "\"correctedbits\":\"%d\",\"rssi\":\"%.4f\"}",
-             mm->msgtype, mm->addr, mm->correctedbits, mm->signalLevel);
+    /* Build decoded key:value JSON.
+     * All available fields from modesMessage are emitted when their _valid flag is set. */
+    char  meta[512];
+    char *p   = meta;
+    char *end = meta + sizeof(meta) - 2; /* -2: room for '}' + NUL */
+    int   first = 1;
+
+#define KV(k, fmt, val) do { \
+    int _n = snprintf(p, end - p, "%s\"" k "\":\"" fmt "\"", first ? "{" : ",", val); \
+    if (_n > 0) { p += _n; first = 0; } \
+} while (0)
+
+    KV("df",            "%d",   mm->msgtype);
+    KV("icao",          "%06X", mm->addr);
+    KV("correctedbits", "%d",   mm->correctedbits);
+    KV("rssi",          "%.4f", mm->signalLevel);
+
+    if (mm->callsign_valid) {
+        char cs[9];
+        memcpy(cs, mm->callsign, 8); cs[8] = '\0';
+        for (int i = 7; i >= 0 && cs[i] == ' '; --i) cs[i] = '\0';
+        KV("callsign",  "%s",   cs);
+    }
+    if (mm->altitude_baro_valid) KV("alt_baro",  "%d",   mm->altitude_baro);
+    if (mm->altitude_geom_valid) KV("alt_geom",  "%d",   mm->altitude_geom);
+    if (mm->gs_valid)            KV("gs",        "%.1f", (double)mm->gs.selected);
+    if (mm->heading_valid)       KV("heading",   "%.1f", (double)mm->heading);
+    if (mm->baro_rate_valid)     KV("baro_rate", "%d",   mm->baro_rate);
+    if (mm->geom_rate_valid)     KV("geom_rate", "%d",   mm->geom_rate);
+    if (mm->ias_valid)           KV("ias",       "%u",   mm->ias);
+    if (mm->tas_valid)           KV("tas",       "%u",   mm->tas);
+    if (mm->squawk_valid)        KV("squawk",    "%04X", mm->squawk);
+    if (mm->cpr_decoded) {
+        KV("lat",       "%.6f", mm->decoded_lat);
+        KV("lon",       "%.6f", mm->decoded_lon);
+    }
+
+#undef KV
+
+    if (first) *p++ = '{'; /* no fields at all: open brace was never written */
+    *p++ = '}';
+    *p   = '\0';
 
     es->emit_fn("ADSB", hex, es->center_freq_hz, es->unix_ms, meta, es->user_data);
 }
