@@ -70,3 +70,30 @@ mr_add_plugin(ais_dual_demod  ais_dual_demod.c)
 mr_add_plugin(vdes_asm_demod   vdes_asm_demod.c)
 mr_add_plugin(vdes_asm_decoder vdes_asm_decoder.c)
 mr_add_plugin(vdes_asm_postproc vdes_asm_postproc.c)
+
+# ---------------------------------------------------------------------------
+# libmodes_adsb_demod: ADS-B demodulator backed by libmodes (dump1090)
+# ---------------------------------------------------------------------------
+# Prefer the system-installed archive; fall back to a locally-built one.
+set(_LIBMODES_CANDIDATES
+    /usr/local/lib/libmodes.a
+    /usr/lib/libmodes.a
+    "$ENV{HOME}/projects/dump1090/libmodes_full.a"
+)
+set(LIBMODES_LIB "")
+foreach(_c IN LISTS _LIBMODES_CANDIDATES)
+  if(EXISTS "${_c}")
+    set(LIBMODES_LIB "${_c}")
+    break()
+  endif()
+endforeach()
+find_path(LIBMODES_INC libmodes/libmodes.h PATHS /usr/local/include /usr/include NO_DEFAULT_PATH)
+
+if(LIBMODES_LIB AND LIBMODES_INC)
+  mr_add_plugin(libmodes_adsb_demod libmodes_adsb_demod.c)
+  target_include_directories(libmodes_adsb_demod PRIVATE ${LIBMODES_INC})
+  target_link_libraries(libmodes_adsb_demod PRIVATE ${LIBMODES_LIB})
+  message(STATUS "libmodes_adsb_demod: using ${LIBMODES_LIB}")
+else()
+  message(WARNING "libmodes not found — skipping libmodes_adsb_demod plugin")
+endif()
