@@ -128,7 +128,7 @@ void mr_plugin_destroy(MrPluginCtx *ctx_)
 }
 
 static const MrPluginMeta s_meta = {
-    .name        = "libmodes_adsb_demod",
+    .name        = "adsb_demod",
     .version     = "1.0.0",
     .api_version = MR_PLUGIN_API_VERSION,
     .description = "ADS-B/Mode S demodulator via libmodes (dump1090)",
