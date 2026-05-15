@@ -107,7 +107,7 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
                      .arg(lat_min, 0, 'f', 4)
                      .arg(lon_max, 0, 'f', 4)
                      .arg(lat_max, 0, 'f', 4));
-  q.addQueryItem("limitFeatures_LandWaterBoundary", QString::number(kLimit));
+  q.addQueryItem("limit", QString::number(kLimit));
   q.addQueryItem("f", "json");
   url.setQuery(q);
 
