@@ -9,9 +9,11 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <QStringList>
 #include <QVariantMap>
 #include <grpcpp/grpcpp.h>
 
+#include "radar_types.hpp"
 #include "radio.grpc.pb.h"
 
 namespace multi_radio {
@@ -46,6 +48,7 @@ class GrpcClient : public QObject {
                           double tuned_frequency_hz, quint64 sequence, quint64 sample_index);
   void IqFrameReceived(uint32_t receiver_id, int sample_rate_hz, QByteArray interleaved_iq_s16le,
                        quint64 unix_ms, double tuned_frequency_hz, quint64 sequence, quint64 sample_index);
+  void RadarSnapshotReceived(QVector<RadarTargetUpdate> targets, QStringList removed_ids, quint64 snapshot_ms);
   void StreamError(QString error);
 
  private:
@@ -54,6 +57,7 @@ class GrpcClient : public QObject {
   void MessagesLoop();
   void AudioLoop();
   void IqLoop();
+  void RadarSnapshotLoop();
 
   std::string token_;
   std::unique_ptr<RadioControlClient> control_client_;
@@ -66,6 +70,7 @@ class GrpcClient : public QObject {
   std::thread messages_thread_;
   std::thread audio_thread_;
   std::thread iq_thread_;
+  std::thread radar_thread_;
 };
 
 }  // namespace multi_radio

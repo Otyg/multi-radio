@@ -6,7 +6,6 @@
 
 #include <QDateTime>
 #include <QHeaderView>
-#include <QTimer>
 #include <QVBoxLayout>
 
 namespace multi_radio {
@@ -17,15 +16,10 @@ static std::string ToKey(const QString& id) { return id.toStdString(); }
 
 static QString KindLabel(RadarTargetKind kind) {
   switch (kind) {
-    case RadarTargetKind::kAircraft:
-      return "AIR";
-    case RadarTargetKind::kVessel:
-      return "SEA";
-    case RadarTargetKind::kFixed:
-      return "FIX";
-    case RadarTargetKind::kUnknown:
-    default:
-      return "?";
+    case RadarTargetKind::kAircraft: return "AIR";
+    case RadarTargetKind::kVessel:   return "SEA";
+    case RadarTargetKind::kFixed:    return "FIX";
+    default:                         return "?";
   }
 }
 
@@ -45,69 +39,22 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
 
   layout->addWidget(table_);
 
-  // Double-click emits the target ID stored in the Label cell's UserRole.
   connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int /*col*/) {
     auto* item = table_->item(row, 1);
     if (item == nullptr) return;
     emit TargetActivated(item->data(Qt::UserRole).toString());
   });
-
-  // Remove objects not updated in 60 seconds, checked every 10 s.
-  auto* stale_timer = new QTimer(this);
-  stale_timer->setInterval(10000);
-  connect(stale_timer, &QTimer::timeout, this, [this]() {
-    const std::uint64_t now_ms = static_cast<std::uint64_t>(
-        QDateTime::currentMSecsSinceEpoch());
-    RemoveStale(now_ms, 60000);
-  });
-  stale_timer->start();
 }
 
-void VisibleObjectsWidget::UpsertTarget(const RadarTargetUpdate& update) {
-  if (update.id.isEmpty()) return;
-  rows_[ToKey(update.id)].last = update;
+void VisibleObjectsWidget::ApplySnapshot(const QVector<RadarTargetUpdate>& targets,
+                                         const QStringList& removed_ids) {
+  for (const QString& rid : removed_ids)
+    rows_.erase(ToKey(rid));
+
+  for (const auto& t : targets)
+    rows_[ToKey(t.id)].last = t;
+
   RefreshTable();
-}
-
-void VisibleObjectsWidget::UpdateTargetLabel(const QString& id, const QString& label) {
-  if (id.isEmpty() || label.isEmpty()) return;
-  auto it = rows_.find(ToKey(id));
-  if (it == rows_.end()) return;
-  it->second.last.label = label;
-  RefreshTable();
-}
-
-void VisibleObjectsWidget::UpdateTargetAltitude(const QString& id, double altitude_ft) {
-  if (id.isEmpty()) return;
-  auto it = rows_.find(ToKey(id));
-  if (it == rows_.end()) return;
-  it->second.last.altitude = altitude_ft;
-  RefreshTable();
-}
-
-void VisibleObjectsWidget::UpdateTargetSogCog(const QString& id, double sog_kn, double cog_deg) {
-  if (id.isEmpty()) return;
-  auto it = rows_.find(ToKey(id));
-  if (it == rows_.end()) return;
-  it->second.last.sog = sog_kn;
-  it->second.last.cog = cog_deg;
-  RefreshTable();
-}
-
-void VisibleObjectsWidget::RemoveStale(std::uint64_t now_ms, std::uint64_t stale_after_ms) {
-  if (stale_after_ms == 0) return;
-  bool changed = false;
-  for (auto it = rows_.begin(); it != rows_.end();) {
-    const auto& last = it->second.last;
-    if (last.unix_ms != 0 && now_ms > last.unix_ms && (now_ms - last.unix_ms) > stale_after_ms) {
-      emit TargetRemoved(last.id);
-      it = rows_.erase(it);
-      changed = true;
-    } else {
-      ++it;
-    }
-  }
-  if (changed) RefreshTable();
 }
 
 void VisibleObjectsWidget::SetSelectedTarget(const QString& id) {
@@ -116,9 +63,7 @@ void VisibleObjectsWidget::SetSelectedTarget(const QString& id) {
 }
 
 void VisibleObjectsWidget::RefreshTable() {
-  struct Row {
-    RadarTargetUpdate t;
-  };
+  struct Row { RadarTargetUpdate t; };
   std::vector<Row> items;
   items.reserve(rows_.size());
   for (const auto& [_, st] : rows_) {
@@ -133,35 +78,26 @@ void VisibleObjectsWidget::RefreshTable() {
   for (int i = 0; i < static_cast<int>(items.size()); ++i) {
     const auto& t = items[static_cast<size_t>(i)].t;
 
-    // Col 0: Kind
     table_->setItem(i, 0, new QTableWidgetItem(KindLabel(t.kind)));
 
-    // Col 1: Label — ID stored in UserRole for TargetActivated signal
     auto* label_item = new QTableWidgetItem(t.label);
     label_item->setData(Qt::UserRole, t.id);
     table_->setItem(i, 1, label_item);
 
-    // Col 2–3: Lat / Lon
     table_->setItem(i, 2, new QTableWidgetItem(std::isfinite(t.lat) ? QString::number(t.lat, 'f', 5) : QString()));
     table_->setItem(i, 3, new QTableWidgetItem(std::isfinite(t.lon) ? QString::number(t.lon, 'f', 5) : QString()));
-
-    // Col 4–5: SOG / COG
     table_->setItem(i, 4, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.sog, 'f', 1) : QString()));
     table_->setItem(i, 5, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.cog, 'f', 1) : QString()));
-
-    // Col 6: Alt
     table_->setItem(i, 6, new QTableWidgetItem(
         std::isfinite(t.altitude) ? QString::number(static_cast<int>(t.altitude)) + " ft" : QString()));
 
-    // Col 7: Last seen
     const QString last = t.unix_ms > 0
         ? QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(t.unix_ms)).toLocalTime().toString("HH:mm:ss")
         : QString();
     table_->setItem(i, 7, new QTableWidgetItem(last));
 
-    if (!selected_id_.isEmpty() && t.id == selected_id_) {
+    if (!selected_id_.isEmpty() && t.id == selected_id_)
       table_->selectRow(i);
-    }
   }
 }
 

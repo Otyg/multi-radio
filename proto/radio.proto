@@ -203,6 +203,32 @@ message SetHardwareConfigResponse { bool ok = 1; string error = 2; }
 message GetHardwareConfigRequest {}
 message GetHardwareConfigResponse { HardwareConfig config = 1; }
 
+// Radar target snapshot — one entry per tracked object.
+message RadarTarget {
+  string   id           = 1;  // ICAO hex or MMSI
+  string   label        = 2;  // callsign / vessel name, falls back to id
+  string   kind         = 3;  // "AIR", "SEA", "?"
+  double   lat          = 4;
+  double   lon          = 5;
+  double   sog_knots    = 6;
+  double   cog_degrees  = 7;
+  bool     has_altitude = 8;
+  double   altitude_ft  = 9;
+  uint64   last_seen_ms = 10;
+}
+
+// Full radar state pushed every ~2 s.
+message RadarSnapshot {
+  repeated RadarTarget targets     = 1;
+  repeated string      removed_ids = 2;  // targets removed since last snapshot
+  uint64               snapshot_ms = 3;
+}
+
+message StreamRadarSnapshotsRequest {
+  uint32 receiver_id           = 1;
+  bool   include_all_receivers = 2;
+}
+
 service RadioControlService {
   rpc ListReceivers(ListReceiversRequest) returns (ListReceiversResponse);
   rpc GetReceiverStatus(GetReceiverStatusRequest) returns (GetReceiverStatusResponse);
@@ -222,4 +248,5 @@ service TelemetryService {
   rpc StreamDecodedMessages(StreamDecodedMessagesRequest) returns (stream DecodedMessage);
   rpc StreamAudioFrames(StreamAudioFramesRequest) returns (stream AudioFrame);
   rpc StreamIqFrames(StreamIqFramesRequest) returns (stream IqFrame);
+  rpc StreamRadarSnapshots(StreamRadarSnapshotsRequest) returns (stream RadarSnapshot);
 }

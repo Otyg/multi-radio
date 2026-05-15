@@ -34,6 +34,7 @@ class RadarMapWidget : public QWidget {
   void UpdateTargetLabel(const QString& id, const QString& label);
   void RemoveTarget(const QString& id);
   void ClearTargets();
+  void ApplySnapshot(const QVector<RadarTargetUpdate>& targets, const QStringList& removed_ids);
   void SetSelectedTarget(const QString& id);
 
   QString SelectedTarget() const { return selected_target_id_; }

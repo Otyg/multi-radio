@@ -1,5 +1,6 @@
 #include <grpcpp/grpcpp.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
@@ -7,6 +8,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "multi_radio/auth.hpp"
 #include "multi_radio/hardware_config.hpp"
@@ -452,8 +454,8 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
 
 class TelemetryServiceImpl final : public v1::TelemetryService::Service {
  public:
-  TelemetryServiceImpl(EventBus* event_bus, std::string auth_token)
-      : event_bus_(event_bus), auth_token_(std::move(auth_token)) {}
+  TelemetryServiceImpl(EventBus* event_bus, TargetTracker* target_tracker, std::string auth_token)
+      : event_bus_(event_bus), target_tracker_(target_tracker), auth_token_(std::move(auth_token)) {}
 
   grpc::Status StreamReceiverEvents(grpc::ServerContext* context,
                                     const v1::StreamReceiverEventsRequest* request,
@@ -605,8 +607,52 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status StreamRadarSnapshots(grpc::ServerContext* context,
+                                    const v1::StreamRadarSnapshotsRequest* request,
+                                    grpc::ServerWriter<v1::RadarSnapshot>* writer) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_)) {
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    }
+    if (!target_tracker_) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "target tracker not available");
+    }
+
+    while (!context->IsCancelled()) {
+      // Wait 2 s between snapshots to avoid flooding the client.
+      for (int i = 0; i < 20 && !context->IsCancelled(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      if (context->IsCancelled()) break;
+
+      const auto snap = target_tracker_->TakeSnapshot();
+
+      v1::RadarSnapshot response;
+      response.set_snapshot_ms(snap.snapshot_ms);
+      for (const auto& t : snap.targets) {
+        auto* pt = response.add_targets();
+        pt->set_id(t.id);
+        pt->set_label(t.label);
+        pt->set_kind(t.kind);
+        pt->set_lat(t.lat);
+        pt->set_lon(t.lon);
+        pt->set_sog_knots(t.sog_knots);
+        pt->set_cog_degrees(t.cog_degrees);
+        pt->set_has_altitude(t.has_altitude);
+        pt->set_altitude_ft(t.altitude_ft);
+        pt->set_last_seen_ms(t.last_seen_ms);
+      }
+      for (const auto& rid : snap.removed_ids) {
+        response.add_removed_ids(rid);
+      }
+
+      if (!writer->Write(response)) break;
+    }
+    return grpc::Status::OK;
+  }
+
  private:
   EventBus* event_bus_;
+  TargetTracker* target_tracker_;
   std::string auth_token_;
 };
 
@@ -617,10 +663,10 @@ class ServerApp::Impl {
   explicit Impl(std::string auth_token) : auth_token_(std::move(auth_token)) {}
 
   bool Run(ReceiverManager* receiver_manager, PluginHost* plugin_host, EventBus* event_bus,
-           const std::string& bind_address, std::string* error) {
+           TargetTracker* target_tracker, const std::string& bind_address, std::string* error) {
     radio_control_service_ =
         std::make_unique<RadioControlServiceImpl>(receiver_manager, plugin_host, auth_token_);
-    telemetry_service_ = std::make_unique<TelemetryServiceImpl>(event_bus, auth_token_);
+    telemetry_service_ = std::make_unique<TelemetryServiceImpl>(event_bus, target_tracker, auth_token_);
 
     grpc::ServerBuilder builder;
     builder.AddListeningPort(bind_address, grpc::InsecureServerCredentials());
@@ -658,7 +704,8 @@ ServerApp::ServerApp(ServerConfig config)
       logger_(std::make_shared<JsonlLogger>(config_.log_dir, "radio_events", config_.log_max_bytes,
                                             config_.log_max_files)),
       plugin_host_(std::make_shared<PluginHost>(config_.plugin_dir, config_.log_dir / "plugin_state")),
-      name_db_(std::make_shared<NameDatabase>(config_.log_dir / "name_db.json")) {}
+      name_db_(std::make_shared<NameDatabase>(config_.log_dir / "name_db.json")),
+      target_tracker_(std::make_shared<TargetTracker>()) {}
 
 ServerApp::~ServerApp() { Shutdown(); }
 
@@ -667,7 +714,8 @@ bool ServerApp::Init(std::string* error) {
   plugin_host_->LoadAll(&plugin_error);
 
   std::unique_ptr<IRadioDeviceFactory> factory = CreateRtlSdrFactory();
-  receiver_manager_ = std::make_unique<ReceiverManager>(std::move(factory), event_bus_, plugin_host_, logger_, name_db_);
+  receiver_manager_ = std::make_unique<ReceiverManager>(
+      std::move(factory), event_bus_, plugin_host_, logger_, name_db_, target_tracker_);
   impl_ = std::make_unique<Impl>(config_.auth_token);
   if (error != nullptr) {
     error->clear();
@@ -682,7 +730,8 @@ bool ServerApp::Run(std::string* error) {
     }
     return false;
   }
-  return impl_->Run(receiver_manager_.get(), plugin_host_.get(), event_bus_.get(), config_.bind_address, error);
+  return impl_->Run(receiver_manager_.get(), plugin_host_.get(), event_bus_.get(),
+                    target_tracker_.get(), config_.bind_address, error);
 }
 
 void ServerApp::Shutdown() {

@@ -26,11 +26,13 @@ ReceiverManager::ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory,
                                  std::shared_ptr<EventBus> event_bus,
                                  std::shared_ptr<PluginHost> plugin_host,
                                  std::shared_ptr<JsonlLogger> logger,
-                                 std::shared_ptr<NameDatabase> name_db)
+                                 std::shared_ptr<NameDatabase> name_db,
+                                 std::shared_ptr<TargetTracker> target_tracker)
     : event_bus_(std::move(event_bus)),
       plugin_host_(std::move(plugin_host)),
       logger_(std::move(logger)),
-      name_db_(std::move(name_db)) {
+      name_db_(std::move(name_db)),
+      target_tracker_(std::move(target_tracker)) {
   auto descriptors = BuildApiOnlyDescriptors(factory.get());
   workers_.reserve(descriptors.size());
   for (const auto& descriptor : descriptors) {
@@ -40,7 +42,7 @@ ReceiverManager::ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory,
     }
     workers_.push_back(std::make_unique<ReceiverWorker>(
         descriptor.receiver_id, descriptor.serial, std::move(device),
-        event_bus_, plugin_host_, logger_, name_db_));
+        event_bus_, plugin_host_, logger_, name_db_, target_tracker_));
   }
 }
 

@@ -179,10 +179,12 @@ void GrpcClient::StartStreaming() {
 
   audio_stream_supported_ = true;
   iq_stream_supported_ = true;
+  qRegisterMetaType<QVector<RadarTargetUpdate>>("QVector<multi_radio::RadarTargetUpdate>");
   events_thread_ = std::thread([this]() { EventsLoop(); });
   messages_thread_ = std::thread([this]() { MessagesLoop(); });
   audio_thread_ = std::thread([this]() { AudioLoop(); });
   iq_thread_ = std::thread([this]() { IqLoop(); });
+  radar_thread_ = std::thread([this]() { RadarSnapshotLoop(); });
 }
 
 void GrpcClient::StopStreaming() {
@@ -202,6 +204,9 @@ void GrpcClient::StopStreaming() {
   }
   if (iq_thread_.joinable()) {
     iq_thread_.join();
+  }
+  if (radar_thread_.joinable()) {
+    radar_thread_.join();
   }
 }
 
@@ -313,6 +318,48 @@ void GrpcClient::IqLoop() {
       }
       emit StreamError(QString::fromStdString("IQ stream error: " + status.error_message()));
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+  }
+}
+
+void GrpcClient::RadarSnapshotLoop() {
+  while (streaming_.load()) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    v1::StreamRadarSnapshotsRequest request;
+    request.set_include_all_receivers(true);
+
+    auto reader = telemetry_client_->StreamRadarSnapshots(&context, request);
+    v1::RadarSnapshot snap;
+    while (streaming_.load() && reader->Read(&snap)) {
+      QVector<RadarTargetUpdate> targets;
+      targets.reserve(snap.targets_size());
+      for (const auto& t : snap.targets()) {
+        RadarTargetUpdate u;
+        u.id    = QString::fromStdString(t.id());
+        u.label = QString::fromStdString(t.label());
+        u.kind  = (t.kind() == "AIR") ? RadarTargetKind::kAircraft
+                : (t.kind() == "SEA") ? RadarTargetKind::kVessel
+                                      : RadarTargetKind::kUnknown;
+        u.lat       = t.lat();
+        u.lon       = t.lon();
+        u.sog       = t.sog_knots();
+        u.cog       = t.cog_degrees();
+        u.altitude  = t.has_altitude() ? t.altitude_ft()
+                                       : std::numeric_limits<double>::quiet_NaN();
+        u.unix_ms   = t.last_seen_ms();
+        targets.append(u);
+      }
+      QStringList removed;
+      for (const auto& rid : snap.removed_ids())
+        removed.append(QString::fromStdString(rid));
+
+      emit RadarSnapshotReceived(targets, removed, snap.snapshot_ms());
+    }
+
+    grpc::Status status = reader->Finish();
+    if (!status.ok() && streaming_.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
   }
 }

@@ -17,17 +17,13 @@ class VisibleObjectsWidget : public QWidget {
  public:
   explicit VisibleObjectsWidget(QWidget* parent = nullptr);
 
-  void UpsertTarget(const RadarTargetUpdate& update);
-  void UpdateTargetLabel(const QString& id, const QString& label);
-  void UpdateTargetAltitude(const QString& id, double altitude_ft);
-  void UpdateTargetSogCog(const QString& id, double sog_kn, double cog_deg);
-  void RemoveStale(std::uint64_t now_ms, std::uint64_t stale_after_ms);
+  // Replace the full target list from a backend snapshot.
+  void ApplySnapshot(const QVector<RadarTargetUpdate>& targets, const QStringList& removed_ids);
   void SetSelectedTarget(const QString& id);
   void SetHideLowSpeed(bool enabled) { hide_low_speed_ = enabled; RefreshTable(); }
 
  signals:
   void TargetActivated(const QString& id);
-  void TargetRemoved(const QString& id);
 
  private:
   struct RowState {

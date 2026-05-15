@@ -13,6 +13,7 @@
 #include "multi_radio/jsonl_logger.hpp"
 #include "multi_radio/name_database.hpp"
 #include "multi_radio/plugin_host.hpp"
+#include "multi_radio/target_tracker.hpp"
 #include "multi_radio/radio_device.hpp"
 #include "multi_radio/types.hpp"
 
@@ -22,7 +23,8 @@ class ReceiverWorker {
  public:
   ReceiverWorker(uint32_t receiver_id, std::string serial, std::unique_ptr<IRadioDevice> device,
                  std::shared_ptr<EventBus> event_bus, std::shared_ptr<PluginHost> plugin_host,
-                 std::shared_ptr<JsonlLogger> logger, std::shared_ptr<NameDatabase> name_db);
+                 std::shared_ptr<JsonlLogger> logger, std::shared_ptr<NameDatabase> name_db,
+                 std::shared_ptr<TargetTracker> target_tracker);
   ~ReceiverWorker();
 
   bool Start(std::string* error);
@@ -48,6 +50,7 @@ class ReceiverWorker {
   std::shared_ptr<EventBus> event_bus_;
   std::shared_ptr<PluginHost> plugin_host_;
   std::shared_ptr<NameDatabase> name_db_;
+  std::shared_ptr<TargetTracker> target_tracker_;
   std::shared_ptr<JsonlLogger> logger_;
 
   mutable std::mutex mu_;

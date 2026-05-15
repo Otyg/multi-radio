@@ -90,6 +90,25 @@ void RadarMapWidget::SetFixedObjects(const std::vector<RadarFixedObject>& fixed)
   update();
 }
 
+void RadarMapWidget::ApplySnapshot(const QVector<RadarTargetUpdate>& targets,
+                                   const QStringList& removed_ids) {
+  for (const QString& rid : removed_ids)
+    targets_.erase(rid.toStdString());
+
+  for (const auto& upd : targets) {
+    if (upd.id.isEmpty()) continue;
+    if (!IsFinite(upd.lat) || !IsFinite(upd.lon)) continue;
+    const std::string key = upd.id.toStdString();
+    TargetState& state = targets_[key];
+    state.last = upd;
+    if (upd.unix_ms != 0) {
+      state.trail.push_back(TrailPoint{upd.lat, upd.lon, upd.unix_ms});
+      TrimTrails(upd.unix_ms);
+    }
+  }
+  update();
+}
+
 void RadarMapWidget::RemoveTarget(const QString& id) {
   if (id.isEmpty()) return;
   targets_.erase(id.toStdString());

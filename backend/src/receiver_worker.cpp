@@ -384,14 +384,16 @@ IqFrame BuildIqFrame(const IQSampleBlock& block, uint32_t receiver_id, double tu
 
 ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial, std::unique_ptr<IRadioDevice> device,
                                std::shared_ptr<EventBus> event_bus, std::shared_ptr<PluginHost> plugin_host,
-                               std::shared_ptr<JsonlLogger> logger, std::shared_ptr<NameDatabase> name_db)
+                               std::shared_ptr<JsonlLogger> logger, std::shared_ptr<NameDatabase> name_db,
+                               std::shared_ptr<TargetTracker> target_tracker)
     : receiver_id_(receiver_id),
       serial_(std::move(serial)),
       device_(std::move(device)),
       event_bus_(std::move(event_bus)),
       plugin_host_(std::move(plugin_host)),
       logger_(std::move(logger)),
-      name_db_(std::move(name_db)) {
+      name_db_(std::move(name_db)),
+      target_tracker_(std::move(target_tracker)) {
   mode_config_ = NormalizeModeConfig(mode_config_);
 }
 
@@ -1315,6 +1317,7 @@ void ReceiverWorker::ProcessLoop() {
               }
             }
 
+            if (target_tracker_) target_tracker_->Update(dm);
             event_bus_->PublishDecodedMessage(dm);
           });
     }

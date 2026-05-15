@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <limits>
 
+#include <QMetaType>
 #include <QString>
+#include <QVector>
 
 namespace multi_radio {
 
@@ -34,3 +36,5 @@ struct RadarFixedObject {
 };
 
 }  // namespace multi_radio
+
+Q_DECLARE_METATYPE(QVector<multi_radio::RadarTargetUpdate>)

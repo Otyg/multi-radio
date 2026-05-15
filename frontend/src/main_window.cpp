@@ -1831,10 +1831,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(visible_objects_widget_, &VisibleObjectsWidget::TargetActivated, this, [this](const QString& id) {
     if (radar_widget_ != nullptr) radar_widget_->SetSelectedTarget(id);
   });
-  connect(visible_objects_widget_, &VisibleObjectsWidget::TargetRemoved, this, [this](const QString& id) {
-    if (radar_widget_ != nullptr) radar_widget_->RemoveTarget(id);
-  });
-
   // Radar settings controls (persisted).
   {
     QSettings settings("multi-radio", "multi-radio-client");
@@ -2521,6 +2517,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(client_.get(), &GrpcClient::IqFrameReceived, this, &MainWindow::OnIqFrame,
           Qt::QueuedConnection);
   connect(client_.get(), &GrpcClient::StreamError, this, &MainWindow::OnStreamError,
+          Qt::QueuedConnection);
+  connect(client_.get(), &GrpcClient::RadarSnapshotReceived, this,
+          [this](const QVector<RadarTargetUpdate>& targets, const QStringList& removed_ids, quint64 /*ms*/) {
+            if (radar_widget_ != nullptr)
+              radar_widget_->ApplySnapshot(targets, removed_ids);
+            if (visible_objects_widget_ != nullptr)
+              visible_objects_widget_->ApplySnapshot(targets, removed_ids);
+          },
           Qt::QueuedConnection);
 
   fixed_bandwidth_last_auto_hz_ = DefaultBandwidthHzForModulation(FixedModulationFromCombo(fixed_modulation_combo_));
@@ -3515,63 +3519,6 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
               .arg(payload));
     }
     return;
-  }
-
-  // Live radar targets (AIS / ADS-B with position).
-  if (radar_widget_ != nullptr) {
-    double lat = 0.0;
-    double lon = 0.0;
-    const bool has_lat = ParseDoubleField(fields, "lat", &lat) || ParseDoubleField(fields, "latitude", &lat);
-    const bool has_lon = ParseDoubleField(fields, "lon", &lon) || ParseDoubleField(fields, "longitude", &lon);
-    if (has_lat && has_lon) {
-      RadarTargetUpdate t;
-      t.lat = lat;
-      t.lon = lon;
-      t.unix_ms = static_cast<std::uint64_t>(unix_ms);
-
-      if (plugin_type.startsWith("AIS_")) {
-        ParseDoubleField(fields, "sog", &t.sog);
-        ParseDoubleField(fields, "cog", &t.cog);
-        const QString mmsi = FieldString(fields, "mmsi");
-        t.id = mmsi.isEmpty() ? QString("AIS@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : mmsi;
-        t.kind = RadarTargetKind::kVessel;
-        t.label = LabelFromFields(fields);
-        if (t.label.isEmpty()) t.label = t.id;
-      } else if (plugin_type == "ADSB") {
-        ParseDoubleField(fields, "gs", &t.sog);
-        ParseDoubleField(fields, "heading", &t.cog);
-        if (!ParseDoubleField(fields, "alt_baro", &t.altitude))
-          ParseDoubleField(fields, "alt_geom", &t.altitude);
-        const QString icao = FieldString(fields, "icao");
-        t.id = icao.isEmpty() ? QString("ADSB@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : icao;
-        t.kind = RadarTargetKind::kAircraft;
-        t.label = LabelFromFields(fields);
-        if (t.label.isEmpty()) t.label = t.id;
-      } else {
-        t.id = QString("%1@%2").arg(plugin_type).arg(receiver_id);
-        t.kind = RadarTargetKind::kUnknown;
-        t.label = t.id;
-      }
-
-      radar_widget_->UpsertTarget(t);
-      if (visible_objects_widget_ != nullptr) visible_objects_widget_->UpsertTarget(t);
-    }
-
-    // For ADS-B messages without decoded position, patch existing list entries
-    // with altitude and/or velocity data so the table stays up to date.
-    // (Position and velocity arrive in separate DF=17/18 message types.)
-    if (plugin_type == "ADSB" && !(has_lat && has_lon) && visible_objects_widget_ != nullptr) {
-      const QString icao = FieldString(fields, "icao");
-      if (!icao.isEmpty()) {
-        double alt = std::numeric_limits<double>::quiet_NaN();
-        if (ParseDoubleField(fields, "alt_baro", &alt) || ParseDoubleField(fields, "alt_geom", &alt))
-          visible_objects_widget_->UpdateTargetAltitude(icao, alt);
-
-        double sog = 0.0, cog = 0.0;
-        if (ParseDoubleField(fields, "gs", &sog) && ParseDoubleField(fields, "heading", &cog))
-          visible_objects_widget_->UpdateTargetSogCog(icao, sog, cog);
-      }
-    }
   }
 
   // ADS-B / Mode S frame
