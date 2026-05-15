@@ -3536,20 +3536,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       if (!mmsi.isEmpty()) {
         const QString label = PreferNameOrCsOrAlias(fields, mmsi);
         if (!label.isEmpty()) {
-          SaveNameAlias(mmsi, label);
+          pending_labels_.insert(mmsi, label);
           radar_widget_->UpdateTargetLabel(mmsi, label);
-          if (visible_objects_widget_ != nullptr) {
+          if (visible_objects_widget_ != nullptr)
             visible_objects_widget_->UpdateTargetLabel(mmsi, label);
-            // Ensure the table reflects newly learned names even before we have a position fix.
-            RadarTargetUpdate stub;
-            stub.id = mmsi;
-            stub.kind = RadarTargetKind::kVessel;
-            stub.label = label;
-            stub.lat = std::numeric_limits<double>::quiet_NaN();
-            stub.lon = std::numeric_limits<double>::quiet_NaN();
-            stub.unix_ms = static_cast<std::uint64_t>(unix_ms);
-            visible_objects_widget_->UpsertTarget(stub);
-          }
         }
       }
     } else if (plugin_type == "ADSB") {
@@ -3557,19 +3547,10 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       if (!icao.isEmpty()) {
         const QString label = PreferNameOrCsOrAlias(fields, icao);
         if (!label.isEmpty()) {
-          SaveNameAlias(icao, label);
+          pending_labels_.insert(icao, label);
           radar_widget_->UpdateTargetLabel(icao, label);
-          if (visible_objects_widget_ != nullptr) {
+          if (visible_objects_widget_ != nullptr)
             visible_objects_widget_->UpdateTargetLabel(icao, label);
-            RadarTargetUpdate stub;
-            stub.id = icao;
-            stub.kind = RadarTargetKind::kAircraft;
-            stub.label = label;
-            stub.lat = std::numeric_limits<double>::quiet_NaN();
-            stub.lon = std::numeric_limits<double>::quiet_NaN();
-            stub.unix_ms = static_cast<std::uint64_t>(unix_ms);
-            visible_objects_widget_->UpsertTarget(stub);
-          }
         }
       }
     }
@@ -3591,7 +3572,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
         t.id = mmsi.isEmpty() ? QString("AIS@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : mmsi;
         t.kind = RadarTargetKind::kVessel;
         t.label = PreferNameOrCsOrAlias(fields, t.id);
-        if (!t.label.isEmpty()) SaveNameAlias(t.id, t.label);
+        if (t.label.isEmpty()) t.label = pending_labels_.value(t.id);
+        if (!t.label.isEmpty()) { SaveNameAlias(t.id, t.label); pending_labels_.remove(t.id); }
         if (t.label.isEmpty()) t.label = t.id;
       } else if (plugin_type == "ADSB") {
         ParseDoubleField(fields, "gs", &t.sog);
@@ -3602,7 +3584,8 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
         t.id = icao.isEmpty() ? QString("ADSB@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : icao;
         t.kind = RadarTargetKind::kAircraft;
         t.label = PreferNameOrCsOrAlias(fields, t.id);
-        if (!t.label.isEmpty()) SaveNameAlias(t.id, t.label);
+        if (t.label.isEmpty()) t.label = pending_labels_.value(t.id);
+        if (!t.label.isEmpty()) { SaveNameAlias(t.id, t.label); pending_labels_.remove(t.id); }
         if (t.label.isEmpty()) t.label = t.id;
       } else {
         t.id = QString("%1@%2").arg(plugin_type).arg(receiver_id);

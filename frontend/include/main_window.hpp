@@ -212,6 +212,7 @@ class MainWindow : public QMainWindow {
   RadarMapWidget* radar_widget_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
+  QMap<QString, QString> pending_labels_;  // id → label, session-only; persisted only on position confirm
   std::vector<ScanListChannelConfig> scan_list_channels_;
   std::vector<QPushButton*> scan_list_channel_buttons_;
   QGridLayout* scan_list_grid_layout_ = nullptr;
