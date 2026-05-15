@@ -2,11 +2,13 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "multi_radio/track_database.hpp"
 #include "multi_radio/types.hpp"
 
 namespace multi_radio {
@@ -38,7 +40,8 @@ class TargetTracker {
   // Aircraft stop transmitting immediately when they land; 60 s is safe.
   // Vessels use infrequent AIS intervals (anchored: every 3–6 min); 10 min avoids blinking.
   explicit TargetTracker(uint64_t air_stale_ms = 60000,
-                         uint64_t sea_stale_ms = 600000);
+                         uint64_t sea_stale_ms = 600000,
+                         std::shared_ptr<TrackDatabase> db = nullptr);
 
   // Merge a decoded message into the tracked state.
   void Update(const DecodedMessage& msg);
@@ -56,6 +59,7 @@ class TargetTracker {
   mutable std::mutex mu_;
   uint64_t air_stale_ms_;
   uint64_t sea_stale_ms_;
+  std::shared_ptr<TrackDatabase> db_;
   std::unordered_map<std::string, TrackedTarget> entries_;
   std::vector<std::string> pending_removed_;
 };

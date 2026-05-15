@@ -704,8 +704,8 @@ ServerApp::ServerApp(ServerConfig config)
       logger_(std::make_shared<JsonlLogger>(config_.log_dir, "radio_events", config_.log_max_bytes,
                                             config_.log_max_files)),
       plugin_host_(std::make_shared<PluginHost>(config_.plugin_dir, config_.log_dir / "plugin_state")),
-      name_db_(std::make_shared<NameDatabase>(config_.log_dir / "name_db.json")),
-      target_tracker_(std::make_shared<TargetTracker>()) {}
+      track_db_(std::make_shared<TrackDatabase>(config_.log_dir / "track.db")),
+      target_tracker_(std::make_shared<TargetTracker>(60000, 600000, track_db_)) {}
 
 ServerApp::~ServerApp() { Shutdown(); }
 
@@ -715,7 +715,7 @@ bool ServerApp::Init(std::string* error) {
 
   std::unique_ptr<IRadioDeviceFactory> factory = CreateRtlSdrFactory();
   receiver_manager_ = std::make_unique<ReceiverManager>(
-      std::move(factory), event_bus_, plugin_host_, logger_, name_db_, target_tracker_);
+      std::move(factory), event_bus_, plugin_host_, logger_, track_db_, target_tracker_);
   impl_ = std::make_unique<Impl>(config_.auth_token);
   if (error != nullptr) {
     error->clear();

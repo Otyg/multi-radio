@@ -16,8 +16,9 @@ uint64_t NowMs() {
 
 }  // namespace
 
-TargetTracker::TargetTracker(uint64_t air_stale_ms, uint64_t sea_stale_ms)
-    : air_stale_ms_(air_stale_ms), sea_stale_ms_(sea_stale_ms) {}
+TargetTracker::TargetTracker(uint64_t air_stale_ms, uint64_t sea_stale_ms,
+                             std::shared_ptr<TrackDatabase> db)
+    : air_stale_ms_(air_stale_ms), sea_stale_ms_(sea_stale_ms), db_(std::move(db)) {}
 
 double TargetTracker::ParseDouble(const std::string& s) {
   if (s.empty()) return std::numeric_limits<double>::quiet_NaN();
@@ -93,6 +94,29 @@ void TargetTracker::Update(const DecodedMessage& msg) {
   const double alt_geom = Field(msg, "alt_geom");
   if (std::isfinite(alt_baro)) { e.has_altitude = true; e.altitude_ft = alt_baro; }
   else if (std::isfinite(alt_geom)) { e.has_altitude = true; e.altitude_ft = alt_geom; }
+
+  // --- Persist to TrackDatabase (outside the lock since db_ has its own mutex) ---
+  if (db_) {
+    const std::string& cs_field   = FieldStr(msg, "callsign");
+    const std::string& name_field = FieldStr(msg, "name");
+    const std::string& call_field = FieldStr(msg, "call_sign");
+    const std::string db_name  = !name_field.empty() ? name_field : "";
+    const std::string db_cs    = !cs_field.empty()   ? cs_field
+                                : !call_field.empty() ? call_field : "";
+    if (!db_name.empty() || !db_cs.empty())
+      db_->UpsertEntity(key, kind, db_name, db_cs, e.last_seen_ms);
+
+    if (std::isfinite(lat) && std::isfinite(lon)) {
+      const std::optional<double> alt = e.has_altitude
+          ? std::optional<double>(e.altitude_ft) : std::nullopt;
+      const std::optional<double> spd = e.sog_knots > 0.0
+          ? std::optional<double>(e.sog_knots) : std::nullopt;
+      const std::optional<double> crs = std::isfinite(e.cog_degrees)
+          ? std::optional<double>(e.cog_degrees) : std::nullopt;
+      const std::string src = (kind == "AIR") ? "ADSB" : "AIS";
+      db_->RecordPosition(key, e.last_seen_ms, lat, lon, alt, spd, crs, src);
+    }
+  }
 }
 
 RadarSnapshot TargetTracker::TakeSnapshot() {

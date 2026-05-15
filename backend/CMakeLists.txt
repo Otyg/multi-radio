@@ -61,6 +61,7 @@ add_library(multi_radio_core
   src/event_bus.cpp
   src/jsonl_logger.cpp
   src/name_database.cpp
+  src/track_database.cpp
   src/target_tracker.cpp
   src/plugin_host.cpp
   src/fm_demod.cpp
@@ -83,6 +84,7 @@ target_link_libraries(multi_radio_core
     Threads::Threads
   PRIVATE
     ${CMAKE_DL_LIBS}
+    sqlite3
 )
 
 if(MR_RTLSDR_LINK_TARGET)

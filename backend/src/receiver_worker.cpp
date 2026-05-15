@@ -384,7 +384,7 @@ IqFrame BuildIqFrame(const IQSampleBlock& block, uint32_t receiver_id, double tu
 
 ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial, std::unique_ptr<IRadioDevice> device,
                                std::shared_ptr<EventBus> event_bus, std::shared_ptr<PluginHost> plugin_host,
-                               std::shared_ptr<JsonlLogger> logger, std::shared_ptr<NameDatabase> name_db,
+                               std::shared_ptr<JsonlLogger> logger, std::shared_ptr<TrackDatabase> track_db,
                                std::shared_ptr<TargetTracker> target_tracker)
     : receiver_id_(receiver_id),
       serial_(std::move(serial)),
@@ -392,7 +392,7 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial, std::un
       event_bus_(std::move(event_bus)),
       plugin_host_(std::move(plugin_host)),
       logger_(std::move(logger)),
-      name_db_(std::move(name_db)),
+      track_db_(std::move(track_db)),
       target_tracker_(std::move(target_tracker)) {
   mode_config_ = NormalizeModeConfig(mode_config_);
 }
@@ -1260,21 +1260,22 @@ void ReceiverWorker::ProcessLoop() {
             const auto& nf = msg.normalized_fields;
 
             // --- Name learning (runs for all messages, including filtered ones) ---
-            if (name_db_) {
+            if (track_db_) {
+              const uint64_t ts = msg.unix_ms;
               // ADS-B: icao → callsign
               const auto icao_it = nf.find("icao");
               const auto cs_it   = nf.find("callsign");
               if (icao_it != nf.end() && cs_it != nf.end() && !cs_it->second.empty())
-                name_db_->Learn(icao_it->second, cs_it->second);
+                track_db_->UpsertEntity(icao_it->second, "AIR", "", cs_it->second, ts);
               // AIS: mmsi → vessel name, fall back to call_sign
               const auto mmsi_it = nf.find("mmsi");
               if (mmsi_it != nf.end()) {
                 const auto name_it = nf.find("name");
                 const auto call_it = nf.find("call_sign");
-                if (name_it != nf.end() && !name_it->second.empty())
-                  name_db_->Learn(mmsi_it->second, name_it->second);
-                else if (call_it != nf.end() && !call_it->second.empty())
-                  name_db_->Learn(mmsi_it->second, call_it->second);
+                const std::string& n = (name_it != nf.end()) ? name_it->second : std::string{};
+                const std::string& c = (call_it != nf.end()) ? call_it->second : std::string{};
+                if (!n.empty() || !c.empty())
+                  track_db_->UpsertEntity(mmsi_it->second, "SEA", n, c, ts);
               }
             }
 
@@ -1300,18 +1301,18 @@ void ReceiverWorker::ProcessLoop() {
                                                        : entry.tuned_frequency_hz;
             dm.payload       = msg.payload;
             dm.normalized_fields = nf;
-            if (name_db_) {
+            if (track_db_) {
               // Inject known callsign into ADS-B messages that lack one.
               const auto icao_it = nf.find("icao");
               if (icao_it != nf.end() && !nf.count("callsign")) {
-                const std::string learned = name_db_->Lookup(icao_it->second);
+                const std::string learned = track_db_->LookupName(icao_it->second);
                 if (!learned.empty())
                   dm.normalized_fields["callsign"] = learned;
               }
               // Inject known name into AIS messages that lack one.
               const auto mmsi_it = nf.find("mmsi");
               if (mmsi_it != nf.end() && !nf.count("name")) {
-                const std::string learned = name_db_->Lookup(mmsi_it->second);
+                const std::string learned = track_db_->LookupName(mmsi_it->second);
                 if (!learned.empty())
                   dm.normalized_fields["name"] = learned;
               }
