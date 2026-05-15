@@ -1267,13 +1267,18 @@ void ReceiverWorker::ProcessLoop() {
               const auto cs_it   = nf.find("callsign");
               if (icao_it != nf.end() && cs_it != nf.end() && !cs_it->second.empty())
                 track_db_->UpsertEntity(icao_it->second, "AIR", "", cs_it->second, ts);
-              // AIS: mmsi → vessel name, fall back to call_sign
+              // AIS: mmsi → vessel name + callsign.
+              // The AIS decoder uses "callsign" (no underscore); "call_sign" is a legacy
+              // field name kept for compatibility with other decoders.
               const auto mmsi_it = nf.find("mmsi");
               if (mmsi_it != nf.end()) {
-                const auto name_it = nf.find("name");
-                const auto call_it = nf.find("call_sign");
-                const std::string& n = (name_it != nf.end()) ? name_it->second : std::string{};
-                const std::string& c = (call_it != nf.end()) ? call_it->second : std::string{};
+                const auto name_it  = nf.find("name");
+                const auto call_it  = nf.find("callsign");   // AIS decoder (Type 5, 24B)
+                const auto call2_it = nf.find("call_sign");  // legacy
+                const std::string& n = (name_it  != nf.end()) ? name_it->second  : std::string{};
+                const std::string  c = (call_it  != nf.end() && !call_it->second.empty())
+                                         ? call_it->second
+                                         : (call2_it != nf.end() ? call2_it->second : std::string{});
                 if (!n.empty() || !c.empty())
                   track_db_->UpsertEntity(mmsi_it->second, "SEA", n, c, ts);
               }
