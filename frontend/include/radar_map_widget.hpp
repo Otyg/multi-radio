@@ -29,6 +29,7 @@ class RadarMapWidget : public QWidget {
   void SetShowLabels(bool enabled);
   void SetShowCoastline(bool enabled);
   void SetCoastlineLoader(CoastlineLoader* loader);  // ownership stays with caller
+  void SetCoastlineStatus(const QString& text, bool is_error = false);
   void SetShowFixedNames(bool enabled);
   void SetHideLowSpeed(bool enabled);
   void SetTrailWindowSeconds(double seconds);
@@ -107,6 +108,8 @@ class RadarMapWidget : public QWidget {
   QPainterPath     coastline_path_;                // pre-projected to screen px
   bool             coastline_path_dirty_ = true;   // needs rebuild after view change
   QVector<QPolygonF> coastline_polygons_;          // lat/lon source data
+  QString            coastline_status_;            // shown as overlay, empty = hidden
+  bool               coastline_status_error_ = false;
 
   void TriggerCoastlineLoad();
   void RebuildCoastlinePath();

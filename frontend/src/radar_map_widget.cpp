@@ -94,9 +94,16 @@ void RadarMapWidget::TriggerCoastlineLoad() {
                                   center_lat_ + dlat, center_lon_ + dlon);
 }
 
+void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
+  coastline_status_       = text;
+  coastline_status_error_ = is_error;
+  update();
+}
+
 void RadarMapWidget::OnCoastlineReady(QVector<QPolygonF> polygons) {
   coastline_polygons_ = std::move(polygons);
   coastline_path_dirty_ = true;
+  coastline_status_.clear();
   update();
 }
 
@@ -388,6 +395,17 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   // Range label.
   painter.setPen(QPen(label_color_, 1));
   painter.drawText(QPointF(10.0, 18.0), QString("Range: %1 km").arg(range_km_, 0, 'f', 1));
+
+  // Coastline status overlay (bottom-left).
+  if (!coastline_status_.isEmpty()) {
+    const QColor status_color = coastline_status_error_
+        ? QColor("#ff6060") : QColor("#80d0ff");
+    painter.setPen(QPen(status_color, 1));
+    QFont sf = painter.font();
+    sf.setPixelSize(11);
+    painter.setFont(sf);
+    painter.drawText(QPointF(10.0, h - 10.0), coastline_status_);
+  }
 }
 
 void RadarMapWidget::mousePressEvent(QMouseEvent* event) {

@@ -1826,6 +1826,25 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     if (!coastline_user_.isEmpty())
       coastline_loader_->SetCredentials(coastline_user_, coastline_pass_);
     radar_widget_->SetCoastlineLoader(coastline_loader_);
+
+    connect(coastline_loader_, &CoastlineLoader::FetchStarted, this, [this]() {
+      if (radar_widget_) radar_widget_->SetCoastlineStatus("Hämtar kustlinjer\xe2\x80\xa6");
+      AppendLog("[Kustlinje] Hämtar tiles från Lantmäteriet\xe2\x80\xa6");
+    });
+    connect(coastline_loader_, &CoastlineLoader::FetchFailed, this,
+            [this](const QString& error) {
+      const bool is_auth = error.contains("401") || error.contains("403")
+                        || error.contains("Unauthorized") || error.contains("Forbidden");
+      const QString msg = is_auth
+          ? "Kustlinje: autentiseringsfel \xe2\x80\x93 kontrollera coastline_user/pass i client.ini"
+          : QString("Kustlinje: fel \xe2\x80\x93 %1").arg(error);
+      if (radar_widget_) radar_widget_->SetCoastlineStatus(msg, /*is_error=*/true);
+      AppendLog("[Kustlinje] " + msg);
+    });
+    connect(coastline_loader_, &CoastlineLoader::CoastlineReady, this,
+            [this](const QVector<QPolygonF>& polygons) {
+      AppendLog(QString("[Kustlinje] %1 polygoner laddade").arg(polygons.size()));
+    });
   }
 
   air_marine_splitter->addWidget(air_marine_controls);
