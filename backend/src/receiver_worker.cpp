@@ -179,6 +179,18 @@ bool IsFmModulation(Modulation modulation) {
   return modulation == Modulation::kNfm || modulation == Modulation::kWfm;
 }
 
+static std::string DemodNameForModulation(Modulation modulation) {
+  switch (modulation) {
+    case Modulation::kFsk:     return "fsk_demod";
+    case Modulation::kGmsk:    return "gmsk_demod";
+    case Modulation::kPpm:     return "ppm_demod";
+    case Modulation::kAdsbMod: return "adsb_demod";
+    case Modulation::kAisDual: return "ais_dual_demod";
+    case Modulation::kVdesAsm: return "vdes_asm_demod";
+    default:                   return "";  // FM/AM: no plugin demodulator
+  }
+}
+
 std::string FormatDouble(double value, int precision) {
   std::ostringstream out;
   out.setf(std::ios::fixed);
@@ -536,25 +548,23 @@ void ReceiverWorker::PushPluginConfig() {
   if (cfg.adsb_agc_target_level > 0.0f) {
     plugin_host_->SetParam("adsb_agc_target_level", std::to_string(cfg.adsb_agc_target_level));
   }
-  /* For AIS Dual the decoder chain is fixed:
-     NRZI-S -> AIS postproc (AIS channels) + ASM postproc (ASM channels).
-     Derive the effective modulation from fixed_modulation; fall back to
-     checking scan-list channels ONLY in SCAN_LIST mode so the scanner can carry
-     AIS Dual entries without requiring the user to also set the Fixed tab combo. */
-  Modulation effective_modulation = cfg.fixed_modulation;
+  /* The AIS Dual decoder chain (NRZI-S → ais_decoder + asm_decoder) must be configured
+     whenever any channel in the scan list uses AIS Dual, regardless of which channel
+     runs first.  The per-channel demodulator is switched in ProcessLoop on each channel
+     transition, so PushPluginConfig only needs to set the initial demodulator and ensure
+     the decoder chain is ready for whichever channel type fires first. */
   const bool is_scan_list_mode = (current_mode == RadioMode::kScanList);
-  if (is_scan_list_mode && effective_modulation != Modulation::kAisDual) {
+  bool has_ais_dual = (cfg.fixed_modulation == Modulation::kAisDual);
+  if (is_scan_list_mode && !has_ais_dual) {
     for (const auto& ch : cfg.scan_list_channels) {
-      if (ch.modulation == Modulation::kAisDual) {
-        effective_modulation = Modulation::kAisDual;
-        const char* debug_env = std::getenv("MR_PLUGIN_DEBUG");
-        if (debug_env && (debug_env[0] != '0')) {
-          std::fprintf(stderr, "[receiver_worker] Switched effective_modulation to AIS Dual from scan-list (mode=%d)\n",
-                       static_cast<int>(current_mode));
-        }
-        break;
-      }
+      if (ch.modulation == Modulation::kAisDual) { has_ais_dual = true; break; }
     }
+  }
+  // Initial effective modulation: for scan lists use channel[0] so the correct
+  // demodulator is loaded immediately (ProcessLoop overwrites on every transition).
+  Modulation effective_modulation = cfg.fixed_modulation;
+  if (is_scan_list_mode && !cfg.scan_list_channels.empty()) {
+    effective_modulation = cfg.scan_list_channels[0].modulation;
   }
 
   const bool use_vdes_asm_sketch =
@@ -565,7 +575,7 @@ void ReceiverWorker::PushPluginConfig() {
       (effective_modulation != Modulation::kAisDual) &&
       (cfg.gmsk_postprocessor == "ais_decoder");
 
-  if (effective_modulation == Modulation::kAisDual) {
+  if (has_ais_dual) {
     plugin_host_->SetActiveDecoder("nrzi_decoder");
     plugin_host_->SetParam("invert", "1");  /* AIS/HDLC: NRZ-S, transition=0 */
     plugin_host_->SetActivePostprocessor("ais_decoder");
@@ -594,17 +604,11 @@ void ReceiverWorker::PushPluginConfig() {
     plugin_host_->SetActiveAsmPostprocessor(use_ais_msg8_handoff ? "asm_decoder" : "");
   }
 
-  std::string demod_name;
-  if (effective_modulation == Modulation::kFsk)     demod_name = "fsk_demod";
-  if (effective_modulation == Modulation::kGmsk)    demod_name = "gmsk_demod";
-  if (effective_modulation == Modulation::kPpm)     demod_name = "ppm_demod";
-  if (effective_modulation == Modulation::kAdsbMod) demod_name = "adsb_demod";
-  if (effective_modulation == Modulation::kAisDual) demod_name = "ais_dual_demod";
-  if (effective_modulation == Modulation::kVdesAsm ||
-      (effective_modulation != Modulation::kAisDual && use_vdes_asm_sketch)) {
+  std::string demod_name = DemodNameForModulation(effective_modulation);
+  if (use_vdes_asm_sketch && effective_modulation != Modulation::kAisDual)
     demod_name = "vdes_asm_demod";
-  }
   plugin_host_->SetActiveDemodulator(demod_name);
+  ++plugin_config_generation_;
   std::ostringstream plugin_cfg_msg;
   plugin_cfg_msg << "PLUGIN_CFG demod="
                  << (demod_name.empty() ? "(none/FM)" : demod_name)
@@ -1110,6 +1114,8 @@ void ReceiverWorker::ProcessLoop() {
   };
 
   int last_processed_channel_idx = -1;
+  Modulation last_demod_modulation = static_cast<Modulation>(-1);  // sentinel: no demod set yet
+  int last_plugin_config_gen = -1;
 
   while (running_.load()) {
     IqQueueEntry entry;
@@ -1224,6 +1230,18 @@ void ReceiverWorker::ProcessLoop() {
       iq_sample_index += block_samples;
     }
 
+
+    // Per-channel demodulator switching: switch the active plugin demodulator whenever
+    // the channel's modulation changes OR PushPluginConfig has run since we last set it
+    // (PushPluginConfig may have reset it to a different initial value).
+    if (plugin_host_ != nullptr) {
+      const int cur_gen = plugin_config_generation_.load();
+      if (entry.modulation != last_demod_modulation || cur_gen != last_plugin_config_gen) {
+        plugin_host_->SetActiveDemodulator(DemodNameForModulation(entry.modulation));
+        last_demod_modulation = entry.modulation;
+        last_plugin_config_gen = cur_gen;
+      }
+    }
 
     // Plugin IQ processing — runs on every block regardless of mode.
     if (plugin_host_ != nullptr && !entry.block.interleaved_iq.empty()) {
@@ -1537,95 +1555,99 @@ void ReceiverWorker::RunLoop() {
       last_effective_sample_rate_hz = effective_sample_rate_hz;
     }
     const size_t frame_samples = AudioFrameSamplesForRate(audio_sample_rate_hz);
-    if (frame_samples == 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      continue;
-    }
+    // Digital plugin modes produce no PCM; skip the audio output block but still run
+    // the scanner state machine below so channel advance continues to work.
+    const bool skip_pcm = (frame_samples == 0);
 
-    // Pre-buffering: wait until the ring buffer holds ~300ms of audio before starting output.
-    // Scanner mode bypasses this — it sends muted (zero) frames while squelch is closed,
-    // so there is no underrun risk and no need to accumulate a prefill.
-    if (!buffer_primed && audio_buffer_ != nullptr) {
-      if (mode == RadioMode::kScanList) {
-        buffer_primed = true;  // scanner: muted frames prevent underruns, no prefill needed
-      } else {
-        const size_t minimum_prefill =
-            static_cast<size_t>(static_cast<uint64_t>(audio_sample_rate_hz) * 300U / 1000U);
-        if (audio_buffer_->AvailableForRead() < minimum_prefill) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          continue;
+    if (!skip_pcm) {
+      // Pre-buffering: wait until the ring buffer holds ~300ms of audio before starting output.
+      // Scanner mode bypasses this — it sends muted (zero) frames while squelch is closed,
+      // so there is no underrun risk and no need to accumulate a prefill.
+      if (!buffer_primed && audio_buffer_ != nullptr) {
+        if (mode == RadioMode::kScanList) {
+          buffer_primed = true;  // scanner: muted frames prevent underruns, no prefill needed
+        } else {
+          const size_t minimum_prefill =
+              static_cast<size_t>(static_cast<uint64_t>(audio_sample_rate_hz) * 300U / 1000U);
+          if (audio_buffer_->AvailableForRead() < minimum_prefill) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+          }
+          buffer_primed = true;
+          PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
         }
-        buffer_primed = true;
-        PublishEvent(EventKind::kInfo, "Audio buffer primed, starting output stream", ch.frequency_hz);
       }
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (now > next_frame_at + std::chrono::milliseconds(200)) {
-      next_frame_at = now;
-    }
-    while (now >= next_frame_at) {
-      AudioFrame frame;
-      frame.unix_ms = UnixMillisNow();
-      frame.receiver_id = receiver_id_;
-      frame.sample_rate_hz = audio_sample_rate_hz;
-      frame.tuned_frequency_hz = ch.frequency_hz;
-      frame.sequence = audio_sequence++;
-      frame.sample_index = audio_sample_index;
-      frame.pcm_s16le.resize(frame_samples);
-      size_t frame_filled = 0;
+    if (!skip_pcm) {
+      if (now > next_frame_at + std::chrono::milliseconds(200)) {
+        next_frame_at = now;
+      }
+      while (now >= next_frame_at) {
+        AudioFrame frame;
+        frame.unix_ms = UnixMillisNow();
+        frame.receiver_id = receiver_id_;
+        frame.sample_rate_hz = audio_sample_rate_hz;
+        frame.tuned_frequency_hz = ch.frequency_hz;
+        frame.sequence = audio_sequence++;
+        frame.sample_index = audio_sample_index;
+        frame.pcm_s16le.resize(frame_samples);
+        size_t frame_filled = 0;
 
-      // Read from ring buffer (populated by IngestLoop)
-      // Implement adaptive dropout mitigation: if buffer is low, retry after a short sleep
-      // instead of immediately padding with zeros
-      size_t read_attempts = 0;
-      const size_t max_read_attempts = 10;
-      const size_t critical_level = frame_samples / 2;  // If buffer < 0.5 frames, it's critical
-      
-      while (frame_filled < frame_samples && read_attempts < max_read_attempts && audio_buffer_ != nullptr) {
-        size_t available = audio_buffer_->AvailableForRead();
-        size_t to_read = std::min(frame_samples - frame_filled, available);
-        
-        if (to_read > 0) {
-          frame_filled += audio_buffer_->Read(
-              frame.pcm_s16le.data() + frame_filled, 
-              to_read);
+        // Read from ring buffer (populated by IngestLoop)
+        // Implement adaptive dropout mitigation: if buffer is low, retry after a short sleep
+        // instead of immediately padding with zeros
+        size_t read_attempts = 0;
+        const size_t max_read_attempts = 10;
+        const size_t critical_level = frame_samples / 2;
+
+        while (frame_filled < frame_samples && read_attempts < max_read_attempts && audio_buffer_ != nullptr) {
+          size_t available = audio_buffer_->AvailableForRead();
+          size_t to_read = std::min(frame_samples - frame_filled, available);
+
+          if (to_read > 0) {
+            frame_filled += audio_buffer_->Read(
+                frame.pcm_s16le.data() + frame_filled,
+                to_read);
+          }
+
+          if (frame_filled < frame_samples && available < critical_level) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ++read_attempts;
+          } else {
+            break;
+          }
         }
-        
-        if (frame_filled < frame_samples && available < critical_level) {
-          // Buffer is critically low and we need more samples
-          // Give IngestLoop a chance to fill it
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          ++read_attempts;
+
+        if (frame_filled < frame_samples) {
+          for (size_t i = frame_filled; i < frame_samples; ++i) {
+            frame.pcm_s16le[i] = 0;
+          }
+          conceal_samples += static_cast<uint64_t>(frame_samples - frame_filled);
+        }
+        if (frame_filled == 0) {
+          ++demod_empty_blocks;
         } else {
-          break;  // Either we got enough or buffer is empty
+          ++demod_ok_blocks;
         }
-      }
 
-      if (frame_filled < frame_samples) {
-        for (size_t i = frame_filled; i < frame_samples; ++i) {
-          frame.pcm_s16le[i] = 0;
+        // Squelch audio gate: mute frame when scanner squelch is closed (non-monitor mode).
+        // The ring buffer is still drained above to prevent overflow; only output is silenced.
+        if (mode == RadioMode::kScanList && !config.scan_list_monitor_mode && scan_audio_muted) {
+          std::fill(frame.pcm_s16le.begin(), frame.pcm_s16le.end(), int16_t{0});
         }
-        conceal_samples += static_cast<uint64_t>(frame_samples - frame_filled);
-      }
-      if (frame_filled == 0) {
-        ++demod_empty_blocks;
-      } else {
-        ++demod_ok_blocks;
-      }
 
-      // Squelch audio gate: mute frame when scanner squelch is closed (non-monitor mode).
-      // The ring buffer is still drained above to prevent overflow; only output is silenced.
-      if (mode == RadioMode::kScanList && !config.scan_list_monitor_mode && scan_audio_muted) {
-        std::fill(frame.pcm_s16le.begin(), frame.pcm_s16le.end(), int16_t{0});
+        generated_samples += frame_filled;
+        published_samples += static_cast<uint64_t>(frame_samples);
+        ++published_frames;
+        audio_sample_index += static_cast<uint64_t>(frame_samples);
+        event_bus_->PublishAudioFrame(frame);
+        next_frame_at += frame_interval;
       }
-
-      generated_samples += frame_filled;
-      published_samples += static_cast<uint64_t>(frame_samples);
-      ++published_frames;
-      audio_sample_index += static_cast<uint64_t>(frame_samples);
-      event_bus_->PublishAudioFrame(frame);
-      next_frame_at += frame_interval;
+    } else {
+      // No PCM output for this modulation; pace the loop so we don't busy-spin.
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     // Scan list: check squelch and advance channel every 200ms.
