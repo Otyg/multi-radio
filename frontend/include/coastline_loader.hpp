@@ -33,7 +33,10 @@ class CoastlineLoader : public QObject {
   explicit CoastlineLoader(const QString& cache_path, QObject* parent = nullptr);
   ~CoastlineLoader() override;
 
-  void SetApiKey(const QString& key) { api_key_ = key; }
+  void SetCredentials(const QString& username, const QString& password) {
+    username_ = username;
+    password_ = password;
+  }
 
   // Request coastlines covering the given bbox (EPSG:4326).
   // Emits CoastlineReady() once all tiles are available.
@@ -61,7 +64,8 @@ class CoastlineLoader : public QObject {
 
   QNetworkAccessManager*         nam_ = nullptr;
   std::unique_ptr<CoastlineCache> cache_;
-  QString                        api_key_;
+  QString                        username_;
+  QString                        password_;
 
   // State for the current request batch.
   QVector<TileKey>                        requested_;

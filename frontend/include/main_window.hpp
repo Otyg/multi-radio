@@ -45,7 +45,9 @@ class MainWindow : public QMainWindow {
   Q_OBJECT
 
  public:
-  explicit MainWindow(std::string grpc_target, std::string token, QWidget* parent = nullptr);
+  explicit MainWindow(std::string grpc_target, std::string token,
+                      std::string coastline_user = {}, std::string coastline_pass = {},
+                      QWidget* parent = nullptr);
   ~MainWindow() override;
 
  protected:
@@ -213,6 +215,8 @@ class MainWindow : public QMainWindow {
   RadarMapWidget* radar_widget_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
   CoastlineLoader* coastline_loader_ = nullptr;
+  QString coastline_user_;
+  QString coastline_pass_;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
   std::vector<ScanListChannelConfig> scan_list_channels_;
   std::vector<QPushButton*> scan_list_channel_buttons_;

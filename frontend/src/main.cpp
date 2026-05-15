@@ -62,8 +62,12 @@ int main(int argc, char* argv[]) {
   const std::string token = ReadSettingOrFallback(
       settings, "auth_token", ReadSettingOrFallback(settings, "client/auth_token",
                                                     GetEnvOrDefault("MR_AUTH_TOKEN", "multi-radio-dev-token")));
+  const std::string coastline_user = ReadSettingOrFallback(
+      settings, "coastline_user", GetEnvOrDefault("MR_COASTLINE_USER", ""));
+  const std::string coastline_pass = ReadSettingOrFallback(
+      settings, "coastline_pass", GetEnvOrDefault("MR_COASTLINE_PASS", ""));
 
-  multi_radio::MainWindow window(target, token);
+  multi_radio::MainWindow window(target, token, coastline_user, coastline_pass);
   window.show();
 
   return app.exec();

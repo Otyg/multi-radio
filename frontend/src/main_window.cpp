@@ -1116,8 +1116,13 @@ QString LabelFromFields(const QVariantMap& fields) {
 
 }  // namespace
 
-MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* parent)
-    : QMainWindow(parent), client_(std::make_unique<GrpcClient>(std::move(grpc_target), std::move(token), this)) {
+MainWindow::MainWindow(std::string grpc_target, std::string token,
+                       std::string coastline_user, std::string coastline_pass,
+                       QWidget* parent)
+    : QMainWindow(parent),
+      client_(std::make_unique<GrpcClient>(std::move(grpc_target), std::move(token), this)),
+      coastline_user_(QString::fromStdString(std::move(coastline_user))),
+      coastline_pass_(QString::fromStdString(std::move(coastline_pass))) {
   setWindowTitle("Multi-Radio Client");
   resize(1300, 780);
 
@@ -1814,17 +1819,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
 
   {
-    QSettings s("multi-radio", "multi-radio-client");
-    s.beginGroup("coastline");
-    const QString api_key   = s.value("api_key", "").toString();
-    const QString cache_dir = s.value("cache_dir",
+    const QString cache_path =
         QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-            + "/coastline_cache.db").toString();
-    s.endGroup();
-
-    coastline_loader_ = new CoastlineLoader(cache_dir, this);
-    if (!api_key.isEmpty())
-      coastline_loader_->SetApiKey(api_key);
+            + "/coastline_cache.db";
+    coastline_loader_ = new CoastlineLoader(cache_path, this);
+    if (!coastline_user_.isEmpty())
+      coastline_loader_->SetCredentials(coastline_user_, coastline_pass_);
     radar_widget_->SetCoastlineLoader(coastline_loader_);
   }
 

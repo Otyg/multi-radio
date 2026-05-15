@@ -108,13 +108,16 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
                      .arg(lat_max, 0, 'f', 4));
   q.addQueryItem("limit",   QString::number(kLimit));
   q.addQueryItem("srsName", "EPSG:4326");
-  if (!api_key_.isEmpty())
-    q.addQueryItem("api_key", api_key_);
   url.setQuery(q);
 
   QNetworkRequest req(url);
   req.setHeader(QNetworkRequest::UserAgentHeader, "multi-radio/1.0");
   req.setRawHeader("Accept", "application/geo+json");
+  if (!username_.isEmpty()) {
+    const QByteArray credentials =
+        (username_ + ':' + password_).toUtf8().toBase64();
+    req.setRawHeader("Authorization", "Basic " + credentials);
+  }
 
   QNetworkReply* reply = nam_->get(req);
   reply_map_.insert(reply, tile);
