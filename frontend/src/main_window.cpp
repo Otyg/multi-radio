@@ -111,6 +111,18 @@ v1::Modulation ModulationFromText(const QString& text) {
   if (upper == "WFM") {
     return v1::MODULATION_WFM;
   }
+  if (upper == "FSK") {
+    return v1::MODULATION_FSK;
+  }
+  if (upper == "GMSK") {
+    return v1::MODULATION_GMSK;
+  }
+  if (upper == "PPM") {
+    return v1::MODULATION_PPM;
+  }
+  if (upper == "ADS-B" || upper == "ADSB") {
+    return v1::MODULATION_ADSB;
+  }
   if (upper == "AIS DUAL" || upper == "AIS_DUAL" || upper == "AISDUAL") {
     return v1::MODULATION_AIS_DUAL;
   }

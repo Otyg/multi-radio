@@ -146,7 +146,19 @@ ModeConfig NormalizeModeConfig(const ModeConfig& input) {
 }
 
 uint32_t AudioSampleRateForModulation(Modulation modulation) {
-  return modulation == Modulation::kWfm ? kAudioSampleRateHzWfm : kAudioSampleRateHzNfm;
+  switch (modulation) {
+    case Modulation::kWfm:
+      return kAudioSampleRateHzWfm;
+    case Modulation::kGmsk:
+    case Modulation::kFsk:
+    case Modulation::kPpm:
+    case Modulation::kAdsbMod:
+    case Modulation::kAisDual:
+    case Modulation::kVdesAsm:
+      return 0;  // no PCM output for digital plugin modes
+    default:
+      return kAudioSampleRateHzNfm;
+  }
 }
 
 const char* ModulationToken(Modulation modulation) {
@@ -702,10 +714,14 @@ void ReceiverWorker::IngestLoop() {
         (ch.modulation == Modulation::kGmsk || ch.modulation == Modulation::kFsk ||
          ch.modulation == Modulation::kPpm  || ch.modulation == Modulation::kAdsbMod ||
          ch.modulation == Modulation::kAisDual || ch.modulation == Modulation::kVdesAsm);
+    // adsb_demod (libmodes/dump1090) only accepts 2.3–2.5 Msps; lock to 2.4 Msps so that
+    // scan-list channels and explicit user overrides never feed the plugin an invalid rate.
     const uint32_t effective_sample_rate_hz =
-        (mode == RadioMode::kScanRange || is_digital_plugin_mode)
-            ? requested_sample_rate_hz
-            : std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
+        (ch.modulation == Modulation::kAdsbMod)
+            ? 2400000u
+            : (mode == RadioMode::kScanRange || is_digital_plugin_mode)
+                  ? requested_sample_rate_hz
+                  : std::min<uint32_t>(requested_sample_rate_hz, kWfmMaxRuntimeSampleRateHz);
 
     IQSampleBlock iq_block;
     bool have_iq = false;
@@ -1240,8 +1256,8 @@ void ReceiverWorker::ProcessLoop() {
       }
     }
 
-    // Rebuild post-demod audio filters if sample rate changed
-    if (entry.audio_sample_rate_hz != audio_filter_sr_hz) {
+    // Rebuild post-demod audio filters if sample rate changed (skip for digital plugin modes).
+    if (entry.audio_sample_rate_hz != 0 && entry.audio_sample_rate_hz != audio_filter_sr_hz) {
       rebuild_audio_filters(entry.audio_sample_rate_hz);
       rebuild_rnnoise(entry.audio_sample_rate_hz);
     }
@@ -1638,7 +1654,13 @@ void ReceiverWorker::RunLoop() {
 
       bool should_advance = false;
 
-      if (config.scan_list_monitor_mode) {
+      // ADS-B and AIS Dual are data demodulators with bursty/continuous signals;
+      // squelch gating would cause channels to be skipped or stuck. Force monitor-mode
+      // behaviour: always open, advance only when dwell expires.
+      const bool chan_squelch_bypass = (cur_chan.modulation == Modulation::kAdsbMod ||
+                                        cur_chan.modulation == Modulation::kAisDual);
+
+      if (config.scan_list_monitor_mode || chan_squelch_bypass) {
         // Monitor mode: advance on dwell only, audio always unmuted.
         scan_audio_muted = false;
         if (n > 1 && dwell_elapsed_ms >= static_cast<int64_t>(eff_dwell_ms)) {
