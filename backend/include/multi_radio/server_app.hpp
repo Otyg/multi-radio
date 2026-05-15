@@ -6,6 +6,7 @@
 
 #include "multi_radio/event_bus.hpp"
 #include "multi_radio/jsonl_logger.hpp"
+#include "multi_radio/name_database.hpp"
 #include "multi_radio/plugin_host.hpp"
 #include "multi_radio/radio_device.hpp"
 #include "multi_radio/receiver_manager.hpp"
@@ -34,6 +35,7 @@ class ServerApp {
   ServerConfig config_;
   std::shared_ptr<EventBus> event_bus_;
   std::shared_ptr<JsonlLogger> logger_;
+  std::shared_ptr<NameDatabase> name_db_;
   std::shared_ptr<PluginHost> plugin_host_;
   std::unique_ptr<ReceiverManager> receiver_manager_;
 

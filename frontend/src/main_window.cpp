@@ -1096,35 +1096,21 @@ void SaveFixedObjectsToSettings(const QString& json) {
   settings.endGroup();
 }
 
-QString LoadNameAlias(const QString& key) {
-  QSettings settings("multi-radio", "multi-radio-client");
-  settings.beginGroup("radar_names");
-  const QString v = settings.value(key, "").toString();
-  settings.endGroup();
-  return v;
-}
-
-void SaveNameAlias(const QString& key, const QString& value) {
-  QSettings settings("multi-radio", "multi-radio-client");
-  settings.beginGroup("radar_names");
-  settings.setValue(key, value);
-  settings.endGroup();
-}
-
 QString ActiveScanListSettingsGroup(const QTabWidget* mode_tabs) {
   if (mode_tabs == nullptr) return "scan_list";
   const int idx = mode_tabs->currentIndex();
   return (idx == kAirMarineModeTabIndex) ? "radar_scan_list" : "scan_list";
 }
 
-QString PreferNameOrCsOrAlias(const QVariantMap& fields, const QString& id) {
+// Return the best human-readable label from the message fields.
+// Backend now injects the known name/callsign into every radar-relevant message,
+// so no client-side alias store is needed.
+QString LabelFromFields(const QVariantMap& fields) {
   const QString name = FieldString(fields, "name").trimmed();
   if (!name.isEmpty()) return name;
-  const QString cs = FieldString(fields, "call_sign").trimmed();   // AIS
+  const QString cs = FieldString(fields, "call_sign").trimmed();
   if (!cs.isEmpty()) return cs;
-  const QString callsign = FieldString(fields, "callsign").trimmed();  // ADS-B
-  if (!callsign.isEmpty()) return callsign;
-  return LoadNameAlias(id).trimmed();
+  return FieldString(fields, "callsign").trimmed();
 }
 
 }  // namespace
@@ -3530,31 +3516,6 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
 
   // Live radar targets (AIS / ADS-B with position).
   if (radar_widget_ != nullptr) {
-    // Update cached labels even when a message doesn't carry position.
-    if (plugin_type.startsWith("AIS_")) {
-      const QString mmsi = FieldString(fields, "mmsi").trimmed();
-      if (!mmsi.isEmpty()) {
-        const QString label = PreferNameOrCsOrAlias(fields, mmsi);
-        if (!label.isEmpty()) {
-          pending_labels_.insert(mmsi, label);
-          radar_widget_->UpdateTargetLabel(mmsi, label);
-          if (visible_objects_widget_ != nullptr)
-            visible_objects_widget_->UpdateTargetLabel(mmsi, label);
-        }
-      }
-    } else if (plugin_type == "ADSB") {
-      const QString icao = FieldString(fields, "icao").trimmed();
-      if (!icao.isEmpty()) {
-        const QString label = PreferNameOrCsOrAlias(fields, icao);
-        if (!label.isEmpty()) {
-          pending_labels_.insert(icao, label);
-          radar_widget_->UpdateTargetLabel(icao, label);
-          if (visible_objects_widget_ != nullptr)
-            visible_objects_widget_->UpdateTargetLabel(icao, label);
-        }
-      }
-    }
-
     double lat = 0.0;
     double lon = 0.0;
     const bool has_lat = ParseDoubleField(fields, "lat", &lat) || ParseDoubleField(fields, "latitude", &lat);
@@ -3571,9 +3532,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
         const QString mmsi = FieldString(fields, "mmsi");
         t.id = mmsi.isEmpty() ? QString("AIS@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : mmsi;
         t.kind = RadarTargetKind::kVessel;
-        t.label = PreferNameOrCsOrAlias(fields, t.id);
-        if (t.label.isEmpty()) t.label = pending_labels_.value(t.id);
-        if (!t.label.isEmpty()) { SaveNameAlias(t.id, t.label); pending_labels_.remove(t.id); }
+        t.label = LabelFromFields(fields);
         if (t.label.isEmpty()) t.label = t.id;
       } else if (plugin_type == "ADSB") {
         ParseDoubleField(fields, "gs", &t.sog);
@@ -3583,9 +3542,7 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
         const QString icao = FieldString(fields, "icao");
         t.id = icao.isEmpty() ? QString("ADSB@%1,%2").arg(lat, 0, 'f', 5).arg(lon, 0, 'f', 5) : icao;
         t.kind = RadarTargetKind::kAircraft;
-        t.label = PreferNameOrCsOrAlias(fields, t.id);
-        if (t.label.isEmpty()) t.label = pending_labels_.value(t.id);
-        if (!t.label.isEmpty()) { SaveNameAlias(t.id, t.label); pending_labels_.remove(t.id); }
+        t.label = LabelFromFields(fields);
         if (t.label.isEmpty()) t.label = t.id;
       } else {
         t.id = QString("%1@%2").arg(plugin_type).arg(receiver_id);

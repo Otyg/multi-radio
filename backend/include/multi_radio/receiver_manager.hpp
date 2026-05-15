@@ -8,6 +8,7 @@
 
 #include "multi_radio/event_bus.hpp"
 #include "multi_radio/jsonl_logger.hpp"
+#include "multi_radio/name_database.hpp"
 #include "multi_radio/plugin_host.hpp"
 #include "multi_radio/radio_device.hpp"
 #include "multi_radio/receiver_worker.hpp"
@@ -18,7 +19,8 @@ namespace multi_radio {
 class ReceiverManager {
  public:
   ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory, std::shared_ptr<EventBus> event_bus,
-                  std::shared_ptr<PluginHost> plugin_host, std::shared_ptr<JsonlLogger> logger);
+                  std::shared_ptr<PluginHost> plugin_host, std::shared_ptr<JsonlLogger> logger,
+                  std::shared_ptr<NameDatabase> name_db);
 
   std::vector<ReceiverStatus> ListReceivers() const;
   bool GetReceiverStatus(uint32_t receiver_id, ReceiverStatus* status, std::string* error) const;
@@ -37,6 +39,7 @@ class ReceiverManager {
   std::shared_ptr<EventBus> event_bus_;
   std::shared_ptr<PluginHost> plugin_host_;
   std::shared_ptr<JsonlLogger> logger_;
+  std::shared_ptr<NameDatabase> name_db_;
 
   mutable std::mutex mu_;
   std::vector<std::unique_ptr<ReceiverWorker>> workers_;

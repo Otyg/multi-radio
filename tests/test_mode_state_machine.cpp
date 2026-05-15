@@ -80,7 +80,7 @@ int main() {
   auto plugins = std::make_shared<PluginHost>("/tmp/multi-radio-test-plugins");
 
   auto fake = std::make_unique<FakeDevice>();
-  ReceiverWorker worker(5, "SERIAL5", std::move(fake), bus, plugins, logger);
+  ReceiverWorker worker(5, "SERIAL5", std::move(fake), bus, plugins, logger, nullptr);
 
   std::string error;
   assert(worker.Start(&error));

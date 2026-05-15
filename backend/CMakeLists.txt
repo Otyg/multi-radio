@@ -60,6 +60,7 @@ add_library(multi_radio_core
   src/types.cpp
   src/event_bus.cpp
   src/jsonl_logger.cpp
+  src/name_database.cpp
   src/plugin_host.cpp
   src/fm_demod.cpp
   src/am_demod.cpp

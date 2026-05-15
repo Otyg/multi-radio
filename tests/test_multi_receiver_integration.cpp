@@ -111,7 +111,7 @@ int main() {
   auto plugins = std::make_shared<PluginHost>("/tmp/multi-radio-test-plugins");
   auto factory = std::make_unique<FakeFactory>();
 
-  ReceiverManager manager(std::move(factory), bus, plugins, logger);
+  ReceiverManager manager(std::move(factory), bus, plugins, logger, nullptr);
 
   auto receivers = manager.ListReceivers();
   assert(receivers.size() >= 2);

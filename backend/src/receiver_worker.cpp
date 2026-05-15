@@ -384,13 +384,14 @@ IqFrame BuildIqFrame(const IQSampleBlock& block, uint32_t receiver_id, double tu
 
 ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial, std::unique_ptr<IRadioDevice> device,
                                std::shared_ptr<EventBus> event_bus, std::shared_ptr<PluginHost> plugin_host,
-                               std::shared_ptr<JsonlLogger> logger)
+                               std::shared_ptr<JsonlLogger> logger, std::shared_ptr<NameDatabase> name_db)
     : receiver_id_(receiver_id),
       serial_(std::move(serial)),
       device_(std::move(device)),
       event_bus_(std::move(event_bus)),
       plugin_host_(std::move(plugin_host)),
-      logger_(std::move(logger)) {
+      logger_(std::move(logger)),
+      name_db_(std::move(name_db)) {
   mode_config_ = NormalizeModeConfig(mode_config_);
 }
 
@@ -1254,14 +1255,66 @@ void ReceiverWorker::ProcessLoop() {
       plugin_host_->ProcessIq(
           plugin_block,
           [this, &entry](const multi_radio::PluginMessage& msg) {
+            const auto& nf = msg.normalized_fields;
+
+            // --- Name learning (runs for all messages, including filtered ones) ---
+            if (name_db_) {
+              // ADS-B: icao → callsign
+              const auto icao_it = nf.find("icao");
+              const auto cs_it   = nf.find("callsign");
+              if (icao_it != nf.end() && cs_it != nf.end() && !cs_it->second.empty())
+                name_db_->Learn(icao_it->second, cs_it->second);
+              // AIS: mmsi → vessel name, fall back to call_sign
+              const auto mmsi_it = nf.find("mmsi");
+              if (mmsi_it != nf.end()) {
+                const auto name_it = nf.find("name");
+                const auto call_it = nf.find("call_sign");
+                if (name_it != nf.end() && !name_it->second.empty())
+                  name_db_->Learn(mmsi_it->second, name_it->second);
+                else if (call_it != nf.end() && !call_it->second.empty())
+                  name_db_->Learn(mmsi_it->second, call_it->second);
+              }
+            }
+
+            // --- Radar-relevance filter ---
+            // Only forward messages that carry something the radar can display.
+            const bool is_positional =
+                nf.count("lat") && nf.count("lon");
+            const bool has_speed =
+                nf.count("gs") || nf.count("sog") || nf.count("cog");
+            const bool has_altitude =
+                nf.count("alt_baro") || nf.count("alt_geom");
+            if (msg.signal_type == SignalType::kAdsb ||
+                msg.signal_type == SignalType::kAis) {
+              if (!is_positional && !has_speed && !has_altitude) return;
+            }
+
+            // --- Name injection ---
             DecodedMessage dm;
-            dm.unix_ms          = msg.unix_ms;
-            dm.receiver_id      = receiver_id_;
-            dm.signal_type      = msg.signal_type;
-            dm.frequency_hz     = msg.frequency_hz != 0.0 ? msg.frequency_hz
-                                                          : entry.tuned_frequency_hz;
-            dm.payload          = msg.payload;
-            dm.normalized_fields = msg.normalized_fields;
+            dm.unix_ms       = msg.unix_ms;
+            dm.receiver_id   = receiver_id_;
+            dm.signal_type   = msg.signal_type;
+            dm.frequency_hz  = msg.frequency_hz != 0.0 ? msg.frequency_hz
+                                                       : entry.tuned_frequency_hz;
+            dm.payload       = msg.payload;
+            dm.normalized_fields = nf;
+            if (name_db_) {
+              // Inject known callsign into ADS-B messages that lack one.
+              const auto icao_it = nf.find("icao");
+              if (icao_it != nf.end() && !nf.count("callsign")) {
+                const std::string learned = name_db_->Lookup(icao_it->second);
+                if (!learned.empty())
+                  dm.normalized_fields["callsign"] = learned;
+              }
+              // Inject known name into AIS messages that lack one.
+              const auto mmsi_it = nf.find("mmsi");
+              if (mmsi_it != nf.end() && !nf.count("name")) {
+                const std::string learned = name_db_->Lookup(mmsi_it->second);
+                if (!learned.empty())
+                  dm.normalized_fields["name"] = learned;
+              }
+            }
+
             event_bus_->PublishDecodedMessage(dm);
           });
     }
