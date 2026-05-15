@@ -16,7 +16,8 @@ uint64_t NowMs() {
 
 }  // namespace
 
-TargetTracker::TargetTracker(uint64_t stale_ms) : stale_ms_(stale_ms) {}
+TargetTracker::TargetTracker(uint64_t air_stale_ms, uint64_t sea_stale_ms)
+    : air_stale_ms_(air_stale_ms), sea_stale_ms_(sea_stale_ms) {}
 
 double TargetTracker::ParseDouble(const std::string& s) {
   if (s.empty()) return std::numeric_limits<double>::quiet_NaN();
@@ -101,11 +102,12 @@ RadarSnapshot TargetTracker::TakeSnapshot() {
 
   std::lock_guard<std::mutex> lock(mu_);
 
-  // Stale removal.
+  // Stale removal — use kind-specific window.
   for (auto it = entries_.begin(); it != entries_.end();) {
-    const auto age = now > it->second.last_seen_ms
-                         ? now - it->second.last_seen_ms : 0u;
-    if (stale_ms_ > 0 && age > stale_ms_) {
+    const auto& e = it->second;
+    const uint64_t threshold = (e.kind == "SEA") ? sea_stale_ms_ : air_stale_ms_;
+    const uint64_t age = (now > e.last_seen_ms) ? now - e.last_seen_ms : 0u;
+    if (threshold > 0 && age > threshold) {
       pending_removed_.push_back(it->first);
       it = entries_.erase(it);
     } else {

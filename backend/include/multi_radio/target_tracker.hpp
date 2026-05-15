@@ -34,8 +34,11 @@ struct RadarSnapshot {
 // Thread-safe; call Update() from any thread, TakeSnapshot() from the gRPC thread.
 class TargetTracker {
  public:
-  // stale_ms: remove targets not updated within this window (default 60 s).
-  explicit TargetTracker(uint64_t stale_ms = 60000);
+  // Separate stale windows per target type.
+  // Aircraft stop transmitting immediately when they land; 60 s is safe.
+  // Vessels use infrequent AIS intervals (anchored: every 3–6 min); 10 min avoids blinking.
+  explicit TargetTracker(uint64_t air_stale_ms = 60000,
+                         uint64_t sea_stale_ms = 600000);
 
   // Merge a decoded message into the tracked state.
   void Update(const DecodedMessage& msg);
@@ -51,7 +54,8 @@ class TargetTracker {
   static std::string FieldStr(const DecodedMessage& msg, const char* key);
 
   mutable std::mutex mu_;
-  uint64_t stale_ms_;
+  uint64_t air_stale_ms_;
+  uint64_t sea_stale_ms_;
   std::unordered_map<std::string, TrackedTarget> entries_;
   std::vector<std::string> pending_removed_;
 };
