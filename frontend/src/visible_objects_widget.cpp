@@ -72,6 +72,15 @@ void VisibleObjectsWidget::UpdateTargetAltitude(const QString& id, double altitu
   RefreshTable();
 }
 
+void VisibleObjectsWidget::UpdateTargetSogCog(const QString& id, double sog_kn, double cog_deg) {
+  if (id.isEmpty()) return;
+  auto it = rows_.find(ToKey(id));
+  if (it == rows_.end()) return;
+  it->second.last.sog = sog_kn;
+  it->second.last.cog = cog_deg;
+  RefreshTable();
+}
+
 void VisibleObjectsWidget::RemoveStale(std::uint64_t now_ms, std::uint64_t stale_after_ms) {
   if (stale_after_ms == 0) return;
   for (auto it = rows_.begin(); it != rows_.end();) {

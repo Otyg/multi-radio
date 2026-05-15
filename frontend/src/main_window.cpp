@@ -1120,8 +1120,10 @@ QString ActiveScanListSettingsGroup(const QTabWidget* mode_tabs) {
 QString PreferNameOrCsOrAlias(const QVariantMap& fields, const QString& id) {
   const QString name = FieldString(fields, "name").trimmed();
   if (!name.isEmpty()) return name;
-  const QString cs = FieldString(fields, "call_sign").trimmed();
+  const QString cs = FieldString(fields, "call_sign").trimmed();   // AIS
   if (!cs.isEmpty()) return cs;
+  const QString callsign = FieldString(fields, "callsign").trimmed();  // ADS-B
+  if (!callsign.isEmpty()) return callsign;
   return LoadNameAlias(id).trimmed();
 }
 
@@ -3612,14 +3614,19 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
       if (visible_objects_widget_ != nullptr) visible_objects_widget_->UpsertTarget(t);
     }
 
-    // For ADS-B messages that carry altitude but no decoded position, update
-    // the altitude of any existing list entry without overwriting lat/lon.
+    // For ADS-B messages without decoded position, patch existing list entries
+    // with altitude and/or velocity data so the table stays up to date.
+    // (Position and velocity arrive in separate DF=17/18 message types.)
     if (plugin_type == "ADSB" && !(has_lat && has_lon) && visible_objects_widget_ != nullptr) {
-      double alt = std::numeric_limits<double>::quiet_NaN();
-      if (ParseDoubleField(fields, "alt_baro", &alt) || ParseDoubleField(fields, "alt_geom", &alt)) {
-        const QString icao = FieldString(fields, "icao");
-        if (!icao.isEmpty())
+      const QString icao = FieldString(fields, "icao");
+      if (!icao.isEmpty()) {
+        double alt = std::numeric_limits<double>::quiet_NaN();
+        if (ParseDoubleField(fields, "alt_baro", &alt) || ParseDoubleField(fields, "alt_geom", &alt))
           visible_objects_widget_->UpdateTargetAltitude(icao, alt);
+
+        double sog = 0.0, cog = 0.0;
+        if (ParseDoubleField(fields, "gs", &sog) && ParseDoubleField(fields, "heading", &cog))
+          visible_objects_widget_->UpdateTargetSogCog(icao, sog, cog);
       }
     }
   }
