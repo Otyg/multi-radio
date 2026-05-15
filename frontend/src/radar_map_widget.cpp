@@ -7,6 +7,7 @@
 #include <QFont>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPen>
 #include <QWheelEvent>
 
@@ -37,6 +38,12 @@ RadarMapWidget::RadarMapWidget(QWidget* parent) : QWidget(parent) {
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   setMouseTracking(true);
   SetTrailWindowSeconds(kDefaultTrailWindowSeconds);
+
+  coastline_debounce_ = new QTimer(this);
+  coastline_debounce_->setSingleShot(true);
+  coastline_debounce_->setInterval(500);
+  connect(coastline_debounce_, &QTimer::timeout,
+          this, &RadarMapWidget::TriggerCoastlineLoad);
 }
 
 void RadarMapWidget::SetHome(double lat, double lon) {
@@ -48,14 +55,74 @@ void RadarMapWidget::SetHome(double lat, double lon) {
 void RadarMapWidget::SetCenter(double lat, double lon) {
   center_lat_ = lat;
   center_lon_ = lon;
+  coastline_path_dirty_ = true;
+  if (coastline_debounce_) coastline_debounce_->start();
   emit ViewChanged(center_lat_, center_lon_, range_km_);
   update();
 }
 
 void RadarMapWidget::SetRangeKm(double range_km) {
   range_km_ = std::clamp(range_km, kMinRangeKm, kMaxRangeKm);
+  coastline_path_dirty_ = true;
+  if (coastline_debounce_) coastline_debounce_->start();
   emit ViewChanged(center_lat_, center_lon_, range_km_);
   update();
+}
+
+void RadarMapWidget::SetCoastlineLoader(CoastlineLoader* loader) {
+  if (coastline_loader_) {
+    disconnect(coastline_loader_, nullptr, this, nullptr);
+  }
+  coastline_loader_ = loader;
+  if (coastline_loader_) {
+    connect(coastline_loader_, &CoastlineLoader::CoastlineReady,
+            this, &RadarMapWidget::OnCoastlineReady);
+    // Trigger an immediate load for the current view.
+    if (coastline_debounce_) coastline_debounce_->start(0);
+  }
+}
+
+void RadarMapWidget::TriggerCoastlineLoad() {
+  if (!coastline_loader_ || !show_coastline_) return;
+
+  // Compute bbox with a 20 % margin so tiles cover slightly beyond the view.
+  const double margin = range_km_ * 0.2;
+  const double dlat   = (range_km_ + margin) / kKmPerDegLat;
+  const double dlon   = dlat / std::max(0.01, std::cos(center_lat_ * (M_PI / 180.0)));
+
+  coastline_loader_->RequestView(center_lat_ - dlat, center_lon_ - dlon,
+                                  center_lat_ + dlat, center_lon_ + dlon);
+}
+
+void RadarMapWidget::OnCoastlineReady(QVector<QPolygonF> polygons) {
+  coastline_polygons_ = std::move(polygons);
+  coastline_path_dirty_ = true;
+  update();
+}
+
+void RadarMapWidget::RebuildCoastlinePath() {
+  coastline_path_ = QPainterPath{};
+  if (!show_coastline_ || coastline_polygons_.isEmpty()) {
+    coastline_path_dirty_ = false;
+    return;
+  }
+
+  const double radius   = std::min(width(), height()) * 0.48;
+  const double px_per_km = radius / std::max(0.001, range_km_);
+  const double cx = width()  * 0.5;
+  const double cy = height() * 0.5;
+
+  for (const QPolygonF& poly : coastline_polygons_) {
+    if (poly.isEmpty()) continue;
+    bool first = true;
+    for (const QPointF& pt : poly) {
+      const QPointF screen = LatLonToXY(pt.x(), pt.y(), cx, cy, px_per_km);
+      if (first) { coastline_path_.moveTo(screen); first = false; }
+      else        coastline_path_.lineTo(screen);
+    }
+    coastline_path_.closeSubpath();
+  }
+  coastline_path_dirty_ = false;
 }
 
 void RadarMapWidget::SetShowLabels(bool enabled) {
@@ -208,6 +275,17 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.fillRect(rect(), bg_color_);
 
+  // Coastline — rebuild path if view has changed, then draw.
+  if (show_coastline_ && !coastline_polygons_.isEmpty()) {
+    if (coastline_path_dirty_) RebuildCoastlinePath();
+    painter.save();
+    painter.setClipRect(rect());
+    painter.setPen(QPen(QColor("#1a4a3a"), 1));
+    painter.setBrush(QColor("#0d2b20"));
+    painter.drawPath(coastline_path_);
+    painter.restore();
+  }
+
   // Grid.
   painter.setPen(QPen(grid_color_, 1));
   painter.drawLine(QPointF(cx - radius, cy), QPointF(cx + radius, cy));
@@ -354,6 +432,8 @@ void RadarMapWidget::mouseMoveEvent(QMouseEvent* event) {
 
   center_lat_ -= dlat;
   center_lon_ -= dlon;
+  coastline_path_dirty_ = true;
+  if (coastline_debounce_) coastline_debounce_->start();
   emit ViewChanged(center_lat_, center_lon_, range_km_);
   update();
 }

@@ -31,6 +31,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QMenu>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1811,6 +1812,21 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   radar_widget_ = new RadarMapWidget(air_marine_splitter);
   radar_widget_->SetRangeKm(10.0);
   radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+
+  {
+    QSettings s("multi-radio", "multi-radio-client");
+    s.beginGroup("coastline");
+    const QString api_key   = s.value("api_key", "").toString();
+    const QString cache_dir = s.value("cache_dir",
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+            + "/coastline_cache.db").toString();
+    s.endGroup();
+
+    coastline_loader_ = new CoastlineLoader(cache_dir, this);
+    if (!api_key.isEmpty())
+      coastline_loader_->SetApiKey(api_key);
+    radar_widget_->SetCoastlineLoader(coastline_loader_);
+  }
 
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);

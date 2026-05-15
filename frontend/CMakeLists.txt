@@ -3,7 +3,7 @@ if(NOT MR_PROTO_AVAILABLE)
   return()
 endif()
 
-find_package(Qt6 COMPONENTS Widgets Core QUIET)
+find_package(Qt6 COMPONENTS Widgets Core Network QUIET)
 if(NOT Qt6_FOUND)
   message(WARNING "Skipping frontend: Qt6 not found.")
   return()
@@ -22,6 +22,8 @@ add_executable(multi_radio_client
   src/scan_range_visualization_widget.cpp
   src/radar_map_widget.cpp
   src/visible_objects_widget.cpp
+  src/coastline_cache.cpp
+  src/coastline_loader.cpp
   include/main_window.hpp
   include/grpc_client.hpp
   include/signal_visualization_widget.hpp
@@ -29,6 +31,8 @@ add_executable(multi_radio_client
   include/radar_types.hpp
   include/radar_map_widget.hpp
   include/visible_objects_widget.hpp
+  include/coastline_cache.hpp
+  include/coastline_loader.hpp
 )
 
 target_include_directories(multi_radio_client
@@ -40,7 +44,9 @@ target_link_libraries(multi_radio_client
   PRIVATE
     Qt6::Widgets
     Qt6::Core
+    Qt6::Network
     multi_radio::proto
+    sqlite3
 )
 
 if(TARGET Qt6::Multimedia)

@@ -5,10 +5,13 @@
 #include <unordered_map>
 
 #include <QColor>
+#include <QPainterPath>
 #include <QPointF>
 #include <QString>
+#include <QTimer>
 #include <QWidget>
 
+#include "coastline_loader.hpp"
 #include "radar_types.hpp"
 
 namespace multi_radio {
@@ -25,6 +28,7 @@ class RadarMapWidget : public QWidget {
 
   void SetShowLabels(bool enabled);
   void SetShowCoastline(bool enabled);
+  void SetCoastlineLoader(CoastlineLoader* loader);  // ownership stays with caller
   void SetShowFixedNames(bool enabled);
   void SetHideLowSpeed(bool enabled);
   void SetTrailWindowSeconds(double seconds);
@@ -96,6 +100,19 @@ class RadarMapWidget : public QWidget {
   QColor selected_color_ = QColor("#ff4d4d");
 
   std::uint64_t trail_window_ms_ = 120000;  // 120s
+
+  // Coastline support.
+  CoastlineLoader* coastline_loader_ = nullptr;
+  QTimer*          coastline_debounce_ = nullptr;  // 500 ms one-shot
+  QPainterPath     coastline_path_;                // pre-projected to screen px
+  bool             coastline_path_dirty_ = true;   // needs rebuild after view change
+  QVector<QPolygonF> coastline_polygons_;          // lat/lon source data
+
+  void TriggerCoastlineLoad();
+  void RebuildCoastlinePath();
+
+ private slots:
+  void OnCoastlineReady(QVector<QPolygonF> polygons);
 };
 
 }  // namespace multi_radio

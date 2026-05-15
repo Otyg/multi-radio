@@ -18,6 +18,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 
+#include "coastline_loader.hpp"
 #include "grpc_client.hpp"
 #include "radar_map_widget.hpp"
 #include "scan_range_visualization_widget.hpp"
@@ -211,6 +212,7 @@ class MainWindow : public QMainWindow {
   QSpinBox* minutes_filter_spin_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
+  CoastlineLoader* coastline_loader_ = nullptr;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;
   std::vector<ScanListChannelConfig> scan_list_channels_;
   std::vector<QPushButton*> scan_list_channel_buttons_;
