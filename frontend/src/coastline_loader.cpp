@@ -23,7 +23,7 @@ constexpr const char* kBaseUrl =
     "https://api.lantmateriet.se/ogc-features/v1/hydrografi/collections/"
     "LandWaterBoundary/items";
 
-constexpr int kLimit = 1000;  // features per tile request
+constexpr int kLimit = 10000;  // max per request according to API spec
 
 }  // namespace
 
@@ -100,14 +100,15 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
   QUrl url(kBaseUrl);
   QUrlQuery q;
   // OGC-Features bbox order: minLon,minLat,maxLon,maxLat
+  // OGC-Features bbox: minLon,minLat,maxLon,maxLat (WGS84 by default)
   q.addQueryItem("bbox",
                  QString("%1,%2,%3,%4")
                      .arg(lon_min, 0, 'f', 4)
                      .arg(lat_min, 0, 'f', 4)
                      .arg(lon_max, 0, 'f', 4)
                      .arg(lat_max, 0, 'f', 4));
-  q.addQueryItem("limit",   QString::number(kLimit));
-  q.addQueryItem("srsName", "EPSG:4326");
+  q.addQueryItem("limitFeatures_LandWaterBoundary", QString::number(kLimit));
+  q.addQueryItem("f", "json");
   url.setQuery(q);
 
   QNetworkRequest req(url);
