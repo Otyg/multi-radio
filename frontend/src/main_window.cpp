@@ -1831,6 +1831,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token, QWidget* pare
   connect(visible_objects_widget_, &VisibleObjectsWidget::TargetActivated, this, [this](const QString& id) {
     if (radar_widget_ != nullptr) radar_widget_->SetSelectedTarget(id);
   });
+  connect(visible_objects_widget_, &VisibleObjectsWidget::TargetRemoved, this, [this](const QString& id) {
+    if (radar_widget_ != nullptr) radar_widget_->RemoveTarget(id);
+  });
 
   // Radar settings controls (persisted).
   {

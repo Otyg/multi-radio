@@ -27,6 +27,7 @@ class VisibleObjectsWidget : public QWidget {
 
  signals:
   void TargetActivated(const QString& id);
+  void TargetRemoved(const QString& id);
 
  private:
   struct RowState {

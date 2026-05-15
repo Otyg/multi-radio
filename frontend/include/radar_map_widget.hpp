@@ -32,6 +32,7 @@ class RadarMapWidget : public QWidget {
 
   void UpsertTarget(const RadarTargetUpdate& update);
   void UpdateTargetLabel(const QString& id, const QString& label);
+  void RemoveTarget(const QString& id);
   void ClearTargets();
   void SetSelectedTarget(const QString& id);
 

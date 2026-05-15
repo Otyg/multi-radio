@@ -90,6 +90,12 @@ void RadarMapWidget::SetFixedObjects(const std::vector<RadarFixedObject>& fixed)
   update();
 }
 
+void RadarMapWidget::RemoveTarget(const QString& id) {
+  if (id.isEmpty()) return;
+  targets_.erase(id.toStdString());
+  update();
+}
+
 void RadarMapWidget::ClearTargets() {
   targets_.clear();
   selected_target_id_.clear();
