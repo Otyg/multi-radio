@@ -18,10 +18,10 @@ namespace multi_radio {
 
 namespace {
 
-// Lantmäteriet OGC-Features endpoint for coastline polygons.
+// Lantmäteriet OGC-Features: land/water boundary lines (LandWaterBoundary).
 constexpr const char* kBaseUrl =
     "https://api.lantmateriet.se/ogc-features/v1/hydrografi/collections/"
-    "Havsomradesytor/items";
+    "LandWaterBoundary/items";
 
 constexpr int kLimit = 1000;  // features per tile request
 
@@ -178,29 +178,31 @@ QVector<QPolygonF> CoastlineLoader::ParseGeoJson(const QByteArray& data) const {
     const QString type = geom.value("type").toString();
     const QJsonValue coords_val = geom.value("coordinates");
 
-    // Handle Polygon and MultiPolygon.
-    auto parse_ring = [&](const QJsonArray& ring) {
+    // Convert a coordinate array [[lon,lat],[lon,lat],...] to QPolygonF (x=lat, y=lon).
+    auto parse_line = [&](const QJsonArray& pts) {
       QPolygonF poly;
-      poly.reserve(ring.size());
-      for (const QJsonValue& pt : ring) {
+      poly.reserve(pts.size());
+      for (const QJsonValue& pt : pts) {
         const QJsonArray arr = pt.toArray();
         if (arr.size() < 2) continue;
-        const double lon = arr[0].toDouble();
-        const double lat = arr[1].toDouble();
-        poly.append(QPointF(lat, lon));  // x=lat, y=lon
+        poly.append(QPointF(arr[1].toDouble(), arr[0].toDouble()));  // x=lat, y=lon
       }
-      if (!poly.isEmpty()) result.append(poly);
+      if (poly.size() >= 2) result.append(poly);
     };
 
-    if (type == "Polygon") {
+    if (type == "LineString") {
+      parse_line(coords_val.toArray());
+    } else if (type == "MultiLineString") {
+      for (const QJsonValue& line : coords_val.toArray())
+        parse_line(line.toArray());
+    } else if (type == "Polygon") {
+      // Outer ring as a closed line.
       const QJsonArray rings = coords_val.toArray();
-      if (!rings.isEmpty())
-        parse_ring(rings[0].toArray());  // outer ring only
+      if (!rings.isEmpty()) parse_line(rings[0].toArray());
     } else if (type == "MultiPolygon") {
       for (const QJsonValue& poly_val : coords_val.toArray()) {
         const QJsonArray rings = poly_val.toArray();
-        if (!rings.isEmpty())
-          parse_ring(rings[0].toArray());
+        if (!rings.isEmpty()) parse_line(rings[0].toArray());
       }
     }
   }

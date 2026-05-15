@@ -127,7 +127,6 @@ void RadarMapWidget::RebuildCoastlinePath() {
       if (first) { coastline_path_.moveTo(screen); first = false; }
       else        coastline_path_.lineTo(screen);
     }
-    coastline_path_.closeSubpath();
   }
   coastline_path_dirty_ = false;
 }
@@ -287,8 +286,8 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
     if (coastline_path_dirty_) RebuildCoastlinePath();
     painter.save();
     painter.setClipRect(rect());
-    painter.setPen(QPen(QColor("#1a4a3a"), 1));
-    painter.setBrush(QColor("#0d2b20"));
+    painter.setPen(QPen(QColor("#2a7a5a"), 1));
+    painter.setBrush(Qt::NoBrush);
     painter.drawPath(coastline_path_);
     painter.restore();
   }
