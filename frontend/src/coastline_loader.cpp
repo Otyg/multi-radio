@@ -19,18 +19,20 @@ namespace multi_radio {
 
 namespace {
 
-constexpr const char* kBaseUrl =
-    "https://api.lantmateriet.se/ogc-features/v1/hydrografi/collections/"
-    "LandWaterBoundary/items";
+constexpr const char* kApiBase =
+    "https://api.lantmateriet.se/ogc-features/v1/hydrografi/collections/";
 
 constexpr int kLimit = 10000;
 
 }  // namespace
 
-CoastlineLoader::CoastlineLoader(const QString& cache_path, QObject* parent)
+CoastlineLoader::CoastlineLoader(const QString& cache_path,
+                                  const QString& collection,
+                                  QObject* parent)
     : QObject(parent),
       nam_(new QNetworkAccessManager(this)),
-      cache_(std::make_unique<CoastlineCache>(cache_path)) {
+      cache_(std::make_unique<CoastlineCache>(cache_path)),
+      collection_(collection) {
   connect(nam_, &QNetworkAccessManager::finished, this, &CoastlineLoader::OnReply);
 }
 
@@ -89,7 +91,7 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
   const double lat_max = lat_min + 1.0;
   const double lon_max = lon_min + 1.0;
 
-  QUrl url(kBaseUrl);
+  QUrl url(QString(kApiBase) + collection_ + "/items");
   QUrlQuery q;
   q.addQueryItem("bbox",
                  QString("%1,%2,%3,%4")
@@ -98,6 +100,8 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
   q.addQueryItem("limit", QString::number(kLimit));
   q.addQueryItem("f", "json");
   url.setQuery(q);
+
+  emit FetchingUrl(url.toString());
 
   QNetworkRequest req(url);
   req.setHeader(QNetworkRequest::UserAgentHeader, "multi-radio/1.0");

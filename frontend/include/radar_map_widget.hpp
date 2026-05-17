@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 #include <QColor>
+#include <QList>
 #include <QMap>
 #include <QPainterPath>
 #include <QPointF>
@@ -30,7 +31,7 @@ class RadarMapWidget : public QWidget {
 
   void SetShowLabels(bool enabled);
   void SetShowCoastline(bool enabled);
-  void SetCoastlineLoader(CoastlineLoader* loader);  // ownership stays with caller
+  void AddCoastlineLoader(CoastlineLoader* loader);  // ownership stays with caller; call once per collection
   void SetCoastlineStatus(const QString& text, bool is_error = false);
   void SetShowFixedNames(bool enabled);
   void SetHideLowSpeed(bool enabled);
@@ -105,8 +106,8 @@ class RadarMapWidget : public QWidget {
   std::uint64_t trail_window_ms_ = 120000;  // 120s
 
   // Coastline support.
-  CoastlineLoader* coastline_loader_ = nullptr;
-  QTimer*          coastline_debounce_ = nullptr;  // 500 ms one-shot
+  QList<CoastlineLoader*> coastline_loaders_;
+  QTimer*                 coastline_debounce_ = nullptr;  // 500 ms one-shot
 
   // Per-tile storage: key = (lat_floor_deg, lon_floor_deg).
   using TileKey = QPair<int,int>;

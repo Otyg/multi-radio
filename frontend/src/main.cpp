@@ -51,6 +51,8 @@ int main(int argc, char* argv[]) {
   }
 
   QApplication app(argc, argv);
+  app.setOrganizationName("multi-radio");
+  app.setApplicationName("multi-radio-client");
 
   const std::string config_path =
       GetConfigPathFromArgs(argc, argv).value_or(GetEnvOrDefault("MR_CLIENT_CONFIG", "client.ini"));

@@ -69,15 +69,11 @@ void RadarMapWidget::SetRangeKm(double range_km) {
   update();
 }
 
-void RadarMapWidget::SetCoastlineLoader(CoastlineLoader* loader) {
-  if (coastline_loader_)
-    disconnect(coastline_loader_, nullptr, this, nullptr);
-  coastline_loader_ = loader;
-  if (coastline_loader_) {
-    connect(coastline_loader_, &CoastlineLoader::TileReady,
-            this, &RadarMapWidget::OnTileReady);
-    if (coastline_debounce_) coastline_debounce_->start(0);
-  }
+void RadarMapWidget::AddCoastlineLoader(CoastlineLoader* loader) {
+  if (!loader) return;
+  coastline_loaders_.append(loader);
+  connect(loader, &CoastlineLoader::TileReady, this, &RadarMapWidget::OnTileReady);
+  if (coastline_debounce_) coastline_debounce_->start(0);
 }
 
 void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
@@ -88,13 +84,14 @@ void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
 
 // Called when debounce fires.
 void RadarMapWidget::TriggerCoastlineLoad() {
-  if (!coastline_loader_ || !show_coastline_) return;
+  if (coastline_loaders_.isEmpty() || !show_coastline_) return;
 
   // Exact visible bbox — no margin.
   const double dlat = range_km_ / kKmPerDegLat;
   const double dlon = dlat / std::max(0.01, std::cos(center_lat_ * (M_PI / 180.0)));
-  coastline_loader_->RequestView(center_lat_ - dlat, center_lon_ - dlon,
-                                  center_lat_ + dlat, center_lon_ + dlon);
+  for (CoastlineLoader* loader : coastline_loaders_)
+    loader->RequestView(center_lat_ - dlat, center_lon_ - dlon,
+                        center_lat_ + dlat, center_lon_ + dlon);
 
   // Re-project all already-loaded tiles for the new view.
   RebuildAllPaths();
@@ -103,8 +100,13 @@ void RadarMapWidget::TriggerCoastlineLoad() {
 // New tile arrived from loader — store and kick off background path build.
 void RadarMapWidget::OnTileReady(int lat_deg, int lon_deg, QVector<QPolygonF> polygons) {
   const TileKey key{lat_deg, lon_deg};
-  tile_polygons_.insert(key, polygons);
+  // Append — multiple collections deliver to the same tile slot.
+  auto& existing = tile_polygons_[key];
+  existing.append(polygons);
   coastline_status_.clear();
+  // Invalidate any cached path so it gets rebuilt with the combined data.
+  tile_paths_.remove(key);
+  tiles_building_.remove(key);
   SchedulePathBuild(key);
 }
 

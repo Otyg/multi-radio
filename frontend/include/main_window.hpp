@@ -214,7 +214,8 @@ class MainWindow : public QMainWindow {
   QSpinBox* minutes_filter_spin_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
-  CoastlineLoader* coastline_loader_ = nullptr;
+  CoastlineLoader* coastline_loader_boundaries_ = nullptr;
+  CoastlineLoader* coastline_loader_water_ = nullptr;
   QString coastline_user_;
   QString coastline_pass_;
   QMap<QString, AisCrcSummaryState> ais_crc_summary_by_channel_;

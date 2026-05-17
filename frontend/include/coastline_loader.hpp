@@ -28,7 +28,10 @@ class CoastlineLoader : public QObject {
   Q_OBJECT
 
  public:
-  explicit CoastlineLoader(const QString& cache_path, QObject* parent = nullptr);
+  // collection: OGC collection name, e.g. "LandWaterBoundary" or "StandingWater"
+  explicit CoastlineLoader(const QString& cache_path,
+                           const QString& collection = "LandWaterBoundary",
+                           QObject* parent = nullptr);
   ~CoastlineLoader() override;
 
   void SetCredentials(const QString& username, const QString& password) {
@@ -48,6 +51,7 @@ class CoastlineLoader : public QObject {
 
   void FetchStarted();
   void FetchFailed(const QString& error);
+  void FetchingUrl(const QString& url);  // emitted just before each HTTP GET
 
  private slots:
   void OnReply(QNetworkReply* reply);
@@ -62,6 +66,7 @@ class CoastlineLoader : public QObject {
 
   QNetworkAccessManager*          nam_ = nullptr;
   std::unique_ptr<CoastlineCache> cache_;
+  QString                         collection_;
   QString                         username_;
   QString                         password_;
 
