@@ -13,17 +13,17 @@
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QtConcurrent/QtConcurrent>
 
 namespace multi_radio {
 
 namespace {
 
-// Lantmäteriet OGC-Features: land/water boundary lines (LandWaterBoundary).
 constexpr const char* kBaseUrl =
     "https://api.lantmateriet.se/ogc-features/v1/hydrografi/collections/"
     "LandWaterBoundary/items";
 
-constexpr int kLimit = 10000;  // max per request according to API spec
+constexpr int kLimit = 10000;
 
 }  // namespace
 
@@ -37,41 +37,35 @@ CoastlineLoader::CoastlineLoader(const QString& cache_path, QObject* parent)
 CoastlineLoader::~CoastlineLoader() = default;
 
 // -----------------------------------------------------------------------
-// Public API
+// Public
 // -----------------------------------------------------------------------
 
 void CoastlineLoader::RequestView(double lat_min, double lon_min,
                                    double lat_max, double lon_max) {
-  const auto tiles = TilesForBbox(lat_min, lon_min, lat_max, lon_max);
-
-  // Start a fresh batch.
-  requested_ = tiles;
-  loaded_.clear();
-  pending_.clear();
-  // Cancel any in-flight replies that are no longer relevant.
+  // Cancel all in-flight requests.
   for (auto it = reply_map_.begin(); it != reply_map_.end(); ++it)
     it.key()->abort();
   reply_map_.clear();
+  pending_.clear();
+
+  const auto tiles = TilesForBbox(lat_min, lon_min, lat_max, lon_max);
 
   bool any_fetch = false;
   for (const TileKey& tile : tiles) {
     auto cached = cache_->GetTile(tile.first, tile.second);
     if (cached.has_value()) {
-      loaded_.insert(tile, std::move(*cached));
+      // Deliver immediately via queued invocation so the caller is never
+      // re-entered synchronously.
+      QTimer::singleShot(0, this, [this, tile, polys = std::move(*cached)]() mutable {
+        emit TileReady(tile.first, tile.second, std::move(polys));
+      });
     } else {
       pending_.insert(tile);
       FetchTile(tile);
       any_fetch = true;
     }
   }
-
   if (any_fetch) emit FetchStarted();
-
-  // If everything was cached, deliver immediately via queued invocation so the
-  // caller's constructor / slot is not re-entered synchronously.
-  if (pending_.isEmpty()) {
-    QTimer::singleShot(0, this, [this]() { CheckDone(); });
-  }
 }
 
 // -----------------------------------------------------------------------
@@ -81,12 +75,10 @@ void CoastlineLoader::RequestView(double lat_min, double lon_min,
 QVector<CoastlineLoader::TileKey> CoastlineLoader::TilesForBbox(
     double lat_min, double lon_min, double lat_max, double lon_max) {
   QVector<TileKey> tiles;
-  const int lat0 = static_cast<int>(std::floor(lat_min));
-  const int lat1 = static_cast<int>(std::floor(lat_max));
-  const int lon0 = static_cast<int>(std::floor(lon_min));
-  const int lon1 = static_cast<int>(std::floor(lon_max));
-  for (int la = lat0; la <= lat1; ++la)
-    for (int lo = lon0; lo <= lon1; ++lo)
+  for (int la = static_cast<int>(std::floor(lat_min));
+       la <= static_cast<int>(std::floor(lat_max)); ++la)
+    for (int lo = static_cast<int>(std::floor(lon_min));
+         lo <= static_cast<int>(std::floor(lon_max)); ++lo)
       tiles.append({la, lo});
   return tiles;
 }
@@ -99,14 +91,10 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
 
   QUrl url(kBaseUrl);
   QUrlQuery q;
-  // OGC-Features bbox order: minLon,minLat,maxLon,maxLat
-  // OGC-Features bbox: minLon,minLat,maxLon,maxLat (WGS84 by default)
   q.addQueryItem("bbox",
                  QString("%1,%2,%3,%4")
-                     .arg(lon_min, 0, 'f', 4)
-                     .arg(lat_min, 0, 'f', 4)
-                     .arg(lon_max, 0, 'f', 4)
-                     .arg(lat_max, 0, 'f', 4));
+                     .arg(lon_min, 0, 'f', 4).arg(lat_min, 0, 'f', 4)
+                     .arg(lon_max, 0, 'f', 4).arg(lat_max, 0, 'f', 4));
   q.addQueryItem("limit", QString::number(kLimit));
   q.addQueryItem("f", "json");
   url.setQuery(q);
@@ -125,84 +113,73 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
 }
 
 // -----------------------------------------------------------------------
-// Network reply handler
+// Network reply — parse in background thread
 // -----------------------------------------------------------------------
 
 void CoastlineLoader::OnReply(QNetworkReply* reply) {
   reply->deleteLater();
   const TileKey tile = reply_map_.take(reply);
-  if (!pending_.contains(tile)) return;  // belongs to a cancelled batch
+  if (!pending_.contains(tile)) return;
+  pending_.remove(tile);
 
   if (reply->error() != QNetworkReply::NoError) {
-    pending_.remove(tile);
     emit FetchFailed(reply->errorString());
-    CheckDone();
     return;
   }
 
   const QByteArray data = reply->readAll();
-  const QVector<QPolygonF> polygons = ParseGeoJson(data);
-  cache_->StoreTile(tile.first, tile.second, polygons);
-  loaded_.insert(tile, polygons);
-  pending_.remove(tile);
-  CheckDone();
+
+  // Parse and cache in a background thread; deliver result via queued signal.
+  auto* watcher = new QFutureWatcher<QVector<QPolygonF>>(this);
+  connect(watcher, &QFutureWatcher<QVector<QPolygonF>>::finished, this,
+          [this, tile, watcher]() {
+            QVector<QPolygonF> polys = watcher->result();
+            watcher->deleteLater();
+            cache_->StoreTile(tile.first, tile.second, polys);
+            emit TileReady(tile.first, tile.second, std::move(polys));
+          });
+  watcher->setFuture(QtConcurrent::run([data]() { return ParseGeoJson(data); }));
 }
 
 // -----------------------------------------------------------------------
-// Merge and emit
+// GeoJSON parsing (runs in worker thread — no Qt GUI calls)
 // -----------------------------------------------------------------------
 
-void CoastlineLoader::CheckDone() {
-  if (!pending_.isEmpty()) return;
-
-  QVector<QPolygonF> merged;
-  for (const TileKey& tile : requested_) {
-    auto it = loaded_.find(tile);
-    if (it != loaded_.end())
-      merged.append(it.value());
-  }
-  emit CoastlineReady(merged);
-}
-
-// -----------------------------------------------------------------------
-// GeoJSON parsing
-// -----------------------------------------------------------------------
-
-QVector<QPolygonF> CoastlineLoader::ParseGeoJson(const QByteArray& data) const {
+QVector<QPolygonF> CoastlineLoader::ParseGeoJson(const QByteArray& data) {
   QVector<QPolygonF> result;
   const QJsonDocument doc = QJsonDocument::fromJson(data);
   if (!doc.isObject()) return result;
 
   const QJsonArray features = doc.object().value("features").toArray();
+  result.reserve(features.size());
+
+  auto parse_line = [&](const QJsonArray& pts) {
+    QPolygonF poly;
+    poly.reserve(pts.size());
+    for (const QJsonValue& pt : pts) {
+      const QJsonArray arr = pt.toArray();
+      if (arr.size() < 2) continue;
+      poly.append(QPointF(arr[1].toDouble(), arr[0].toDouble()));  // x=lat, y=lon
+    }
+    if (poly.size() >= 2) result.append(std::move(poly));
+  };
+
   for (const QJsonValue& fv : features) {
     const QJsonObject geom = fv.toObject().value("geometry").toObject();
     const QString type = geom.value("type").toString();
-    const QJsonValue coords_val = geom.value("coordinates");
-
-    // Convert a coordinate array [[lon,lat],[lon,lat],...] to QPolygonF (x=lat, y=lon).
-    auto parse_line = [&](const QJsonArray& pts) {
-      QPolygonF poly;
-      poly.reserve(pts.size());
-      for (const QJsonValue& pt : pts) {
-        const QJsonArray arr = pt.toArray();
-        if (arr.size() < 2) continue;
-        poly.append(QPointF(arr[1].toDouble(), arr[0].toDouble()));  // x=lat, y=lon
-      }
-      if (poly.size() >= 2) result.append(poly);
-    };
+    const QJsonValue cv = geom.value("coordinates");
 
     if (type == "LineString") {
-      parse_line(coords_val.toArray());
+      parse_line(cv.toArray());
     } else if (type == "MultiLineString") {
-      for (const QJsonValue& line : coords_val.toArray())
+      for (const QJsonValue& line : cv.toArray())
         parse_line(line.toArray());
     } else if (type == "Polygon") {
-      // Outer ring as a closed line.
-      const QJsonArray rings = coords_val.toArray();
+      const QJsonArray rings = cv.toArray();
       if (!rings.isEmpty()) parse_line(rings[0].toArray());
     } else if (type == "MultiPolygon") {
-      for (const QJsonValue& poly_val : coords_val.toArray()) {
-        const QJsonArray rings = poly_val.toArray();
+      for (const QJsonValue& pv : cv.toArray()) {
+        const QJsonArray rings = pv.toArray();
         if (!rings.isEmpty()) parse_line(rings[0].toArray());
       }
     }

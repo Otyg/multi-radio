@@ -5,8 +5,10 @@
 #include <unordered_map>
 
 #include <QColor>
+#include <QMap>
 #include <QPainterPath>
 #include <QPointF>
+#include <QSet>
 #include <QString>
 #include <QTimer>
 #include <QWidget>
@@ -105,17 +107,22 @@ class RadarMapWidget : public QWidget {
   // Coastline support.
   CoastlineLoader* coastline_loader_ = nullptr;
   QTimer*          coastline_debounce_ = nullptr;  // 500 ms one-shot
-  QPainterPath     coastline_path_;                // pre-projected to screen px
-  bool             coastline_path_dirty_ = true;   // needs rebuild after view change
-  QVector<QPolygonF> coastline_polygons_;          // lat/lon source data
-  QString            coastline_status_;            // shown as overlay, empty = hidden
-  bool               coastline_status_error_ = false;
+
+  // Per-tile storage: key = (lat_floor_deg, lon_floor_deg).
+  using TileKey = QPair<int,int>;
+  QMap<TileKey, QVector<QPolygonF>> tile_polygons_;  // lat/lon source, per tile
+  QMap<TileKey, QPainterPath>       tile_paths_;     // projected screen paths
+  QSet<TileKey>                     tiles_building_; // currently being built off-thread
+
+  QString coastline_status_;
+  bool    coastline_status_error_ = false;
 
   void TriggerCoastlineLoad();
-  void RebuildCoastlinePath();
+  void SchedulePathBuild(TileKey key);
+  void RebuildAllPaths();  // re-project all loaded tiles after view change
 
  private slots:
-  void OnCoastlineReady(QVector<QPolygonF> polygons);
+  void OnTileReady(int lat_deg, int lon_deg, QVector<QPolygonF> polygons);
 };
 
 }  // namespace multi_radio

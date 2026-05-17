@@ -1841,9 +1841,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       if (radar_widget_) radar_widget_->SetCoastlineStatus(msg, /*is_error=*/true);
       AppendLog("[Kustlinje] " + msg);
     });
-    connect(coastline_loader_, &CoastlineLoader::CoastlineReady, this,
-            [this](const QVector<QPolygonF>& polygons) {
-      AppendLog(QString("[Kustlinje] %1 polygoner laddade").arg(polygons.size()));
+    connect(coastline_loader_, &CoastlineLoader::TileReady, this,
+            [this](int lat_deg, int lon_deg, const QVector<QPolygonF>& polygons) {
+      AppendLog(QString("[Kustlinje] Tile %1:%2 — %3 linjer")
+                    .arg(lat_deg).arg(lon_deg).arg(polygons.size()));
     });
   }
 

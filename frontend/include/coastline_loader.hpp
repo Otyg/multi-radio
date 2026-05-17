@@ -17,15 +17,13 @@ namespace multi_radio {
 
 class CoastlineCache;
 
-// Fetches and caches Lantmäteriets coastline data.
+// Fetches and caches Lantmäteriets LandWaterBoundary coastline data.
 //
-// Call RequestView() to load tiles that cover a given bounding box.
-// If all tiles are in the local SQLite cache they are delivered synchronously
-// (via a queued signal so callers never block). Missing tiles are fetched from
-// the Lantmäteriet OGC-Features API and stored in the cache before delivery.
-//
-// The loader merges all tiles that were requested for the current view and
-// emits CoastlineReady() once every needed tile is available.
+// Call RequestView() to load all 1°×1° tiles that cover the visible bbox.
+// Each tile is delivered independently via TileReady() as soon as it is
+// available — either from the local SQLite cache (almost instant) or after
+// a network fetch.  JSON parsing runs in a background thread so the GUI
+// thread is never blocked.
 class CoastlineLoader : public QObject {
   Q_OBJECT
 
@@ -38,15 +36,16 @@ class CoastlineLoader : public QObject {
     password_ = password;
   }
 
-  // Request coastlines covering the given bbox (EPSG:4326).
-  // Emits CoastlineReady() once all tiles are available.
+  // Request all tiles covering the given bbox (EPSG:4326, WGS84).
+  // Cancels any in-flight requests that are no longer relevant.
   void RequestView(double lat_min, double lon_min,
                    double lat_max, double lon_max);
 
  signals:
-  // Emitted when all tiles for the last RequestView() call are ready.
-  // Polygons are in lat/lon coordinates (QPointF.x = lat, QPointF.y = lon).
-  void CoastlineReady(QVector<QPolygonF> polygons);
+  // Emitted once per tile as soon as its geometry is available.
+  // Polygons are in lat/lon (QPointF.x = lat, QPointF.y = lon).
+  void TileReady(int lat_deg, int lon_deg, QVector<QPolygonF> polygons);
+
   void FetchStarted();
   void FetchFailed(const QString& error);
 
@@ -54,26 +53,20 @@ class CoastlineLoader : public QObject {
   void OnReply(QNetworkReply* reply);
 
  private:
-  using TileKey = QPair<int, int>;  // (lat_floor_deg, lon_floor_deg)
+  using TileKey = QPair<int, int>;
 
   static QVector<TileKey> TilesForBbox(double lat_min, double lon_min,
                                         double lat_max, double lon_max);
   void FetchTile(const TileKey& tile);
-  void CheckDone();
-  QVector<QPolygonF> ParseGeoJson(const QByteArray& data) const;
+  static QVector<QPolygonF> ParseGeoJson(const QByteArray& data);
 
-  QNetworkAccessManager*         nam_ = nullptr;
+  QNetworkAccessManager*          nam_ = nullptr;
   std::unique_ptr<CoastlineCache> cache_;
-  QString                        username_;
-  QString                        password_;
+  QString                         username_;
+  QString                         password_;
 
-  // State for the current request batch.
-  QVector<TileKey>                        requested_;
-  QMap<TileKey, QVector<QPolygonF>>       loaded_;
-  QSet<TileKey>                           pending_;
-
-  // Used to tag in-flight replies with their tile.
-  QMap<QNetworkReply*, TileKey>           reply_map_;
+  QSet<TileKey>                   pending_;
+  QMap<QNetworkReply*, TileKey>   reply_map_;
 };
 
 }  // namespace multi_radio

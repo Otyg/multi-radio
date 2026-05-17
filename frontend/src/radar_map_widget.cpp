@@ -5,11 +5,13 @@
 #include <limits>
 
 #include <QFont>
+#include <QFutureWatcher>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
 #include <QWheelEvent>
+#include <QtConcurrent/QtConcurrent>
 
 namespace multi_radio {
 
@@ -55,7 +57,6 @@ void RadarMapWidget::SetHome(double lat, double lon) {
 void RadarMapWidget::SetCenter(double lat, double lon) {
   center_lat_ = lat;
   center_lon_ = lon;
-  coastline_path_dirty_ = true;
   if (coastline_debounce_) coastline_debounce_->start();
   emit ViewChanged(center_lat_, center_lon_, range_km_);
   update();
@@ -63,35 +64,20 @@ void RadarMapWidget::SetCenter(double lat, double lon) {
 
 void RadarMapWidget::SetRangeKm(double range_km) {
   range_km_ = std::clamp(range_km, kMinRangeKm, kMaxRangeKm);
-  coastline_path_dirty_ = true;
   if (coastline_debounce_) coastline_debounce_->start();
   emit ViewChanged(center_lat_, center_lon_, range_km_);
   update();
 }
 
 void RadarMapWidget::SetCoastlineLoader(CoastlineLoader* loader) {
-  if (coastline_loader_) {
+  if (coastline_loader_)
     disconnect(coastline_loader_, nullptr, this, nullptr);
-  }
   coastline_loader_ = loader;
   if (coastline_loader_) {
-    connect(coastline_loader_, &CoastlineLoader::CoastlineReady,
-            this, &RadarMapWidget::OnCoastlineReady);
-    // Trigger an immediate load for the current view.
+    connect(coastline_loader_, &CoastlineLoader::TileReady,
+            this, &RadarMapWidget::OnTileReady);
     if (coastline_debounce_) coastline_debounce_->start(0);
   }
-}
-
-void RadarMapWidget::TriggerCoastlineLoad() {
-  if (!coastline_loader_ || !show_coastline_) return;
-
-  // Compute bbox with a 20 % margin so tiles cover slightly beyond the view.
-  const double margin = range_km_ * 0.2;
-  const double dlat   = (range_km_ + margin) / kKmPerDegLat;
-  const double dlon   = dlat / std::max(0.01, std::cos(center_lat_ * (M_PI / 180.0)));
-
-  coastline_loader_->RequestView(center_lat_ - dlat, center_lon_ - dlon,
-                                  center_lat_ + dlat, center_lon_ + dlon);
 }
 
 void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
@@ -100,35 +86,79 @@ void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
   update();
 }
 
-void RadarMapWidget::OnCoastlineReady(QVector<QPolygonF> polygons) {
-  coastline_polygons_ = std::move(polygons);
-  coastline_path_dirty_ = true;
-  coastline_status_.clear();
-  update();
+// Called when debounce fires.
+void RadarMapWidget::TriggerCoastlineLoad() {
+  if (!coastline_loader_ || !show_coastline_) return;
+
+  // Exact visible bbox — no margin.
+  const double dlat = range_km_ / kKmPerDegLat;
+  const double dlon = dlat / std::max(0.01, std::cos(center_lat_ * (M_PI / 180.0)));
+  coastline_loader_->RequestView(center_lat_ - dlat, center_lon_ - dlon,
+                                  center_lat_ + dlat, center_lon_ + dlon);
+
+  // Re-project all already-loaded tiles for the new view.
+  RebuildAllPaths();
 }
 
-void RadarMapWidget::RebuildCoastlinePath() {
-  coastline_path_ = QPainterPath{};
-  if (!show_coastline_ || coastline_polygons_.isEmpty()) {
-    coastline_path_dirty_ = false;
-    return;
-  }
+// New tile arrived from loader — store and kick off background path build.
+void RadarMapWidget::OnTileReady(int lat_deg, int lon_deg, QVector<QPolygonF> polygons) {
+  const TileKey key{lat_deg, lon_deg};
+  tile_polygons_.insert(key, polygons);
+  coastline_status_.clear();
+  SchedulePathBuild(key);
+}
 
-  const double radius   = std::min(width(), height()) * 0.48;
-  const double px_per_km = radius / std::max(0.001, range_km_);
-  const double cx = width()  * 0.5;
-  const double cy = height() * 0.5;
+// Project one tile's polygons to screen coords in a worker thread.
+void RadarMapWidget::SchedulePathBuild(TileKey key) {
+  if (tiles_building_.contains(key)) return;
+  const QVector<QPolygonF> polys = tile_polygons_.value(key);
+  if (polys.isEmpty()) return;
 
-  for (const QPolygonF& poly : coastline_polygons_) {
-    if (poly.isEmpty()) continue;
-    bool first = true;
-    for (const QPointF& pt : poly) {
-      const QPointF screen = LatLonToXY(pt.x(), pt.y(), cx, cy, px_per_km);
-      if (first) { coastline_path_.moveTo(screen); first = false; }
-      else        coastline_path_.lineTo(screen);
-    }
-  }
-  coastline_path_dirty_ = false;
+  tiles_building_.insert(key);
+
+  // Capture view state by value so the lambda is self-contained.
+  const double clat      = center_lat_;
+  const double clon      = center_lon_;
+  const double rng       = range_km_;
+  const double w         = width();
+  const double h         = height();
+  const double radius    = std::min(w, h) * 0.48;
+  const double px_per_km = radius / std::max(0.001, rng);
+  const double cx        = w * 0.5;
+  const double cy        = h * 0.5;
+  const double cos_lat   = std::cos(clat * (M_PI / 180.0));
+
+  auto* watcher = new QFutureWatcher<QPainterPath>(this);
+  connect(watcher, &QFutureWatcher<QPainterPath>::finished, this,
+          [this, key, watcher]() {
+            tile_paths_.insert(key, watcher->result());
+            tiles_building_.remove(key);
+            watcher->deleteLater();
+            update();
+          });
+  watcher->setFuture(QtConcurrent::run(
+      [polys, clat, clon, px_per_km, cx, cy, cos_lat]() -> QPainterPath {
+        QPainterPath path;
+        for (const QPolygonF& poly : polys) {
+          bool first = true;
+          for (const QPointF& pt : poly) {
+            const double km_n  = (pt.x() - clat) * kKmPerDegLat;
+            const double km_e  = (pt.y() - clon) * cos_lat * kKmPerDegLat;
+            const QPointF scr(cx + km_e * px_per_km, cy - km_n * px_per_km);
+            if (first) { path.moveTo(scr); first = false; }
+            else        path.lineTo(scr);
+          }
+        }
+        return path;
+      }));
+}
+
+// Re-project all loaded tiles — called when view changes.
+void RadarMapWidget::RebuildAllPaths() {
+  tile_paths_.clear();
+  tiles_building_.clear();
+  for (auto it = tile_polygons_.begin(); it != tile_polygons_.end(); ++it)
+    SchedulePathBuild(it.key());
 }
 
 void RadarMapWidget::SetShowLabels(bool enabled) {
@@ -281,14 +311,14 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.fillRect(rect(), bg_color_);
 
-  // Coastline — rebuild path if view has changed, then draw.
-  if (show_coastline_ && !coastline_polygons_.isEmpty()) {
-    if (coastline_path_dirty_) RebuildCoastlinePath();
+  // Coastline — draw all available tile paths (each built off-thread).
+  if (show_coastline_ && !tile_paths_.isEmpty()) {
     painter.save();
     painter.setClipRect(rect());
     painter.setPen(QPen(QColor("#2a7a5a"), 1));
     painter.setBrush(Qt::NoBrush);
-    painter.drawPath(coastline_path_);
+    for (const QPainterPath& path : tile_paths_)
+      painter.drawPath(path);
     painter.restore();
   }
 
@@ -449,7 +479,6 @@ void RadarMapWidget::mouseMoveEvent(QMouseEvent* event) {
 
   center_lat_ -= dlat;
   center_lon_ -= dlon;
-  coastline_path_dirty_ = true;
   if (coastline_debounce_) coastline_debounce_->start();
   emit ViewChanged(center_lat_, center_lon_, range_km_);
   update();

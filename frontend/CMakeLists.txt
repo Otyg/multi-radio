@@ -3,7 +3,7 @@ if(NOT MR_PROTO_AVAILABLE)
   return()
 endif()
 
-find_package(Qt6 COMPONENTS Widgets Core Network QUIET)
+find_package(Qt6 COMPONENTS Widgets Core Network Concurrent QUIET)
 if(NOT Qt6_FOUND)
   message(WARNING "Skipping frontend: Qt6 not found.")
   return()
@@ -45,6 +45,7 @@ target_link_libraries(multi_radio_client
     Qt6::Widgets
     Qt6::Core
     Qt6::Network
+    Qt6::Concurrent
     multi_radio::proto
     sqlite3
 )
