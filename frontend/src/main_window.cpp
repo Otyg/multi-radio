@@ -3304,9 +3304,11 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
                   .arg(sample_rate_hz)
                   .arg(tuned_frequency_hz, 0, 'f', 0));
   }
-  if (!IsSelectedReceiver(receiver_id)) {
-    return;
-  }
+  if (!IsSelectedReceiver(receiver_id)) return;
+
+  // Radar view has no spectrogram or waterfall — skip FFT entirely.
+  if (mode_tabs_ != nullptr &&
+      mode_tabs_->currentIndex() == kAirMarineModeTabIndex) return;
 
   const bool is_scan_range = (mode_tabs_ != nullptr &&
                                mode_tabs_->currentIndex() == kScanRangeModeTabIndex);
