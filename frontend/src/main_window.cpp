@@ -1082,11 +1082,12 @@ std::vector<RadarFixedObject> LoadFixedObjectsFromSettings() {
     if (!v.isObject()) continue;
     const QJsonObject o = v.toObject();
     RadarFixedObject fo;
-    fo.id = o.value("id").toString();
-    fo.name = o.value("name").toString();
-    fo.lat = o.value("lat").toDouble();
-    fo.lon = o.value("lon").toDouble();
-    if (fo.id.isEmpty()) fo.id = QString("%1,%2").arg(fo.lat, 0, 'f', 6).arg(fo.lon, 0, 'f', 6);
+    fo.name   = o.value("name").toString();
+    fo.symbol = o.value("symbol").toString().left(1);  // at most one character
+    fo.lat    = o.value("lat").toDouble();
+    fo.lon    = o.value("lon").toDouble();
+    fo.id     = !fo.name.isEmpty() ? fo.name
+                                   : QString("%1,%2").arg(fo.lat, 0, 'f', 6).arg(fo.lon, 0, 'f', 6);
     out.push_back(fo);
   }
   return out;

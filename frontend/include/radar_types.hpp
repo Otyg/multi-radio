@@ -31,6 +31,7 @@ struct RadarTargetUpdate {
 struct RadarFixedObject {
   QString id;
   QString name;
+  QString symbol;  // optional single character drawn instead of the default circle
   double lat = 0.0;
   double lon = 0.0;
   bool is_base_station = false;

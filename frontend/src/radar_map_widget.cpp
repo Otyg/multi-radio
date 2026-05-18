@@ -201,12 +201,13 @@ void RadarMapWidget::UpdateTargetLabel(const QString& id, const QString& label) 
 }
 
 void RadarMapWidget::TrimTrails(std::uint64_t now_ms) {
-  if (trail_window_ms_ == 0) return;
-  const std::uint64_t cutoff = (now_ms > trail_window_ms_) ? (now_ms - trail_window_ms_) : 0;
   for (auto& [_, state] : targets_) {
-    while (!state.trail.empty() && state.trail.front().unix_ms < cutoff) {
+    const std::uint64_t window = (state.last.kind == RadarTargetKind::kVessel)
+        ? vessel_trail_window_ms_ : trail_window_ms_;
+    if (window == 0) continue;
+    const std::uint64_t cutoff = (now_ms > window) ? (now_ms - window) : 0;
+    while (!state.trail.empty() && state.trail.front().unix_ms < cutoff)
       state.trail.pop_front();
-    }
   }
 }
 
@@ -342,7 +343,13 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
       } else {
         painter.setPen(QPen(WithAlpha(label_color_, 0.9), 1));
         painter.setFont(fixed_font);
-        painter.drawEllipse(p, 3.2, 3.2);
+        if (!fixed.symbol.isEmpty()) {
+          const QFontMetrics fm(fixed_font);
+          painter.drawText(QPointF(p.x() - fm.horizontalAdvance(fixed.symbol) / 2.0,
+                                   p.y() + fm.ascent() / 2.0), fixed.symbol);
+        } else {
+          painter.drawEllipse(p, 3.2, 3.2);
+        }
         if (show_fixed_names_ && !fixed.name.isEmpty()) {
           painter.drawText(QPointF(p.x() + 7.0, p.y() - 2.0), fixed.name);
         }

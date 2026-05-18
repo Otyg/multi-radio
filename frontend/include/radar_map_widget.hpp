@@ -101,7 +101,8 @@ class RadarMapWidget : public QWidget {
   QColor aircraft_color_ = QColor("#a0d8ff");
   QColor selected_color_ = QColor("#ff4d4d");
 
-  std::uint64_t trail_window_ms_ = 120000;
+  std::uint64_t trail_window_ms_        = 120000;   // aircraft: 2 min
+  std::uint64_t vessel_trail_window_ms_ = 300000;   // vessels:  5 min
 
   // Coastline — lat/lon geometry per 1°×1° tile; projected to screen in paintEvent.
   using TileKey = QPair<int, int>;  // (lat_floor_deg, lon_floor_deg)
