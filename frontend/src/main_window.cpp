@@ -1853,13 +1853,10 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       });
     };
 
+    // _v2 suffix forces fresh fetch with pagination support (old cache lacked pagination).
     coastline_loader_boundaries_ = new CoastlineLoader(
-        app_data + "/coastline_land_water_boundary.db", "LandWaterBoundary", this);
+        app_data + "/coastline_land_water_boundary_v2.db", "LandWaterBoundary", this);
     wire_loader(coastline_loader_boundaries_, "LandWaterBoundary");
-
-    coastline_loader_water_ = new CoastlineLoader(
-        app_data + "/coastline_standing_water.db", "StandingWater", this);
-    wire_loader(coastline_loader_water_, "StandingWater");
   }
 
   air_marine_splitter->addWidget(air_marine_controls);

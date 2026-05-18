@@ -44,11 +44,12 @@ CoastlineLoader::~CoastlineLoader() = default;
 
 void CoastlineLoader::RequestView(double lat_min, double lon_min,
                                    double lat_max, double lon_max) {
-  // Cancel all in-flight requests.
+  // Cancel all in-flight requests and clear accumulated partial pages.
   for (auto it = reply_map_.begin(); it != reply_map_.end(); ++it)
     it.key()->abort();
   reply_map_.clear();
   pending_.clear();
+  tile_partial_.clear();
 
   const auto tiles = TilesForBbox(lat_min, lon_min, lat_max, lon_max);
 
@@ -56,8 +57,8 @@ void CoastlineLoader::RequestView(double lat_min, double lon_min,
   for (const TileKey& tile : tiles) {
     auto cached = cache_->GetTile(tile.first, tile.second);
     if (cached.has_value()) {
-      // Deliver immediately via queued invocation so the caller is never
-      // re-entered synchronously.
+      emit FetchingUrl(QString("[cache] tile %1:%2 — %3 features")
+                           .arg(tile.first).arg(tile.second).arg(cached->size()));
       QTimer::singleShot(0, this, [this, tile, polys = std::move(*cached)]() mutable {
         emit TileReady(tile.first, tile.second, std::move(polys));
       });
