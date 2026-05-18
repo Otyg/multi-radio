@@ -403,4 +403,10 @@ void TrackDatabase::Prune(uint64_t tracks_max_age_ms, uint64_t raw_max_age_ms) {
   }
 }
 
+void TrackDatabase::ClearEntities() {
+  std::lock_guard<std::mutex> lock(mu_);
+  sqlite3_exec(db_, "DELETE FROM entities", nullptr, nullptr, nullptr);
+  name_cache_.clear();
+}
+
 }  // namespace multi_radio

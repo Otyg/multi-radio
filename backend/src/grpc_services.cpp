@@ -301,9 +301,10 @@ void FillPluginInfo(const PluginInfo& info, v1::PluginInfo* out) {
 class RadioControlServiceImpl final : public v1::RadioControlService::Service {
  public:
   RadioControlServiceImpl(ReceiverManager* receiver_manager, PluginHost* plugin_host,
-                          std::string auth_token)
+                          TrackDatabase* track_db, std::string auth_token)
       : receiver_manager_(receiver_manager),
         plugin_host_(plugin_host),
+        track_db_(track_db),
         auth_token_(std::move(auth_token)) {}
 
   grpc::Status ListReceivers(grpc::ServerContext* context, const v1::ListReceiversRequest*,
@@ -446,10 +447,21 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status ClearNameDatabase(grpc::ServerContext* context,
+                                  const v1::ClearNameDatabaseRequest* /*request*/,
+                                  v1::ClearNameDatabaseResponse* response) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_))
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    if (track_db_) track_db_->ClearEntities();
+    response->set_ok(true);
+    return grpc::Status::OK;
+  }
+
  private:
   ReceiverManager* receiver_manager_;
-  PluginHost* plugin_host_;
-  std::string auth_token_;
+  PluginHost*      plugin_host_;
+  TrackDatabase*   track_db_;
+  std::string      auth_token_;
 };
 
 class TelemetryServiceImpl final : public v1::TelemetryService::Service {
@@ -663,9 +675,10 @@ class ServerApp::Impl {
   explicit Impl(std::string auth_token) : auth_token_(std::move(auth_token)) {}
 
   bool Run(ReceiverManager* receiver_manager, PluginHost* plugin_host, EventBus* event_bus,
-           TargetTracker* target_tracker, const std::string& bind_address, std::string* error) {
+           TargetTracker* target_tracker, TrackDatabase* track_db,
+           const std::string& bind_address, std::string* error) {
     radio_control_service_ =
-        std::make_unique<RadioControlServiceImpl>(receiver_manager, plugin_host, auth_token_);
+        std::make_unique<RadioControlServiceImpl>(receiver_manager, plugin_host, track_db, auth_token_);
     telemetry_service_ = std::make_unique<TelemetryServiceImpl>(event_bus, target_tracker, auth_token_);
 
     grpc::ServerBuilder builder;
@@ -731,7 +744,7 @@ bool ServerApp::Run(std::string* error) {
     return false;
   }
   return impl_->Run(receiver_manager_.get(), plugin_host_.get(), event_bus_.get(),
-                    target_tracker_.get(), config_.bind_address, error);
+                    target_tracker_.get(), track_db_.get(), config_.bind_address, error);
 }
 
 void ServerApp::Shutdown() {

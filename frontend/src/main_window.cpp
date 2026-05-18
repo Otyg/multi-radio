@@ -2040,6 +2040,19 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   global_layout->addRow("Spectrum view", spectrum_source_combo_);
   global_layout->addRow(visualization_settings_button);
 
+  auto* clear_name_db_button = new QPushButton("Rensa label-databas", global_tab);
+  clear_name_db_button->setToolTip(
+      "Tar bort alla inl\xc3\xa4rda ICAO/MMSI \xe2\x86\x92 namn-mappningar p\xc3\xa5 servern.");
+  connect(clear_name_db_button, &QPushButton::clicked, this, [this]() {
+    std::string err;
+    if (client_->ClearNameDatabase(&err)) {
+      AppendLog("[Label-databas] Rensad.");
+    } else {
+      AppendLog(QString("[Label-databas] Fel: %1").arg(QString::fromStdString(err)));
+    }
+  });
+  global_layout->addRow(clear_name_db_button);
+
   auto* clear_map_cache_button = new QPushButton("Rensa kart-cache", global_tab);
   clear_map_cache_button->setToolTip(
       "Tar bort cachad kartdata och hämtar om kustlinjer vid nästa visning.");

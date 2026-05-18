@@ -203,6 +203,9 @@ message SetHardwareConfigResponse { bool ok = 1; string error = 2; }
 message GetHardwareConfigRequest {}
 message GetHardwareConfigResponse { HardwareConfig config = 1; }
 
+message ClearNameDatabaseRequest {}
+message ClearNameDatabaseResponse { bool ok = 1; }
+
 // Radar target snapshot — one entry per tracked object.
 message RadarTarget {
   string   id           = 1;  // ICAO hex or MMSI
@@ -241,6 +244,7 @@ service RadioControlService {
   rpc DisablePlugin(DisablePluginRequest) returns (DisablePluginResponse);
   rpc SetHardwareConfig(SetHardwareConfigRequest) returns (SetHardwareConfigResponse);
   rpc GetHardwareConfig(GetHardwareConfigRequest) returns (GetHardwareConfigResponse);
+  rpc ClearNameDatabase(ClearNameDatabaseRequest) returns (ClearNameDatabaseResponse);
 }
 
 service TelemetryService {

@@ -171,6 +171,17 @@ bool GrpcClient::SetHardwareConfig(const v1::HardwareConfig& config, std::string
   return true;
 }
 
+bool GrpcClient::ClearNameDatabase(std::string* error) {
+  grpc::ClientContext context;
+  AddAuth(&context);
+  SetUnaryDeadline(&context);
+  v1::ClearNameDatabaseRequest request;
+  v1::ClearNameDatabaseResponse response;
+  grpc::Status status = control_client_->ClearNameDatabase(&context, request, &response);
+  if (!status.ok()) { if (error) *error = status.error_message(); return false; }
+  return response.ok();
+}
+
 void GrpcClient::StartStreaming() {
   bool expected = false;
   if (!streaming_.compare_exchange_strong(expected, true)) {

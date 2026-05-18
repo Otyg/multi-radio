@@ -84,6 +84,9 @@ class TrackDatabase {
   // raw_max_age_ms. Pass 0 to skip that category.
   void Prune(uint64_t tracks_max_age_ms, uint64_t raw_max_age_ms);
 
+  // Remove all learned ICAO/MMSI → name/callsign mappings.
+  void ClearEntities();
+
  private:
   void InitSchema();
   void PrepareStatements();
