@@ -5,22 +5,21 @@
 #include <limits>
 
 #include <QFont>
-#include <QFutureWatcher>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
 #include <QWheelEvent>
-#include <QtConcurrent/QtConcurrent>
 
 namespace multi_radio {
 
 namespace {
 
-constexpr int kRingCount = 5;
-constexpr double kKmPerDegLat = 110.574;
-constexpr double kMinRangeKm = 0.2;
-constexpr double kMaxRangeKm = 500.0;
+constexpr int    kRingCount              = 5;
+constexpr double kKmPerDegLat            = 110.574;  // km per degree latitude
+constexpr double kKmPerDegLonAtEquator   = 111.320;  // km per degree longitude at equator
+constexpr double kMinRangeKm             = 0.2;
+constexpr double kMaxRangeKm             = 500.0;
 constexpr double kDefaultTrailWindowSeconds = 120.0;
 
 static std::string ToKey(const QString& id) { return id.toStdString(); }
@@ -82,85 +81,22 @@ void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
   update();
 }
 
-// Called when debounce fires.
+// Called when debounce fires — request tiles for the current view.
 void RadarMapWidget::TriggerCoastlineLoad() {
   if (coastline_loaders_.isEmpty() || !show_coastline_) return;
-
-  // Exact visible bbox — no margin.
   const double dlat = range_km_ / kKmPerDegLat;
-  const double dlon = dlat / std::max(0.01, std::cos(center_lat_ * (M_PI / 180.0)));
+  const double dlon = range_km_ / (kKmPerDegLonAtEquator *
+                                    std::max(0.01, std::cos(center_lat_ * (M_PI / 180.0))));
   for (CoastlineLoader* loader : coastline_loaders_)
     loader->RequestView(center_lat_ - dlat, center_lon_ - dlon,
                         center_lat_ + dlat, center_lon_ + dlon);
-
-  // Re-project all already-loaded tiles for the new view.
-  RebuildAllPaths();
 }
 
-// New tile arrived from loader — store and kick off background path build.
+// New tile arrived — append (multiple collections share the same tile slot).
 void RadarMapWidget::OnTileReady(int lat_deg, int lon_deg, QVector<QPolygonF> polygons) {
-  const TileKey key{lat_deg, lon_deg};
-  // Append — multiple collections deliver to the same tile slot.
-  auto& existing = tile_polygons_[key];
-  existing.append(polygons);
+  tile_polygons_[{lat_deg, lon_deg}].append(polygons);
   coastline_status_.clear();
-  // Invalidate any cached path so it gets rebuilt with the combined data.
-  tile_paths_.remove(key);
-  tiles_building_.remove(key);
-  SchedulePathBuild(key);
-}
-
-// Project one tile's polygons to screen coords in a worker thread.
-void RadarMapWidget::SchedulePathBuild(TileKey key) {
-  if (tiles_building_.contains(key)) return;
-  const QVector<QPolygonF> polys = tile_polygons_.value(key);
-  if (polys.isEmpty()) return;
-
-  tiles_building_.insert(key);
-
-  // Capture view state by value so the lambda is self-contained.
-  const double clat      = center_lat_;
-  const double clon      = center_lon_;
-  const double rng       = range_km_;
-  const double w         = width();
-  const double h         = height();
-  const double radius    = std::min(w, h) * 0.48;
-  const double px_per_km = radius / std::max(0.001, rng);
-  const double cx        = w * 0.5;
-  const double cy        = h * 0.5;
-  const double cos_lat   = std::cos(clat * (M_PI / 180.0));
-
-  auto* watcher = new QFutureWatcher<QPainterPath>(this);
-  connect(watcher, &QFutureWatcher<QPainterPath>::finished, this,
-          [this, key, watcher]() {
-            tile_paths_.insert(key, watcher->result());
-            tiles_building_.remove(key);
-            watcher->deleteLater();
-            update();
-          });
-  watcher->setFuture(QtConcurrent::run(
-      [polys, clat, clon, px_per_km, cx, cy, cos_lat]() -> QPainterPath {
-        QPainterPath path;
-        for (const QPolygonF& poly : polys) {
-          bool first = true;
-          for (const QPointF& pt : poly) {
-            const double km_n  = (pt.x() - clat) * kKmPerDegLat;
-            const double km_e  = (pt.y() - clon) * cos_lat * kKmPerDegLat;
-            const QPointF scr(cx + km_e * px_per_km, cy - km_n * px_per_km);
-            if (first) { path.moveTo(scr); first = false; }
-            else        path.lineTo(scr);
-          }
-        }
-        return path;
-      }));
-}
-
-// Re-project all loaded tiles — called when view changes.
-void RadarMapWidget::RebuildAllPaths() {
-  tile_paths_.clear();
-  tiles_building_.clear();
-  for (auto it = tile_polygons_.begin(); it != tile_polygons_.end(); ++it)
-    SchedulePathBuild(it.key());
+  update();  // paintEvent projects directly from lat/lon — always up-to-date
 }
 
 void RadarMapWidget::SetShowLabels(bool enabled) {
@@ -270,8 +206,7 @@ QPointF RadarMapWidget::LatLonToXY(double lat, double lon, double cx, double cy,
   const double dlat = lat - center_lat_;
   const double dlon = lon - center_lon_;
   const double km_n = dlat * kKmPerDegLat;
-  const double km_e =
-      dlon * std::cos(center_lat_ * (M_PI / 180.0)) * kKmPerDegLat;  // good enough for local radar
+  const double km_e = dlon * std::cos(center_lat_ * (M_PI / 180.0)) * kKmPerDegLonAtEquator;
   return QPointF(cx + (km_e * px_per_km), cy - (km_n * px_per_km));
 }
 
@@ -313,15 +248,42 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.fillRect(rect(), bg_color_);
 
-  // Coastline — draw all available tile paths (each built off-thread).
-  if (show_coastline_ && !tile_paths_.isEmpty()) {
-    painter.save();
-    painter.setClipRect(rect());
-    painter.setPen(QPen(QColor("#2a7a5a"), 1));
+  // Coastline — project lat/lon segments directly each frame.
+  // This is always correct for the current view (no stale pre-projected paths).
+  if (show_coastline_ && !tile_polygons_.isEmpty()) {
+    const double cos_lat = std::cos(center_lat_ * (M_PI / 180.0));
+    // Viewport half-diagonals in degrees for culling segments far outside view.
+    const double cull_lat = range_km_ / kKmPerDegLat * 1.5;
+    const double cull_lon = range_km_ / (kKmPerDegLonAtEquator * std::max(0.01, cos_lat)) * 1.5;
+
+    QPen cpen(QColor("#1e6644"), 1);
+    cpen.setWidthF(0.8);
+    painter.setPen(cpen);
     painter.setBrush(Qt::NoBrush);
-    for (const QPainterPath& path : tile_paths_)
-      painter.drawPath(path);
-    painter.restore();
+
+    for (const QVector<QPolygonF>& polys : tile_polygons_) {
+      for (const QPolygonF& poly : polys) {
+        if (poly.size() < 2) continue;
+        QPointF prev;
+        bool prev_valid = false;
+        for (const QPointF& pt : poly) {
+          // pt.x() = lat, pt.y() = lon
+          // Cull points far outside the visible area.
+          if (std::abs(pt.x() - center_lat_) > cull_lat ||
+              std::abs(pt.y() - center_lon_) > cull_lon) {
+            prev_valid = false;
+            continue;
+          }
+          const double km_n = (pt.x() - center_lat_) * kKmPerDegLat;
+          const double km_e = (pt.y() - center_lon_) * cos_lat * kKmPerDegLonAtEquator;
+          const QPointF cur(cx + km_e * px_per_km, cy - km_n * px_per_km);
+          if (prev_valid)
+            painter.drawLine(prev, cur);
+          prev = cur;
+          prev_valid = true;
+        }
+      }
+    }
   }
 
   // Grid.

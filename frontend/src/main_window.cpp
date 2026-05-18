@@ -32,6 +32,7 @@
 #include <QSignalBlocker>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStatusBar>
 #include <QMenu>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1832,7 +1833,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
         AppendLog(QString("[Kustlinje/%1] Hämtar tiles\xe2\x80\xa6").arg(label));
       });
       connect(loader, &CoastlineLoader::FetchingUrl, this, [this](const QString& url) {
-        AppendLog("[Kustlinje] GET " + url);
+        statusBar()->showMessage("Hämtar: " + url, 5000);
       });
       connect(loader, &CoastlineLoader::FetchFailed, this,
               [this, label](const QString& error) {
