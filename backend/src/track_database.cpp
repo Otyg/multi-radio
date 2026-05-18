@@ -77,16 +77,21 @@ TrackDatabase::TrackDatabase(std::filesystem::path db_path) {
   InitSchema();
   PrepareStatements();
 
-  // Warm the name cache from DB.
+  // Warm the name cache from DB — kind-aware preference.
   sqlite3_stmt* s = nullptr;
-  SqliteCheck(sqlite3_prepare_v2(db_,
-      "SELECT id, COALESCE(NULLIF(callsign,''), NULLIF(name,''), '') FROM entities",
-      -1, &s, nullptr), "warm name cache");
+  SqliteCheck(sqlite3_prepare_v2(db_, R"sql(
+    SELECT id,
+      CASE WHEN kind='SEA'
+        THEN COALESCE(NULLIF(name,''), NULLIF(callsign,''), '')
+        ELSE COALESCE(NULLIF(callsign,''), NULLIF(name,''), '')
+      END
+    FROM entities
+  )sql", -1, &s, nullptr), "warm name cache");
   while (sqlite3_step(s) == SQLITE_ROW) {
-    const char* id   = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
-    const char* name = reinterpret_cast<const char*>(sqlite3_column_text(s, 1));
-    if (id && name && name[0])
-      name_cache_[id] = name;
+    const char* id    = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+    const char* label = reinterpret_cast<const char*>(sqlite3_column_text(s, 1));
+    if (id && label && label[0])
+      name_cache_[id] = label;
   }
   sqlite3_finalize(s);
 }
@@ -154,9 +159,12 @@ void TrackDatabase::PrepareStatements() {
       last_seen = excluded.last_seen
   )sql", -1, &stmt_upsert_entity_, nullptr), "prepare upsert_entity");
 
-  SqliteCheck(sqlite3_prepare_v2(db_,
-      "SELECT COALESCE(NULLIF(callsign,''), NULLIF(name,''), '') FROM entities WHERE id=?",
-      -1, &stmt_lookup_name_, nullptr), "prepare lookup_name");
+  SqliteCheck(sqlite3_prepare_v2(db_, R"sql(
+    SELECT CASE WHEN kind='SEA'
+      THEN COALESCE(NULLIF(name,''), NULLIF(callsign,''), '')
+      ELSE COALESCE(NULLIF(callsign,''), NULLIF(name,''), '')
+    END FROM entities WHERE id=?
+  )sql", -1, &stmt_lookup_name_, nullptr), "prepare lookup_name");
 
   SqliteCheck(sqlite3_prepare_v2(db_, R"sql(
     INSERT INTO tracks (entity_id, ts, lat, lon, altitude_ft, sog_knots, cog_degrees, source)
@@ -186,8 +194,10 @@ void TrackDatabase::UpsertEntity(const std::string& id, const std::string& kind,
   if (id.empty()) return;
   std::lock_guard<std::mutex> lock(mu_);
 
-  // Update in-memory name cache.
-  const std::string& label = callsign.empty() ? name : callsign;
+  // Update in-memory name cache — AIS (SEA) prefers vessel name, ADS-B (AIR) prefers callsign.
+  const std::string& label = (kind == "SEA")
+      ? (name.empty() ? callsign : name)
+      : (callsign.empty() ? name : callsign);
   if (!label.empty()) name_cache_[id] = label;
 
   auto* s = stmt_upsert_entity_;
