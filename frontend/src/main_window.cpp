@@ -1879,6 +1879,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   connect(visible_objects_widget_, &VisibleObjectsWidget::TargetActivated, this, [this](const QString& id) {
     if (radar_widget_ != nullptr) radar_widget_->SetSelectedTarget(id);
   });
+  connect(radar_widget_, &RadarMapWidget::ViewChanged, this,
+          [this](double center_lat, double center_lon, double /*range_km*/) {
+    if (visible_objects_widget_ != nullptr)
+      visible_objects_widget_->SetCenter(center_lat, center_lon);
+  });
   // Radar settings controls (persisted).
   {
     QSettings settings("multi-radio", "multi-radio-client");
@@ -1899,6 +1904,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     radar_widget_->SetTrailWindowSeconds(trail_s);
     if (center_lat != 0.0 || center_lon != 0.0) {
       radar_widget_->SetCenter(center_lat, center_lon);
+      if (visible_objects_widget_ != nullptr)
+        visible_objects_widget_->SetCenter(center_lat, center_lon);
     }
     if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(hide_low_speed);
 

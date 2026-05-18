@@ -23,14 +23,25 @@ static QString KindLabel(RadarTargetKind kind) {
   }
 }
 
+static double HaversineKm(double lat1, double lon1, double lat2, double lon2) {
+  constexpr double kR = 6371.0;
+  constexpr double kDeg = M_PI / 180.0;
+  const double dlat = (lat2 - lat1) * kDeg;
+  const double dlon = (lon2 - lon1) * kDeg;
+  const double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
+                   std::cos(lat1 * kDeg) * std::cos(lat2 * kDeg) *
+                   std::sin(dlon / 2) * std::sin(dlon / 2);
+  return 2.0 * kR * std::asin(std::sqrt(a));
+}
+
 }  // namespace
 
 VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
   auto* layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
 
-  table_ = new QTableWidget(0, 8, this);
-  table_->setHorizontalHeaderLabels({"Kind", "Label", "Lat", "Lon", "SOG", "COG", "Alt", "Last"});
+  table_ = new QTableWidget(0, 7, this);
+  table_->setHorizontalHeaderLabels({"Kind", "Label", "Dist", "SOG", "COG", "Alt", "Last"});
   table_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
   table_->horizontalHeader()->setStretchLastSection(true);
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -84,17 +95,22 @@ void VisibleObjectsWidget::RefreshTable() {
     label_item->setData(Qt::UserRole, t.id);
     table_->setItem(i, 1, label_item);
 
-    table_->setItem(i, 2, new QTableWidgetItem(std::isfinite(t.lat) ? QString::number(t.lat, 'f', 5) : QString()));
-    table_->setItem(i, 3, new QTableWidgetItem(std::isfinite(t.lon) ? QString::number(t.lon, 'f', 5) : QString()));
-    table_->setItem(i, 4, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.sog, 'f', 1) : QString()));
-    table_->setItem(i, 5, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.cog, 'f', 1) : QString()));
-    table_->setItem(i, 6, new QTableWidgetItem(
+    QString dist_str;
+    if (std::isfinite(t.lat) && std::isfinite(t.lon) && (center_lat_ != 0.0 || center_lon_ != 0.0)) {
+      const double km = HaversineKm(center_lat_, center_lon_, t.lat, t.lon);
+      dist_str = km < 10.0 ? QString::number(km, 'f', 2) + " km"
+                           : QString::number(km, 'f', 1) + " km";
+    }
+    table_->setItem(i, 2, new QTableWidgetItem(dist_str));
+    table_->setItem(i, 3, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.sog, 'f', 1) : QString()));
+    table_->setItem(i, 4, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.cog, 'f', 1) : QString()));
+    table_->setItem(i, 5, new QTableWidgetItem(
         std::isfinite(t.altitude) ? QString::number(static_cast<int>(t.altitude)) + " ft" : QString()));
 
     const QString last = t.unix_ms > 0
         ? QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(t.unix_ms)).toLocalTime().toString("HH:mm:ss")
         : QString();
-    table_->setItem(i, 7, new QTableWidgetItem(last));
+    table_->setItem(i, 6, new QTableWidgetItem(last));
 
     if (!selected_id_.isEmpty() && t.id == selected_id_)
       table_->selectRow(i);

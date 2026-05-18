@@ -21,6 +21,7 @@ class VisibleObjectsWidget : public QWidget {
   void ApplySnapshot(const QVector<RadarTargetUpdate>& targets, const QStringList& removed_ids);
   void SetSelectedTarget(const QString& id);
   void SetHideLowSpeed(bool enabled) { hide_low_speed_ = enabled; RefreshTable(); }
+  void SetCenter(double lat, double lon) { center_lat_ = lat; center_lon_ = lon; RefreshTable(); }
 
  signals:
   void TargetActivated(const QString& id);
@@ -36,6 +37,8 @@ class VisibleObjectsWidget : public QWidget {
   std::unordered_map<std::string, RowState> rows_;
   QString selected_id_;
   bool hide_low_speed_ = false;
+  double center_lat_ = 0.0;
+  double center_lon_ = 0.0;
 };
 
 }  // namespace multi_radio
