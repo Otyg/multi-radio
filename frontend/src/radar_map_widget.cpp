@@ -21,6 +21,9 @@ constexpr double kKmPerDegLonAtEquator   = 111.320;  // km per degree longitude 
 constexpr double kMinRangeKm             = 0.2;
 constexpr double kMaxRangeKm             = 500.0;
 constexpr double kDefaultTrailWindowSeconds = 120.0;
+constexpr double kVectorMinutes          = (10.0 / 60.0);  // speed vector shows 10 s of travel
+constexpr double kKnotsToKmH             = 1.852;
+constexpr double kMinSogForVector        = 0.5;   // knots — below this no vector is drawn
 
 static std::string ToKey(const QString& id) { return id.toStdString(); }
 
@@ -380,6 +383,32 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
       painter.drawPolygon(poly);
     } else {
       painter.drawEllipse(p, 3.2, 3.2);
+    }
+
+    // Speed vector — 5-minute projection in COG direction.
+    if (t.sog >= kMinSogForVector) {
+      const double vec_km  = t.sog * kKnotsToKmH * (kVectorMinutes / 60.0);
+      const double cog_rad = t.cog * (M_PI / 180.0);
+      const double ex = p.x() + std::sin(cog_rad) * vec_km * px_per_km;
+      const double ey = p.y() - std::cos(cog_rad) * vec_km * px_per_km;
+      painter.setPen(QPen(WithAlpha(color, 0.75), 1.2));
+      painter.setBrush(Qt::NoBrush);
+      painter.drawLine(p, QPointF(ex, ey));
+
+      // Arrowhead at tip (screen-space, fixed pixel size).
+      constexpr double kArrowPx  = 6.0;
+      constexpr double kArrowAng = 30.0 * (M_PI / 180.0);
+      const double base = std::atan2(ey - p.y(), ex - p.x());
+      painter.drawLine(QPointF(ex, ey),
+                       QPointF(ex - kArrowPx * std::cos(base - kArrowAng),
+                               ey - kArrowPx * std::sin(base - kArrowAng)));
+      painter.drawLine(QPointF(ex, ey),
+                       QPointF(ex - kArrowPx * std::cos(base + kArrowAng),
+                               ey - kArrowPx * std::sin(base + kArrowAng)));
+
+      // Reset pen/brush for label.
+      painter.setPen(QPen(color, 1));
+      painter.setBrush(color);
     }
 
     if (show_labels_) {
