@@ -63,6 +63,7 @@ class CoastlineLoader : public QObject {
                                         double lat_max, double lon_max);
   void FetchTile(const TileKey& tile);
   static QVector<QPolygonF> ParseGeoJson(const QByteArray& data);
+  static QString             ExtractNextUrl(const QByteArray& data);
 
   QNetworkAccessManager*          nam_ = nullptr;
   std::unique_ptr<CoastlineCache> cache_;
@@ -70,8 +71,9 @@ class CoastlineLoader : public QObject {
   QString                         username_;
   QString                         password_;
 
-  QSet<TileKey>                   pending_;
-  QMap<QNetworkReply*, TileKey>   reply_map_;
+  QSet<TileKey>                           pending_;
+  QMap<QNetworkReply*, TileKey>           reply_map_;
+  QMap<TileKey, QVector<QPolygonF>>       tile_partial_;  // accumulated pages
 };
 
 }  // namespace multi_radio

@@ -1834,6 +1834,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       });
       connect(loader, &CoastlineLoader::FetchingUrl, this, [this](const QString& url) {
         statusBar()->showMessage("Hämtar: " + url, 5000);
+        AppendLog("[Kustlinje] GET " + url);
       });
       connect(loader, &CoastlineLoader::FetchFailed, this,
               [this, label](const QString& error) {

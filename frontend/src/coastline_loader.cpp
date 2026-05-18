@@ -117,37 +117,76 @@ void CoastlineLoader::FetchTile(const TileKey& tile) {
 }
 
 // -----------------------------------------------------------------------
-// Network reply — parse in background thread
+// Network reply — parse in background thread, handle pagination
 // -----------------------------------------------------------------------
+
+struct ParseResult {
+  QVector<QPolygonF> polygons;
+  QString            next_url;
+};
 
 void CoastlineLoader::OnReply(QNetworkReply* reply) {
   reply->deleteLater();
   const TileKey tile = reply_map_.take(reply);
   if (!pending_.contains(tile)) return;
-  pending_.remove(tile);
 
   if (reply->error() != QNetworkReply::NoError) {
+    pending_.remove(tile);
+    tile_partial_.remove(tile);
     emit FetchFailed(reply->errorString());
     return;
   }
 
   const QByteArray data = reply->readAll();
 
-  // Parse and cache in a background thread; deliver result via queued signal.
-  auto* watcher = new QFutureWatcher<QVector<QPolygonF>>(this);
-  connect(watcher, &QFutureWatcher<QVector<QPolygonF>>::finished, this,
+  auto* watcher = new QFutureWatcher<ParseResult>(this);
+  connect(watcher, &QFutureWatcher<ParseResult>::finished, this,
           [this, tile, watcher]() {
-            QVector<QPolygonF> polys = watcher->result();
+            ParseResult result = watcher->result();
             watcher->deleteLater();
-            cache_->StoreTile(tile.first, tile.second, polys);
-            emit TileReady(tile.first, tile.second, std::move(polys));
+
+            // Accumulate polygons across pages.
+            tile_partial_[tile].append(result.polygons);
+
+            if (!result.next_url.isEmpty()) {
+              // More pages — fetch next page with the URL from the response.
+              emit FetchingUrl(result.next_url);
+              QNetworkRequest req(QUrl(result.next_url));
+              req.setHeader(QNetworkRequest::UserAgentHeader, "multi-radio/1.0");
+              req.setRawHeader("Accept", "application/geo+json");
+              if (!username_.isEmpty()) {
+                req.setRawHeader("Authorization",
+                    "Basic " + (username_ + ':' + password_).toUtf8().toBase64());
+              }
+              reply_map_.insert(nam_->get(req), tile);
+            } else {
+              // All pages received — deliver and cache.
+              pending_.remove(tile);
+              QVector<QPolygonF> all = tile_partial_.take(tile);
+              cache_->StoreTile(tile.first, tile.second, all);
+              emit TileReady(tile.first, tile.second, std::move(all));
+            }
           });
-  watcher->setFuture(QtConcurrent::run([data]() { return ParseGeoJson(data); }));
+  watcher->setFuture(QtConcurrent::run([data]() -> ParseResult {
+    return { ParseGeoJson(data), ExtractNextUrl(data) };
+  }));
 }
 
 // -----------------------------------------------------------------------
-// GeoJSON parsing (runs in worker thread — no Qt GUI calls)
+// GeoJSON helpers (run in worker thread — no Qt GUI calls)
 // -----------------------------------------------------------------------
+
+QString CoastlineLoader::ExtractNextUrl(const QByteArray& data) {
+  const QJsonDocument doc = QJsonDocument::fromJson(data);
+  if (!doc.isObject()) return {};
+  const QJsonArray links = doc.object().value("links").toArray();
+  for (const QJsonValue& lv : links) {
+    const QJsonObject link = lv.toObject();
+    if (link.value("rel").toString() == "next")
+      return link.value("href").toString();
+  }
+  return {};
+}
 
 QVector<QPolygonF> CoastlineLoader::ParseGeoJson(const QByteArray& data) {
   QVector<QPolygonF> result;
