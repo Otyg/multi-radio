@@ -90,6 +90,11 @@ QVector<QPolygonF> CoastlineCache::Decode(const QByteArray& blob) {
   return result;
 }
 
+void CoastlineCache::ClearAll() {
+  if (!db_) return;
+  sqlite3_exec(db_, "DELETE FROM tiles", nullptr, nullptr, nullptr);
+}
+
 std::optional<QVector<QPolygonF>> CoastlineCache::GetTile(int lat_deg, int lon_deg) const {
   if (!db_) return std::nullopt;
 

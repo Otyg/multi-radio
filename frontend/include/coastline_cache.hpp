@@ -30,6 +30,9 @@ class CoastlineCache {
   // Persists polygons for a tile.
   void StoreTile(int lat_deg, int lon_deg, const QVector<QPolygonF>& polygons);
 
+  // Remove all cached tiles.
+  void ClearAll();
+
  private:
   static QString TileKey(int lat_deg, int lon_deg);
   // Encode/decode polygon list to/from a compact binary blob.

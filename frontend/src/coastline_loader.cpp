@@ -38,6 +38,10 @@ CoastlineLoader::CoastlineLoader(const QString& cache_path,
 
 CoastlineLoader::~CoastlineLoader() = default;
 
+void CoastlineLoader::ClearCache() {
+  if (cache_) cache_->ClearAll();
+}
+
 // -----------------------------------------------------------------------
 // Public
 // -----------------------------------------------------------------------

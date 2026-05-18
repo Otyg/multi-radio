@@ -2039,6 +2039,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   auto* visualization_settings_button = new QPushButton("Visualization settings...", global_tab);
   global_layout->addRow("Spectrum view", spectrum_source_combo_);
   global_layout->addRow(visualization_settings_button);
+
+  auto* clear_map_cache_button = new QPushButton("Rensa kart-cache", global_tab);
+  clear_map_cache_button->setToolTip(
+      "Tar bort cachad kartdata och hämtar om kustlinjer vid nästa visning.");
+  connect(clear_map_cache_button, &QPushButton::clicked, this, [this]() {
+    if (coastline_loader_boundaries_) coastline_loader_boundaries_->ClearCache();
+    AppendLog("[Kustlinje] Kart-cache rensad.");
+    if (radar_widget_) radar_widget_->ClearCoastline();
+  });
+  global_layout->addRow(clear_map_cache_button);
+
   mode_tabs_->addTab(global_tab, "GLOBAL");
   mode_tabs_->setCurrentIndex(kFixedModeTabIndex);
   last_tab_index_ = mode_tabs_->currentIndex();

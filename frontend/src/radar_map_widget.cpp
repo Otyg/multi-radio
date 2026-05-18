@@ -75,6 +75,11 @@ void RadarMapWidget::AddCoastlineLoader(CoastlineLoader* loader) {
   if (coastline_debounce_) coastline_debounce_->start(0);
 }
 
+void RadarMapWidget::ClearCoastline() {
+  tile_polygons_.clear();
+  update();
+}
+
 void RadarMapWidget::SetCoastlineStatus(const QString& text, bool is_error) {
   coastline_status_       = text;
   coastline_status_error_ = is_error;

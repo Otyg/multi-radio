@@ -31,6 +31,7 @@ class RadarMapWidget : public QWidget {
   void SetShowCoastline(bool enabled);
   void AddCoastlineLoader(CoastlineLoader* loader);
   void SetCoastlineStatus(const QString& text, bool is_error = false);
+  void ClearCoastline();  // discard loaded geometry (e.g. after cache clear)
   void SetShowFixedNames(bool enabled);
   void SetHideLowSpeed(bool enabled);
   void SetTrailWindowSeconds(double seconds);

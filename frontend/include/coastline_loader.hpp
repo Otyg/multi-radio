@@ -39,6 +39,9 @@ class CoastlineLoader : public QObject {
     password_ = password;
   }
 
+  // Remove all cached tiles so the next RequestView fetches fresh data.
+  void ClearCache();
+
   // Request all tiles covering the given bbox (EPSG:4326, WGS84).
   // Cancels any in-flight requests that are no longer relevant.
   void RequestView(double lat_min, double lon_min,
