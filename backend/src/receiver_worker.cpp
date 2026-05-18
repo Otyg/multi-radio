@@ -1300,9 +1300,14 @@ void ReceiverWorker::ProcessLoop() {
                 nf.count("gs") || nf.count("sog") || nf.count("cog");
             const bool has_altitude =
                 nf.count("alt_baro") || nf.count("alt_geom");
+            // Messages with a name or callsign are allowed through so that
+            // TargetTracker can pre-populate labels before the first position
+            // is received, and so the frontend log shows static-data messages.
+            const bool has_name =
+                nf.count("name") || nf.count("callsign") || nf.count("call_sign");
             if (msg.signal_type == SignalType::kAdsb ||
                 msg.signal_type == SignalType::kAis) {
-              if (!is_positional && !has_speed && !has_altitude) return;
+              if (!is_positional && !has_speed && !has_altitude && !has_name) return;
             }
 
             // --- Name injection ---
