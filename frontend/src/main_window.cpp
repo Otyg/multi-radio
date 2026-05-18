@@ -2896,6 +2896,7 @@ void MainWindow::StopSelectedReceiver() {
   AppendLog(QString("Stop requested for receiver %1").arg(receiver_id));
   if (signal_visualization_ != nullptr) {
     signal_visualization_->SetChannelLabel(QString());
+    signal_visualization_->ResetPeakHold();
   }
   RefreshReceivers();
 }

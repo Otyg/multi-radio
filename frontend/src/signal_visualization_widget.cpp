@@ -924,6 +924,35 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
     painter->drawText(label_rect.adjusted(5, 0, -5, 0), Qt::AlignLeft | Qt::AlignVCenter, label);
   }
 
+  // Peak-hold curve drawn first so the live spectrum renders on top.
+  if (!spectrum_peak_hold.isEmpty()) {
+    QPainterPath peak_path;
+    bool peak_open = false;
+    for (int i = 0; i < spectrum_peak_hold.size(); ++i) {
+      const double amplitude = Clamp01(spectrum_peak_hold[i]);
+      const double db = amp_to_db(amplitude);
+      if (has_noise_floor_threshold_db && db <= clamped_noise_floor_db) {
+        peak_open = false;
+        continue;
+      }
+      const double t = (spectrum_peak_hold.size() <= 1)
+                           ? 0.0
+                           : static_cast<double>(i) / (spectrum_peak_hold.size() - 1);
+      const int x = plot.left() + static_cast<int>(t * (plot.width() - 1));
+      const int y = db_to_y(db);
+      if (!peak_open) {
+        peak_path.moveTo(x, y);
+        peak_open = true;
+      } else {
+        peak_path.lineTo(x, y);
+      }
+    }
+    if (!peak_path.isEmpty()) {
+      painter->setPen(QPen(QColor(220, 230, 255, 180), 1));
+      painter->drawPath(peak_path);
+    }
+  }
+
   double mean_amplitude = 0.0;
   if (suppress_below_mean && !spectrum.isEmpty()) {
     for (const double value : spectrum) {
@@ -959,35 +988,6 @@ void SignalVisualizationWidget::DrawSpectrumCurve(QPainter* painter, const QRect
   if (!path.isEmpty()) {
     painter->setPen(QPen(QColor(255, 176, 95), 2));
     painter->drawPath(path);
-  }
-
-  // Peak-hold curve.
-  if (!spectrum_peak_hold.isEmpty()) {
-    QPainterPath peak_path;
-    bool peak_open = false;
-    for (int i = 0; i < spectrum_peak_hold.size(); ++i) {
-      const double amplitude = Clamp01(spectrum_peak_hold[i]);
-      const double db = amp_to_db(amplitude);
-      if (has_noise_floor_threshold_db && db <= clamped_noise_floor_db) {
-        peak_open = false;
-        continue;
-      }
-      const double t = (spectrum_peak_hold.size() <= 1)
-                           ? 0.0
-                           : static_cast<double>(i) / (spectrum_peak_hold.size() - 1);
-      const int x = plot.left() + static_cast<int>(t * (plot.width() - 1));
-      const int y = db_to_y(db);
-      if (!peak_open) {
-        peak_path.moveTo(x, y);
-        peak_open = true;
-      } else {
-        peak_path.lineTo(x, y);
-      }
-    }
-    if (!peak_path.isEmpty()) {
-      painter->setPen(QPen(QColor(220, 230, 255, 180), 1));
-      painter->drawPath(peak_path);
-    }
   }
 
   painter->restore();
