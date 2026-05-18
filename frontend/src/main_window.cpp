@@ -1118,6 +1118,14 @@ QString LabelFromFields(const QVariantMap& fields) {
 
 }  // namespace
 
+void MainWindow::RebuildFixedObjects() {
+  if (radar_widget_ == nullptr) return;
+  auto objects = LoadFixedObjectsFromSettings();
+  for (const auto& [_, fo] : bsr_fixed_objects_)
+    objects.push_back(fo);
+  radar_widget_->SetFixedObjects(objects);
+}
+
 MainWindow::MainWindow(std::string grpc_target, std::string token,
                        std::string coastline_user, std::string coastline_pass,
                        QWidget* parent)
@@ -1818,7 +1826,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   radar_widget_ = new RadarMapWidget(air_marine_splitter);
   radar_widget_->SetRangeKm(10.0);
-  radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+  RebuildFixedObjects();
 
   {
     const QString app_data =
@@ -2011,7 +2019,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       radar_widget_->SetShowLabels(new_show_labels);
       radar_widget_->SetShowFixedNames(new_show_fixed_names);
       radar_widget_->SetHideLowSpeed(new_hide_low_speed);
-      radar_widget_->SetFixedObjects(LoadFixedObjectsFromSettings());
+      RebuildFixedObjects();
       if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(new_hide_low_speed);
     });
   }
@@ -3678,6 +3686,27 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
                   .arg(payload));
+
+    // msg_type 4/21 — Base Station Report / Aid-to-Navigation: add/update as dynamic fixed object.
+    if (plugin_type == "AIS_BSR" || plugin_type == "AIS_ATON") {
+      bool lat_ok = false, lon_ok = false;
+      const double fo_lat = fields.value("lat").toDouble(&lat_ok);
+      const double fo_lon = fields.value("lon").toDouble(&lon_ok);
+      if (lat_ok && lon_ok && std::abs(fo_lat) <= 90.0 && std::abs(fo_lon) <= 180.0
+          && (fo_lat != 0.0 || fo_lon != 0.0)) {
+        const QString prefix = (plugin_type == "AIS_BSR") ? "BSR" : "ATON";
+        const std::string key = (prefix + ":" + mmsi).toStdString();
+        RadarFixedObject& fo = bsr_fixed_objects_[key];
+        fo.id   = QString::fromStdString(key);
+        const QString fo_name = fields.value("name").toString().trimmed();
+        fo.name = fo_name.isEmpty() ? mmsi : fo_name;
+        fo.lat  = fo_lat;
+        fo.lon  = fo_lon;
+        fo.is_base_station = true;
+        RebuildFixedObjects();
+      }
+    }
+
     all_rows_.push_back(row);
     AddMessageRow(row);
     return;

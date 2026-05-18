@@ -323,14 +323,29 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
     QFont fixed_font = painter.font();
     fixed_font.setPixelSize(11);
     painter.setFont(fixed_font);
-    painter.setPen(QPen(WithAlpha(label_color_, 0.9), 1));
     painter.setBrush(Qt::NoBrush);
+    QFont bsr_font = fixed_font;
+    bsr_font.setPixelSize(14);
     for (const auto& fixed : fixed_objects_) {
       if (!IsFinite(fixed.lat) || !IsFinite(fixed.lon)) continue;
       const QPointF p = LatLonToXY(fixed.lat, fixed.lon, cx, cy, px_per_km);
-      painter.drawEllipse(p, 3.2, 3.2);
-      if (show_fixed_names_ && !fixed.name.isEmpty()) {
-        painter.drawText(QPointF(p.x() + 7.0, p.y() - 2.0), fixed.name);
+      if (fixed.is_base_station) {
+        painter.setPen(QPen(QColor("#ffd966"), 1));
+        painter.setFont(bsr_font);
+        const QFontMetrics fm(bsr_font);
+        const QString star = QString::fromUtf8("\xe2\x98\x85");
+        painter.drawText(QPointF(p.x() - fm.horizontalAdvance(star) / 2.0, p.y() + fm.ascent() / 2.0), star);
+        if (show_fixed_names_ && !fixed.name.isEmpty()) {
+          painter.setFont(fixed_font);
+          painter.drawText(QPointF(p.x() + 10.0, p.y() - 2.0), fixed.name);
+        }
+      } else {
+        painter.setPen(QPen(WithAlpha(label_color_, 0.9), 1));
+        painter.setFont(fixed_font);
+        painter.drawEllipse(p, 3.2, 3.2);
+        if (show_fixed_names_ && !fixed.name.isEmpty()) {
+          painter.drawText(QPointF(p.x() + 7.0, p.y() - 2.0), fixed.name);
+        }
       }
     }
   }
@@ -383,10 +398,9 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
       painter.drawEllipse(p, 3.2, 3.2);
     }
 
-    // Speed vector — COG direction, length clamped to [100 m, 1 km].
+    // Speed vector — COG direction, fixed 250 m length.
     if (t.sog >= kMinSogForVector) {
-      const double raw_km  = t.sog * kKnotsToKmH * (kVectorMinutes / 60.0);
-      const double vec_km  = std::clamp(raw_km, 0.1, 1.0);
+      const double vec_km  = 0.25;
       const double cog_rad = t.cog * (M_PI / 180.0);
       const double ex = p.x() + std::sin(cog_rad) * vec_km * px_per_km;
       const double ey = p.y() - std::cos(cog_rad) * vec_km * px_per_km;

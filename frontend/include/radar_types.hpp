@@ -33,6 +33,7 @@ struct RadarFixedObject {
   QString name;
   double lat = 0.0;
   double lon = 0.0;
+  bool is_base_station = false;
 };
 
 }  // namespace multi_radio

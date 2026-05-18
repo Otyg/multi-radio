@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <QByteArray>
@@ -96,6 +97,7 @@ class MainWindow : public QMainWindow {
 
   bool CurrentReceiverId(uint32_t* receiver_id) const;
   void AppendLog(const QString& line);
+  void RebuildFixedObjects();
   void AddMessageRow(const MessageRow& row);
   bool PassesFilter(const MessageRow& row) const;
   void RefreshScanListChannelCards();
@@ -214,6 +216,7 @@ class MainWindow : public QMainWindow {
   QSpinBox* minutes_filter_spin_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
+  std::unordered_map<std::string, RadarFixedObject> bsr_fixed_objects_;
   CoastlineLoader* coastline_loader_boundaries_ = nullptr;
   QString coastline_user_;
   QString coastline_pass_;
