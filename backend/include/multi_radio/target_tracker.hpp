@@ -46,6 +46,10 @@ class TargetTracker {
   // Merge a decoded message into the tracked state.
   void Update(const DecodedMessage& msg);
 
+  // Update the label of an existing in-memory entry (e.g. from a name-only
+  // message that doesn't carry position).  No-op if the key isn't tracked yet.
+  void LearnLabel(const std::string& key, const std::string& label);
+
   // Return full current state and the list of IDs removed since the last call.
   // Also removes stale entries.
   RadarSnapshot TakeSnapshot();

@@ -1279,8 +1279,16 @@ void ReceiverWorker::ProcessLoop() {
                 const std::string  c = (call_it  != nf.end() && !call_it->second.empty())
                                          ? call_it->second
                                          : (call2_it != nf.end() ? call2_it->second : std::string{});
-                if (!n.empty() || !c.empty())
+                if (!n.empty() || !c.empty()) {
                   track_db_->UpsertEntity(mmsi_it->second, "SEA", n, c, ts);
+                  // If this MMSI already has a position entry in the tracker,
+                  // update its label immediately without waiting for the next
+                  // position message (Type 5/24 don't carry position).
+                  if (target_tracker_) {
+                    const std::string& best = n.empty() ? c : n;
+                    target_tracker_->LearnLabel(mmsi_it->second, best);
+                  }
+                }
               }
             }
 

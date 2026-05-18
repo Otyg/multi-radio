@@ -119,6 +119,15 @@ void TargetTracker::Update(const DecodedMessage& msg) {
   }
 }
 
+void TargetTracker::LearnLabel(const std::string& key, const std::string& label) {
+  if (key.empty() || label.empty()) return;
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = entries_.find(key);
+  if (it != entries_.end() && it->second.label != label) {
+    it->second.label = label;
+  }
+}
+
 RadarSnapshot TargetTracker::TakeSnapshot() {
   const uint64_t now = NowMs();
   RadarSnapshot snap;
