@@ -8,8 +8,11 @@
  *
  * Supported message types:
  *   1, 2, 3  — Class A Position Report (168 bits)
+ *   4        — Base Station Report (168 bits)
  *   5        — Static and Voyage Related Data (426 bits)
  *   18       — Standard Class B CS Position Report (168 bits)
+ *   19       — Class B CS Extended Position Report (312 bits, includes name)
+ *   21       — Aid-to-Navigation Report (272+ bits, includes name)
  *   24A/B    — Class B CS Static Data Report (160 / 168 bits)
  *   Other    — Emitted as AIS_OTHER with raw hex payload
  *
@@ -297,6 +300,51 @@ static void decode_aton(const uint8_t* d, uint32_t bytes,
              mmsi, name, type_of_aton, slat, slon);
 }
 
+/* Type 19 (Class B CS Extended Position Report) — 312 bits = 39 bytes */
+static void decode_extended_position(const uint8_t* d, uint32_t bytes,
+                                      char* kv, size_t kv_sz,
+                                      char* payload, size_t pay_sz) {
+    uint32_t mmsi   = (uint32_t)ais_bits(d, bytes, 8, 30);
+    double   sog    = (double)ais_bits(d, bytes, 42, 10) / 10.0;
+    int64_t  raw_lon = ais_signed(d, bytes, 53, 28);
+    int64_t  raw_lat = ais_signed(d, bytes, 81, 27);
+    double   cog    = (double)ais_bits(d, bytes, 108, 12) / 10.0;
+    int      hdg    = (int)ais_bits(d, bytes, 120, 9);
+    char     name[21];
+    ais_text(d, bytes, 143, 20, name);
+    int      ship_type = (int)ais_bits(d, bytes, 263, 8);
+
+    int lon_na = (raw_lon == 108600000LL);
+    int lat_na = (raw_lat ==  54600000LL);
+    char slat[20], slon[20];
+    if (lat_na) snprintf(slat, sizeof(slat), "N/A");
+    else        snprintf(slat, sizeof(slat), "%.6f", raw_lat / 600000.0);
+    if (lon_na) snprintf(slon, sizeof(slon), "N/A");
+    else        snprintf(slon, sizeof(slon), "%.6f", raw_lon / 600000.0);
+
+    snprintf(kv, kv_sz,
+        "{\"signal_type\":\"AIS_POS\","
+        "\"msg_type\":\"19\","
+        "\"mmsi\":\"%u\","
+        "\"lat\":\"%s\","
+        "\"lon\":\"%s\","
+        "\"sog\":\"%.1f\","
+        "\"cog\":\"%.1f\","
+        "\"hdg\":\"%d\","
+        "\"name\":\"%s\","
+        "\"ship_type\":\"%d\"}",
+        mmsi, slat, slon, sog, cog,
+        (hdg == 511 ? -1 : hdg), name, ship_type);
+
+    if (lat_na || lon_na)
+        snprintf(payload, pay_sz, "MMSI:%u Name:%s SOG:%.1fkn Pos:N/A",
+                 mmsi, name, sog);
+    else
+        snprintf(payload, pay_sz,
+                 "MMSI:%u Name:%s Lat:%s Lon:%s SOG:%.1fkn COG:%.1f°",
+                 mmsi, name, slat, slon, sog, cog);
+}
+
 /* Type 8 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
 static void emit_msg8_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
                                    double freq_hz, uint64_t unix_ms,
@@ -363,6 +411,11 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         decode_aton(frame_buf, data_bytes,
                     kv, sizeof(kv), payload, sizeof(payload));
         break;
+    case 19:
+        if (data_bytes < 39) return;  /* 312 bits = 39 bytes */
+        decode_extended_position(frame_buf, data_bytes,
+                                  kv, sizeof(kv), payload, sizeof(payload));
+        break;
     case 24:
         if (data_bytes < 20) return;
         decode_static24(frame_buf, data_bytes,
@@ -392,7 +445,7 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
                     : (msg_type == 5)  ? "AIS_STAT"
                     : (msg_type == 21) ? "AIS_ATON"
                     : (msg_type == 24) ? "AIS_STAT24"
-                    : "AIS_POS";
+                    : "AIS_POS";  /* covers 1,2,3,18,19 */
     if (emit_fn) emit_fn(sig, payload, freq_hz, unix_ms, kv, user_data);
 }
 
