@@ -23,7 +23,7 @@ constexpr double kMaxRangeKm             = 500.0;
 constexpr double kDefaultTrailWindowSeconds = 120.0;
 constexpr double kVectorMinutes          = (10.0 / 60.0);  // speed vector shows 10 s of travel
 constexpr double kKnotsToKmH             = 1.852;
-constexpr double kMinSogForVector        = 0.5;   // knots — below this no vector is drawn
+constexpr double kMinSogForVector        = 1.0;   // knots — below this no vector is drawn
 
 static std::string ToKey(const QString& id) { return id.toStdString(); }
 
@@ -264,9 +264,7 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
     const double cull_lat = range_km_ / kKmPerDegLat * 1.5;
     const double cull_lon = range_km_ / (kKmPerDegLonAtEquator * std::max(0.01, cos_lat)) * 1.5;
 
-    QPen cpen(QColor("#1e6644"), 1);
-    cpen.setWidthF(0.8);
-    painter.setPen(cpen);
+    painter.setPen(QPen(ring_color_.darker(125), 1));
     painter.setBrush(Qt::NoBrush);
 
     for (const QVector<QPolygonF>& polys : tile_polygons_) {
@@ -385,9 +383,10 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
       painter.drawEllipse(p, 3.2, 3.2);
     }
 
-    // Speed vector — 5-minute projection in COG direction.
+    // Speed vector — COG direction, length clamped to [100 m, 1 km].
     if (t.sog >= kMinSogForVector) {
-      const double vec_km  = t.sog * kKnotsToKmH * (kVectorMinutes / 60.0);
+      const double raw_km  = t.sog * kKnotsToKmH * (kVectorMinutes / 60.0);
+      const double vec_km  = std::clamp(raw_km, 0.1, 1.0);
       const double cog_rad = t.cog * (M_PI / 180.0);
       const double ex = p.x() + std::sin(cog_rad) * vec_km * px_per_km;
       const double ey = p.y() - std::cos(cog_rad) * vec_km * px_per_km;

@@ -59,6 +59,7 @@ constexpr int kScanRangeModeTabIndex = 1;
 constexpr int kScanListModeTabIndex = 2;
 constexpr int kAirMarineModeTabIndex = 3;
 constexpr int kGlobalSettingsTabIndex = 4;
+constexpr int kLogTabIndex = 5;
 constexpr double kDefaultScanListSquelchDb = -67.5;
 constexpr double kScanSpectrumFloorDb   = -90.0;
 constexpr double kScanSpectrumCeilingDb = -20.0;
@@ -2064,6 +2065,20 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   global_layout->addRow(clear_map_cache_button);
 
   mode_tabs_->addTab(global_tab, "GLOBAL");
+
+  event_log_ = new QPlainTextEdit(control_group);
+  event_log_->setReadOnly(true);
+  mode_tabs_->addTab(event_log_, "LOGG");
+
+  log_flush_timer_ = new QTimer(this);
+  log_flush_timer_->setInterval(500);
+  connect(log_flush_timer_, &QTimer::timeout, this, [this]() {
+    if (log_buffer_.isEmpty()) return;
+    event_log_->appendPlainText(log_buffer_.join('\n'));
+    log_buffer_.clear();
+  });
+  log_flush_timer_->start();
+
   mode_tabs_->setCurrentIndex(kFixedModeTabIndex);
   last_tab_index_ = mode_tabs_->currentIndex();
 
@@ -2104,12 +2119,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     signal_visualization_->SetNoiseFloorDb(noise_floor_db);
   }
 
-  event_log_ = new QPlainTextEdit(central);
-  event_log_->setReadOnly(true);
-
   root_layout->addLayout(top_layout, 1);
   root_layout->addWidget(signal_visualization_);
-  root_layout->addWidget(event_log_);
 
   setCentralWidget(central);
   LoadScanListConfigFromSettings();
@@ -2491,6 +2502,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     if (index >= kFixedModeTabIndex && index <= kAirMarineModeTabIndex) {
       last_mode_tab_index_ = index;
     }
+    // LOGG is display-only — never restart the receiver for it.
+    if (index == kLogTabIndex) return;
     if (previous_tab_index < 0 || previous_tab_index == index) {
       return;
     }
@@ -5386,7 +5399,7 @@ bool MainWindow::CurrentReceiverId(uint32_t* receiver_id) const {
 }
 
 void MainWindow::AppendLog(const QString& line) {
-  event_log_->appendPlainText(line);
+  log_buffer_.append(line);
 }
 
 void MainWindow::OpenVisualizationSettingsDialog() {

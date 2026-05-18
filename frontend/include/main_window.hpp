@@ -259,6 +259,8 @@ class MainWindow : public QMainWindow {
 
   QTableWidget* decoded_table_ = nullptr;
   QPlainTextEdit* event_log_ = nullptr;
+  QStringList     log_buffer_;
+  QTimer*         log_flush_timer_ = nullptr;
   SignalVisualizationWidget* signal_visualization_ = nullptr;
   ScanRangeVisualizationWidget* scan_range_viz_ = nullptr;
 #if MR_HAS_QT_MULTIMEDIA
