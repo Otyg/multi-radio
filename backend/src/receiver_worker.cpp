@@ -441,6 +441,7 @@ bool ReceiverWorker::Stop(std::string* error) {
     return true;
   }
 
+  plugin_host_->SetParam("recording_stop", "1");
   iq_queue_cv_.notify_all();
   if (ingest_thread_.joinable()) {
     ingest_thread_.join();
@@ -589,6 +590,7 @@ void ReceiverWorker::PushPluginConfig() {
       plugin_host_->SetActiveDecoder("");
       plugin_host_->SetActivePostprocessor("");
       plugin_host_->SetActiveAsmPostprocessor("");
+      plugin_host_->SetParam("recording_start", "1");
     } else if (use_vdes_asm_sketch) {
       plugin_host_->SetActiveDecoder("vdes_asm_decoder");
       plugin_host_->SetActivePostprocessor("vdes_asm_postproc");
