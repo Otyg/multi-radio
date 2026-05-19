@@ -94,6 +94,17 @@ recordings/vdes/vdes_20260519T120000Z_161950000_2048000_0.iq16
 recordings/vdes/vdes_20260519T120000Z_161950000_2048000_0.json
 ```
 
+Replay a recording through the first-pass VDES PHY diagnostic plugin:
+
+```bash
+./build/tools/vdes_replay \
+  --iq recordings/vdes/vdes_20260519T120000Z_161950000_2048000_0.iq16 \
+  --rate 2048000 \
+  --freq 161950000 \
+  --diag-blocks 1 \
+  --jsonl
+```
+
 ## Windows frontend build from WSL
 
 ```bash

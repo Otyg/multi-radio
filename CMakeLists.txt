@@ -15,6 +15,7 @@ add_subdirectory(proto)
 add_subdirectory(backend)
 if(MR_BUILD_SERVER)
   add_subdirectory(plugins)
+  add_subdirectory(tools)
 endif()
 
 if(MR_BUILD_FRONTEND)
