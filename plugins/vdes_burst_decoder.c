@@ -58,21 +58,26 @@ static const uint8_t kVDES_UW24[24] = {
     1,0,1,1,0,0,1,0    /* 0xB2 */
 };
 
-/* HDLC flag 0x7E — AIS-family burst delimiter. */
-static const uint8_t kHDLC_7E[8] = {0,1,1,1,1,1,1,0};
-
 typedef struct {
     const char*    name;
     const uint8_t* bits;
     uint8_t        len;
+    uint32_t       max_errors; /* pattern-specific ceiling; 0 = exact match only */
 } SyncDef;
 
+/*
+ * Per-pattern false-positive rate at random (both polarities):
+ *   sync28 (28 bits, 2 err): C(28,2)*2/2^28 ≈ 3e-6  → ~3 hits / 1 Mbit
+ *   vdes_uw (24 bits, 1 err): C(24,1)*2/2^24 ≈ 3e-6  → ~3 hits / 1 Mbit
+ *
+ * 8-bit patterns are excluded from the defaults: C(8,2)*2/256 ≈ 29 % per
+ * position makes them useless as a gate at any non-zero error tolerance.
+ */
 static const SyncDef kBuiltinPatterns[] = {
-    { "sync28",  kSync28,    28u },
-    { "vdes_uw", kVDES_UW24, 24u },
-    { "hdlc_7e", kHDLC_7E,    8u },
+    { "sync28",  kSync28,    28u, 2u },
+    { "vdes_uw", kVDES_UW24, 24u, 1u },
 };
-#define BD_NUM_BUILTIN 3u
+#define BD_NUM_BUILTIN 2u
 
 /* ── context ──────────────────────────────────────────────────────────── */
 
@@ -410,16 +415,19 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
             continue;
         }
 
-        /* Try all built-in patterns. */
+        /* Try all built-in patterns, each with its own error ceiling. */
         {
             int hit = 0;
             for (p = 0u; p < BD_NUM_BUILTIN && !hit; ++p) {
-                uint8_t slen = kBuiltinPatterns[p].len;
+                uint8_t  slen  = kBuiltinPatterns[p].len;
+                uint32_t plim  = kBuiltinPatterns[p].max_errors;
+                /* Global sync_errors_max can only tighten, never loosen. */
+                if (ctx->sync_errors_max < plim) plim = ctx->sync_errors_max;
                 uint32_t e0 = count_sync_errors(ctx->stream, ctx->stream_bits,
-                                                  i, kBuiltinPatterns[p].bits, slen, 0);
+                                                 i, kBuiltinPatterns[p].bits, slen, 0);
                 uint32_t e1 = count_sync_errors(ctx->stream, ctx->stream_bits,
-                                                  i, kBuiltinPatterns[p].bits, slen, 1);
-                if (e0 <= ctx->sync_errors_max || e1 <= ctx->sync_errors_max) {
+                                                 i, kBuiltinPatterns[p].bits, slen, 1);
+                if (e0 <= plim || e1 <= plim) {
                     int inv = (e1 < e0) ? 1 : 0;
                     uint32_t err = inv ? e1 : e0;
                     ctx->sync_hits++;
