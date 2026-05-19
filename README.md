@@ -75,6 +75,25 @@ Optional config path:
 MR_CLIENT_CONFIG=/path/to/client.ini ./build/frontend/multi_radio_client
 ```
 
+## VDES/ASM IQ Recording
+
+Selecting `VDES ASM` uses the `vdes_iq_recorder` null-demodulator. It does not
+emit decoded messages; it writes raw interleaved int16 IQ plus a JSON sidecar.
+
+```bash
+MR_IQ_RECORD_DIR=./recordings/vdes \
+MR_IQ_RECORD_PREFIX=vdes \
+MR_IQ_RECORD_MAX_BYTES=268435456 \
+./build/backend/multi_radio_server
+```
+
+Output files are named like:
+
+```text
+recordings/vdes/vdes_20260519T120000Z_161950000_2048000_0.iq16
+recordings/vdes/vdes_20260519T120000Z_161950000_2048000_0.json
+```
+
 ## Windows frontend build from WSL
 
 ```bash
@@ -89,4 +108,3 @@ Artifact:
 ```bash
 ctest --test-dir build --output-on-failure
 ```
-

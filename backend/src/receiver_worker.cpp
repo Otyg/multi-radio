@@ -186,7 +186,7 @@ static std::string DemodNameForModulation(Modulation modulation) {
     case Modulation::kPpm:     return "ppm_demod";
     case Modulation::kAdsbMod: return "adsb_demod";
     case Modulation::kAisDual: return "ais_dual_demod";
-    case Modulation::kVdesAsm: return "vdes_asm_demod";
+    case Modulation::kVdesAsm: return "vdes_iq_recorder";
     default:                   return "";  // FM/AM: no plugin demodulator
   }
 }
@@ -570,10 +570,11 @@ void ReceiverWorker::PushPluginConfig() {
     effective_modulation = cfg.scan_list_channels[0].modulation;
   }
 
+  const bool use_vdes_iq_recorder = (effective_modulation == Modulation::kVdesAsm);
   const bool use_vdes_asm_sketch =
-      (effective_modulation == Modulation::kVdesAsm) ||
-      (cfg.gmsk_decoder == "vdes_asm_decoder") ||
-      (cfg.gmsk_postprocessor == "vdes_asm_postproc");
+      !use_vdes_iq_recorder &&
+      ((cfg.gmsk_decoder == "vdes_asm_decoder") ||
+       (cfg.gmsk_postprocessor == "vdes_asm_postproc"));
   const bool use_ais_msg8_handoff =
       (effective_modulation != Modulation::kAisDual) &&
       (cfg.gmsk_postprocessor == "ais_decoder");
@@ -584,7 +585,11 @@ void ReceiverWorker::PushPluginConfig() {
     plugin_host_->SetActivePostprocessor("ais_decoder");
     plugin_host_->SetActiveAsmPostprocessor("asm_decoder");
   } else {
-    if (use_vdes_asm_sketch) {
+    if (use_vdes_iq_recorder) {
+      plugin_host_->SetActiveDecoder("");
+      plugin_host_->SetActivePostprocessor("");
+      plugin_host_->SetActiveAsmPostprocessor("");
+    } else if (use_vdes_asm_sketch) {
       plugin_host_->SetActiveDecoder("vdes_asm_decoder");
       plugin_host_->SetActivePostprocessor("vdes_asm_postproc");
       plugin_host_->SetParam("invert", "0");
@@ -604,7 +609,9 @@ void ReceiverWorker::PushPluginConfig() {
       plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
       plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
     }
-    plugin_host_->SetActiveAsmPostprocessor(use_ais_msg8_handoff ? "asm_decoder" : "");
+    if (!use_vdes_iq_recorder) {
+      plugin_host_->SetActiveAsmPostprocessor(use_ais_msg8_handoff ? "asm_decoder" : "");
+    }
   }
 
   std::string demod_name = DemodNameForModulation(effective_modulation);
@@ -612,31 +619,34 @@ void ReceiverWorker::PushPluginConfig() {
     demod_name = "vdes_asm_demod";
   plugin_host_->SetActiveDemodulator(demod_name);
   ++plugin_config_generation_;
+
+  std::string decoder_label = cfg.gmsk_decoder;
+  std::string postproc_label = cfg.gmsk_postprocessor;
+  std::string asm_postproc_label = use_ais_msg8_handoff ? "asm_decoder" : "(none)";
+  std::string invert_label = cfg.gmsk_nrzi_invert ? "1" : "0";
+  if (effective_modulation == Modulation::kAisDual) {
+    decoder_label = "nrzi_decoder";
+    postproc_label = "ais_decoder";
+    asm_postproc_label = "asm_decoder";
+    invert_label = "1";
+  } else if (use_vdes_iq_recorder) {
+    decoder_label = "(none)";
+    postproc_label = "(none)";
+    asm_postproc_label = "(none)";
+    invert_label = "0";
+  } else if (use_vdes_asm_sketch) {
+    decoder_label = "vdes_asm_decoder";
+    postproc_label = "vdes_asm_postproc";
+    invert_label = "0";
+  }
+
   std::ostringstream plugin_cfg_msg;
   plugin_cfg_msg << "PLUGIN_CFG demod="
                  << (demod_name.empty() ? "(none/FM)" : demod_name)
-                 << " decoder="
-                 << ((effective_modulation == Modulation::kAisDual)
-                         ? "nrzi_decoder"
-                         : (use_vdes_asm_sketch
-                                ? "vdes_asm_decoder"
-                                : cfg.gmsk_decoder))
-                 << " postproc="
-                 << ((effective_modulation == Modulation::kAisDual)
-                         ? "ais_decoder"
-                         : (use_vdes_asm_sketch
-                                ? "vdes_asm_postproc"
-                                : cfg.gmsk_postprocessor))
-                 << " asm_postproc="
-                 << ((effective_modulation == Modulation::kAisDual)
-                         ? "asm_decoder"
-                         : (use_ais_msg8_handoff ? "asm_decoder" : "(none)"))
-                 << " invert="
-                 << ((effective_modulation == Modulation::kAisDual)
-                         ? "1"
-                         : (use_vdes_asm_sketch
-                                ? "0"
-                                : (cfg.gmsk_nrzi_invert ? "1" : "0")))
+                 << " decoder=" << decoder_label
+                 << " postproc=" << postproc_label
+                 << " asm_postproc=" << asm_postproc_label
+                 << " invert=" << invert_label
                  << " baud=" << cfg.gmsk_baud_rate;
   if (use_vdes_asm_sketch) {
     plugin_cfg_msg << " vdes_bps="
@@ -653,23 +663,10 @@ void ReceiverWorker::PushPluginConfig() {
           "[plugin_cfg] demod='%s'  decoder='%s'  postproc='%s'  asm_postproc='%s'"
           "  invert=%s  baud=%u  vdes_bps=%u  vdes_pll_bw=%.4f  vdes_cand_bits=%u  vdes_sync_err=%u\n",
           demod_name.empty() ? "(none/FM)" : demod_name.c_str(),
-          (effective_modulation == Modulation::kAisDual)
-              ? "nrzi_decoder"
-              : (use_vdes_asm_sketch
-                     ? "vdes_asm_decoder"
-                     : cfg.gmsk_decoder.c_str()),
-          (effective_modulation == Modulation::kAisDual)
-              ? "ais_decoder"
-              : (use_vdes_asm_sketch
-                     ? "vdes_asm_postproc"
-                     : cfg.gmsk_postprocessor.c_str()),
-          (effective_modulation == Modulation::kAisDual)
-              ? "asm_decoder"
-              : (use_ais_msg8_handoff ? "asm_decoder" : "(none)"),
-          (effective_modulation == Modulation::kAisDual) ? "1" :
-              (use_vdes_asm_sketch
-                   ? "0"
-                   : (cfg.gmsk_nrzi_invert ? "1" : "0")),
+          decoder_label.c_str(),
+          postproc_label.c_str(),
+          asm_postproc_label.c_str(),
+          invert_label.c_str(),
           cfg.gmsk_baud_rate,
           use_vdes_asm_sketch
               ? std::max<uint32_t>(
