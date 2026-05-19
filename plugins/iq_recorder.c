@@ -7,11 +7,16 @@
  * messages. It records the incoming interleaved int16 IQ stream to .iq16 files
  * and writes a JSON sidecar with capture metadata.
  *
- * Environment:
+ * Recording is controlled explicitly via set_param:
+ *   recording_start  open a new file immediately (on next IQ block)
+ *   recording_stop   flush and close the current file
+ *
+ * Environment (read once at create time):
  *   MR_IQ_RECORD_DIR        output directory, default: recordings/vdes
  *   MR_IQ_RECORD_PREFIX     filename prefix, default: vdes
- *   MR_IQ_RECORD_ENABLED    0 disables recording, default: enabled
- *   MR_IQ_RECORD_MAX_BYTES  rotate after this many bytes, default: 268435456
+ *   MR_IQ_RECORD_ENABLED    0 disables start, default: enabled
+ *   MR_IQ_RECORD_MAX_BYTES  safety limit: close (no restart) when reached,
+ *                           default: 0 (disabled)
  */
 
 #include "mr_plugin_api.h"
@@ -32,14 +37,15 @@
 #define MR_MKDIR(path) mkdir(path, 0775)
 #endif
 
-#define MR_IQ_REC_DEFAULT_DIR "recordings/vdes"
-#define MR_IQ_REC_DEFAULT_PREFIX "vdes"
-#define MR_IQ_REC_DEFAULT_MAX_BYTES 268435456ull
+#define MR_IQ_REC_DEFAULT_DIR "recordings/"
+#define MR_IQ_REC_DEFAULT_PREFIX "raw"
+#define MR_IQ_REC_DEFAULT_MAX_BYTES 0ull
 #define MR_IQ_REC_PATH_MAX 1024u
 #define MR_IQ_REC_TOKEN_MAX 96u
 
 typedef struct {
   int enabled;
+  int recording_requested;
   int write_failed;
 
   char output_dir[MR_IQ_REC_PATH_MAX];
@@ -61,10 +67,10 @@ typedef struct {
 } IqRecorderCtx;
 
 static const MrPluginMeta kMeta = {
-  "vdes_iq_recorder",
+  "iq_recorder",
   "0.1.0",
   MR_PLUGIN_API_VERSION,
-  "Null demodulator: records VDES/ASM IQ to .iq16 with JSON metadata",
+  "Null demodulator: records IQ to .iq16 with JSON metadata",
   MR_PLUGIN_ROLE_DEMODULATOR
 };
 
@@ -153,7 +159,7 @@ static void write_json(IqRecorderCtx* ctx, int closed) {
           "  \"component_type\": \"int16\",\n"
           "  \"byte_order\": \"little_endian\",\n"
           "  \"layout\": \"I0,Q0,I1,Q1,...\",\n"
-          "  \"source_plugin\": \"vdes_iq_recorder\",\n"
+          "  \"source_plugin\": \"iq_recorder\",\n"
           "  \"recording_complete\": %s,\n"
           "  \"started_utc\": \"%s\",\n"
           "  \"updated_utc\": \"%s\",\n"
@@ -276,9 +282,24 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   IqRecorderCtx* ctx = (IqRecorderCtx*)raw;
   if (!ctx || !key || !value) return 0;
 
+  if (strcmp(key, "recording_start") == 0) {
+    if (ctx->enabled) {
+      ctx->recording_requested = 1;
+      ctx->write_failed = 0;
+    }
+    return 1;
+  }
+  if (strcmp(key, "recording_stop") == 0) {
+    close_recording(ctx);
+    ctx->recording_requested = 0;
+    return 1;
+  }
   if (strcmp(key, "recording_enabled") == 0) {
     const int enabled = !env_disabled(value);
-    if (!enabled) close_recording(ctx);
+    if (!enabled) {
+      close_recording(ctx);
+      ctx->recording_requested = 0;
+    }
     ctx->enabled = enabled;
     return 1;
   }
@@ -330,14 +351,18 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
   (void)emit_fn;
   (void)user_data;
 
-  if (!ctx || !ctx->enabled || ctx->write_failed || !iq || num_pairs == 0) return;
+  if (!ctx || ctx->write_failed || !iq || num_pairs == 0) return;
   if (sample_rate_hz == 0) sample_rate_hz = 2048000u;
 
-  if (!ctx->iq_file ||
-      ctx->sample_rate_hz != sample_rate_hz ||
-      ctx->center_freq_hz != center_freq_hz ||
-      (ctx->max_bytes > 0 && ctx->byte_count >= ctx->max_bytes)) {
+  if (!ctx->iq_file) {
+    if (!ctx->recording_requested) return;
     if (!start_recording(ctx, sample_rate_hz, center_freq_hz, unix_ms)) return;
+    ctx->recording_requested = 0;
+  }
+
+  if (ctx->max_bytes > 0 && ctx->byte_count >= ctx->max_bytes) {
+    close_recording(ctx);
+    return;
   }
 
   written = fwrite(iq, sizeof(int16_t), component_count, ctx->iq_file);

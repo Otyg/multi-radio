@@ -96,7 +96,7 @@ QString ModulationLabel(v1::Modulation modulation) {
     case v1::MODULATION_WFM:  return "WFM";
     case v1::MODULATION_FSK:  return "FSK";
     case v1::MODULATION_GMSK: return "GMSK";
-    case v1::MODULATION_VDES_ASM: return "VDES ASM";
+    case v1::MODULATION_VDES_ASM: return "Raw record";
     case v1::MODULATION_PPM:  return "PPM";
     case v1::MODULATION_ADSB:     return "ADS-B";
     case v1::MODULATION_AIS_DUAL: return "AIS Dual";
@@ -129,7 +129,8 @@ v1::Modulation ModulationFromText(const QString& text) {
   if (upper == "AIS DUAL" || upper == "AIS_DUAL" || upper == "AISDUAL") {
     return v1::MODULATION_AIS_DUAL;
   }
-  if (upper == "VDES ASM" || upper == "VDES_ASM" || upper == "VDESASM" || upper == "VDES") {
+  if (upper == "RAW RECORD" || upper == "RAW_RECORD" || upper == "RAWRECORD" ||
+      upper == "VDES ASM" || upper == "VDES_ASM" || upper == "VDESASM" || upper == "VDES") {
     return v1::MODULATION_VDES_ASM;
   }
   return v1::MODULATION_NFM;
@@ -152,7 +153,8 @@ bool TryParseCsvModulation(const QString& text, v1::Modulation* out) {
     *out = v1::MODULATION_NFM;
     return true;
   }
-  if (upper == "VDES" || upper == "VDES_ASM" || upper == "VDES ASM") {
+  if (upper == "VDES" || upper == "VDES_ASM" || upper == "VDES ASM" ||
+      upper == "RAW RECORD" || upper == "RAW_RECORD") {
     *out = v1::MODULATION_VDES_ASM;
     return true;
   }
@@ -1218,7 +1220,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   fixed_modulation_combo_->addItem("AM",   QVariant::fromValue<int>(v1::MODULATION_AM));
   fixed_modulation_combo_->addItem("FSK",  QVariant::fromValue<int>(v1::MODULATION_FSK));
   fixed_modulation_combo_->addItem("GMSK", QVariant::fromValue<int>(v1::MODULATION_GMSK));
-  fixed_modulation_combo_->addItem("VDES ASM", QVariant::fromValue<int>(v1::MODULATION_VDES_ASM));
+  fixed_modulation_combo_->addItem("Raw record", QVariant::fromValue<int>(v1::MODULATION_VDES_ASM));
   fixed_modulation_combo_->addItem("PPM",   QVariant::fromValue<int>(v1::MODULATION_PPM));
   fixed_modulation_combo_->addItem("ADS-B",    QVariant::fromValue<int>(v1::MODULATION_ADSB));
   fixed_modulation_combo_->addItem("AIS Dual", QVariant::fromValue<int>(v1::MODULATION_AIS_DUAL));

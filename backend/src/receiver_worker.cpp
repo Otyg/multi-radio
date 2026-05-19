@@ -186,7 +186,7 @@ static std::string DemodNameForModulation(Modulation modulation) {
     case Modulation::kPpm:     return "ppm_demod";
     case Modulation::kAdsbMod: return "adsb_demod";
     case Modulation::kAisDual: return "ais_dual_demod";
-    case Modulation::kVdesAsm: return "vdes_iq_recorder";
+    case Modulation::kVdesAsm: return "iq_recorder";
     default:                   return "";  // FM/AM: no plugin demodulator
   }
 }
@@ -570,9 +570,9 @@ void ReceiverWorker::PushPluginConfig() {
     effective_modulation = cfg.scan_list_channels[0].modulation;
   }
 
-  const bool use_vdes_iq_recorder = (effective_modulation == Modulation::kVdesAsm);
+  const bool use_iq_recorder = (effective_modulation == Modulation::kVdesAsm);
   const bool use_vdes_asm_sketch =
-      !use_vdes_iq_recorder &&
+      !use_iq_recorder &&
       ((cfg.gmsk_decoder == "vdes_asm_decoder") ||
        (cfg.gmsk_postprocessor == "vdes_asm_postproc"));
   const bool use_ais_msg8_handoff =
@@ -585,7 +585,7 @@ void ReceiverWorker::PushPluginConfig() {
     plugin_host_->SetActivePostprocessor("ais_decoder");
     plugin_host_->SetActiveAsmPostprocessor("asm_decoder");
   } else {
-    if (use_vdes_iq_recorder) {
+    if (use_iq_recorder) {
       plugin_host_->SetActiveDecoder("");
       plugin_host_->SetActivePostprocessor("");
       plugin_host_->SetActiveAsmPostprocessor("");
@@ -609,7 +609,7 @@ void ReceiverWorker::PushPluginConfig() {
       plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
       plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
     }
-    if (!use_vdes_iq_recorder) {
+    if (!use_iq_recorder) {
       plugin_host_->SetActiveAsmPostprocessor(use_ais_msg8_handoff ? "asm_decoder" : "");
     }
   }
@@ -629,7 +629,7 @@ void ReceiverWorker::PushPluginConfig() {
     postproc_label = "ais_decoder";
     asm_postproc_label = "asm_decoder";
     invert_label = "1";
-  } else if (use_vdes_iq_recorder) {
+  } else if (use_iq_recorder) {
     decoder_label = "(none)";
     postproc_label = "(none)";
     asm_postproc_label = "(none)";
