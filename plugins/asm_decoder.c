@@ -780,6 +780,130 @@ static void decode_msg14(const uint8_t* frm, uint32_t flen,
     emit("AIS_MSG14", pay, freq, ms, kv, ud);
 }
 
+/* ── Standard AIS message decoders (mirror of ais_decoder) ───────────── */
+
+static void decode_position(const uint8_t* d, uint32_t db, int mt,
+                             MrEmitFn emit, void* ud, double freq, uint64_t ms) {
+    uint32_t mmsi = (uint32_t)ais_u(d, db, 8, 30);
+    int is_a   = (mt <= 3);
+    int b_sog  = is_a ? 50 : 46;
+    int b_lon  = is_a ? 61 : 57;
+    int b_lat  = is_a ? 89 : 85;
+    int b_cog  = is_a ? 116 : 112;
+    int b_hdg  = is_a ? 128 : 124;
+    int64_t rlon = ais_s(d, db, b_lon, 28);
+    int64_t rlat = ais_s(d, db, b_lat, 27);
+    double  sog  = (double)ais_u(d, db, b_sog, 10) / 10.0;
+    double  cog  = (double)ais_u(d, db, b_cog, 12) / 10.0;
+    int     hdg  = (int)ais_u(d, db, b_hdg, 9);
+    char    slat[20], slon[20];
+    if (rlat == 54600000LL) snprintf(slat, 20, "N/A");
+    else snprintf(slat, 20, "%.6f", rlat / 600000.0);
+    if (rlon == 108600000LL) snprintf(slon, 20, "N/A");
+    else snprintf(slon, 20, "%.6f", rlon / 600000.0);
+    char kv[384], pay[192];
+    snprintf(kv, sizeof(kv),
+        "{\"signal_type\":\"AIS_POS\",\"msg_type\":\"%d\","
+        "\"mmsi\":\"%u\",\"lat\":\"%s\",\"lon\":\"%s\","
+        "\"sog\":\"%.1f\",\"cog\":\"%.1f\",\"hdg\":\"%d\"}",
+        mt, mmsi, slat, slon, sog, cog, hdg == 511 ? -1 : hdg);
+    snprintf(pay, sizeof(pay), "MMSI:%u Lat:%s Lon:%s SOG:%.1fkn COG:%.1f°",
+             mmsi, slat, slon, sog, cog);
+    emit("AIS_POS", pay, freq, ms, kv, ud);
+}
+
+static void decode_base_station(const uint8_t* d, uint32_t db,
+                                 MrEmitFn emit, void* ud, double freq, uint64_t ms) {
+    uint32_t mmsi = (uint32_t)ais_u(d, db, 8, 30);
+    int year  = (int)ais_u(d, db, 38, 14);
+    int month = (int)ais_u(d, db, 52,  4);
+    int day   = (int)ais_u(d, db, 56,  5);
+    int hour  = (int)ais_u(d, db, 61,  5);
+    int min   = (int)ais_u(d, db, 66,  6);
+    int64_t rlon = ais_s(d, db, 79,  28);
+    int64_t rlat = ais_s(d, db, 107, 27);
+    char slat[20], slon[20];
+    if (rlat == 54600000LL) snprintf(slat, 20, "N/A");
+    else snprintf(slat, 20, "%.6f", rlat / 600000.0);
+    if (rlon == 108600000LL) snprintf(slon, 20, "N/A");
+    else snprintf(slon, 20, "%.6f", rlon / 600000.0);
+    char kv[384], pay[192];
+    snprintf(kv, sizeof(kv),
+        "{\"signal_type\":\"AIS_BSR\",\"msg_type\":\"4\","
+        "\"mmsi\":\"%u\",\"utc\":\"%04d-%02d-%02dT%02d:%02d:00Z\","
+        "\"lat\":\"%s\",\"lon\":\"%s\"}",
+        mmsi, year, month, day, hour, min, slat, slon);
+    snprintf(pay, sizeof(pay), "MMSI:%u %04d-%02d-%02dT%02d:%02dZ Lat:%s Lon:%s",
+             mmsi, year, month, day, hour, min, slat, slon);
+    emit("AIS_BSR", pay, freq, ms, kv, ud);
+}
+
+static void decode_voyage(const uint8_t* d, uint32_t db,
+                           MrEmitFn emit, void* ud, double freq, uint64_t ms) {
+    uint32_t mmsi = (uint32_t)ais_u(d, db, 8, 30);
+    char name[21], callsign[8], dest[21];
+    ais_str(d, db, 112, 20, name);
+    ais_str(d, db,  70,  7, callsign);
+    ais_str(d, db, 302, 20, dest);
+    char kv[384], pay[192];
+    snprintf(kv, sizeof(kv),
+        "{\"signal_type\":\"AIS_STAT\",\"msg_type\":\"5\","
+        "\"mmsi\":\"%u\",\"name\":\"%s\",\"callsign\":\"%s\",\"dest\":\"%s\"}",
+        mmsi, name, callsign, dest);
+    snprintf(pay, sizeof(pay), "MMSI:%u Name:%s CS:%s Dest:%s",
+             mmsi, name, callsign, dest);
+    emit("AIS_STAT", pay, freq, ms, kv, ud);
+}
+
+static void decode_aton(const uint8_t* d, uint32_t db,
+                         MrEmitFn emit, void* ud, double freq, uint64_t ms) {
+    uint32_t mmsi = (uint32_t)ais_u(d, db, 8, 30);
+    int aton_type = (int)ais_u(d, db, 38, 5);
+    char name[21]; ais_str(d, db, 43, 20, name);
+    int64_t rlon = ais_s(d, db, 164, 28);
+    int64_t rlat = ais_s(d, db, 192, 27);
+    char slat[20], slon[20];
+    if (rlat == 54600000LL) snprintf(slat, 20, "N/A");
+    else snprintf(slat, 20, "%.6f", rlat / 600000.0);
+    if (rlon == 108600000LL) snprintf(slon, 20, "N/A");
+    else snprintf(slon, 20, "%.6f", rlon / 600000.0);
+    char kv[384], pay[192];
+    snprintf(kv, sizeof(kv),
+        "{\"signal_type\":\"AIS_ATON\",\"msg_type\":\"21\","
+        "\"mmsi\":\"%u\",\"name\":\"%s\",\"type\":\"%d\","
+        "\"lat\":\"%s\",\"lon\":\"%s\"}",
+        mmsi, name, aton_type, slat, slon);
+    snprintf(pay, sizeof(pay), "MMSI:%u AtoN:%d %s Lat:%s Lon:%s",
+             mmsi, aton_type, name, slat, slon);
+    emit("AIS_ATON", pay, freq, ms, kv, ud);
+}
+
+static void decode_static24(const uint8_t* d, uint32_t db,
+                              MrEmitFn emit, void* ud, double freq, uint64_t ms) {
+    uint32_t mmsi   = (uint32_t)ais_u(d, db, 8, 30);
+    int      part   = (int)ais_u(d, db, 38, 2);
+    char kv[256], pay[128];
+    if (part == 0) {
+        char name[21]; ais_str(d, db, 40, 20, name);
+        snprintf(kv, sizeof(kv),
+            "{\"signal_type\":\"AIS_STAT24\",\"msg_type\":\"24\","
+            "\"part\":\"A\",\"mmsi\":\"%u\",\"name\":\"%s\"}", mmsi, name);
+        snprintf(pay, sizeof(pay), "MMSI:%u Name:%s", mmsi, name);
+    } else {
+        char cs[8], vendor[8];
+        int stype = (int)ais_u(d, db, 40, 8);
+        ais_str(d, db, 48, 7, vendor);
+        ais_str(d, db, 90, 7, cs);
+        snprintf(kv, sizeof(kv),
+            "{\"signal_type\":\"AIS_STAT24\",\"msg_type\":\"24\","
+            "\"part\":\"B\",\"mmsi\":\"%u\",\"callsign\":\"%s\","
+            "\"ship_type\":\"%d\",\"vendor\":\"%s\"}",
+            mmsi, cs, stype, vendor);
+        snprintf(pay, sizeof(pay), "MMSI:%u CS:%s Type:%d", mmsi, cs, stype);
+    }
+    emit("AIS_STAT24", pay, freq, ms, kv, ud);
+}
+
 /* ── Frame dispatch ───────────────────────────────────────────────────── */
 
 static void dispatch_frame(const uint8_t* frm, uint32_t flen,
@@ -788,11 +912,40 @@ static void dispatch_frame(const uint8_t* frm, uint32_t flen,
     const uint32_t db = flen - 2u;
     const int msg_type = (int)ais_u(frm, db, 0, 6);
     switch (msg_type) {
-        case 6:  decode_msg6 (frm, flen, emit, ud, freq, ms); break;
-        case 8:  decode_msg8 (frm, flen, emit, ud, freq, ms); break;
-        case 12: decode_msg12(frm, flen, emit, ud, freq, ms); break;
-        case 14: decode_msg14(frm, flen, emit, ud, freq, ms); break;
-        default: break;  /* ignore position/voyage reports */
+        /* ASM-specific types */
+        case 6:  decode_msg6 (frm, flen, emit, ud, freq, ms); return;
+        case 8:  decode_msg8 (frm, flen, emit, ud, freq, ms); return;
+        case 12: decode_msg12(frm, flen, emit, ud, freq, ms); return;
+        case 14: decode_msg14(frm, flen, emit, ud, freq, ms); return;
+        /* Standard AIS types — decoded identically to ais_decoder */
+        case 1: case 2: case 3: case 18:
+            if (db >= 21) decode_position(frm, db, msg_type, emit, ud, freq, ms);
+            return;
+        case 4:
+            if (db >= 21) decode_base_station(frm, db, emit, ud, freq, ms);
+            return;
+        case 5:
+            if (db >= 53) decode_voyage(frm, db, emit, ud, freq, ms);
+            return;
+        case 21:
+            if (db >= 34) decode_aton(frm, db, emit, ud, freq, ms);
+            return;
+        case 24:
+            if (db >= 20) decode_static24(frm, db, emit, ud, freq, ms);
+            return;
+        default: break;
+    }
+    /* Fallback: emit raw for any other valid frame so traffic is visible */
+    {
+        uint32_t mmsi = (db >= 5) ? (uint32_t)ais_u(frm, db, 8, 30) : 0u;
+        char hex[128]; hex_encode(frm, 0, db < 60u ? db : 60u, hex, sizeof(hex));
+        char kv[256], pay[128];
+        snprintf(kv, sizeof(kv),
+            "{\"signal_type\":\"AIS_OTHER\",\"msg_type\":\"%d\","
+            "\"mmsi\":\"%u\",\"byte_count\":\"%u\"}",
+            msg_type, mmsi, db);
+        snprintf(pay, sizeof(pay), "MMSI:%u Type:%d", mmsi, msg_type);
+        emit("AIS_OTHER", pay, freq, ms, kv, ud);
     }
 }
 
