@@ -143,13 +143,18 @@ void TrackDatabase::InitSchema() {
     );
     CREATE INDEX IF NOT EXISTS raw_frames_ts          ON raw_frames (ts);
     CREATE INDEX IF NOT EXISTS raw_frames_source_ts   ON raw_frames (source, ts);
-    CREATE INDEX IF NOT EXISTS raw_frames_entity_ts   ON raw_frames (entity_id, ts);
   )sql");
 
   // Migration: add columns to existing databases that pre-date this schema.
+  // These are no-ops on a fresh database where CREATE TABLE already includes them.
   sqlite3_exec(db_, "ALTER TABLE raw_frames ADD COLUMN entity_id TEXT NOT NULL DEFAULT ''",
                nullptr, nullptr, nullptr);
   sqlite3_exec(db_, "ALTER TABLE raw_frames ADD COLUMN msg_type  TEXT NOT NULL DEFAULT ''",
+               nullptr, nullptr, nullptr);
+
+  // Index on entity_id is created after the migration so entity_id is guaranteed to exist.
+  sqlite3_exec(db_,
+               "CREATE INDEX IF NOT EXISTS raw_frames_entity_ts ON raw_frames (entity_id, ts)",
                nullptr, nullptr, nullptr);
 }
 
