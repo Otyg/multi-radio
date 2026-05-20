@@ -21,6 +21,8 @@ struct Args {
   std::string demod = "vdes_phy_demod";
   std::string decoder;
   std::string postproc;
+  std::string asm_postproc;
+  std::vector<std::pair<std::string, std::string>> params;  /* --param key=value */
   uint32_t sample_rate_hz = 0;
   uint32_t block_pairs = 16384;
   std::optional<uint32_t> diag_interval_blocks;
@@ -34,14 +36,22 @@ void Usage(const char* argv0) {
       << "Usage: " << argv0 << " --iq FILE.iq16 --rate HZ --freq HZ [options]\n"
       << "\n"
       << "Options:\n"
-      << "  --plugin-dir DIR   plugin directory (default: build/plugins)\n"
-      << "  --demod NAME       demod plugin (default: vdes_phy_demod)\n"
-      << "  --decoder NAME     optional decoder plugin\n"
-      << "  --postproc NAME    optional postprocessor plugin\n"
-      << "  --block-pairs N    IQ pairs per replay block (default: 16384)\n"
-      << "  --diag-blocks N    set diag_interval_blocks on plugins\n"
-      << "  --squelch-db DB    set squelch_db on plugins\n"
-      << "  --jsonl            print every plugin message as one JSON object\n";
+      << "  --plugin-dir DIR      plugin directory (default: build/plugins)\n"
+      << "  --demod NAME          demod plugin (default: vdes_phy_demod)\n"
+      << "  --decoder NAME        optional decoder plugin\n"
+      << "  --postproc NAME       optional postprocessor plugin\n"
+      << "  --asm-postproc NAME   optional ASM postprocessor plugin\n"
+      << "  --param KEY=VALUE     set a plugin parameter (repeatable)\n"
+      << "  --block-pairs N       IQ pairs per replay block (default: 16384)\n"
+      << "  --diag-blocks N       set diag_interval_blocks on plugins\n"
+      << "  --squelch-db DB       set squelch_db on plugins\n"
+      << "  --jsonl               print every plugin message as one JSON object\n"
+      << "\n"
+      << "AIS dual example:\n"
+      << "  " << argv0 << " --iq rec.iq16 --rate 2048000 --freq 162000000 \\\n"
+      << "    --demod ais_dual_demod --decoder nrzi_decoder \\\n"
+      << "    --postproc ais_decoder --asm-postproc asm_decoder \\\n"
+      << "    --param invert=1 --jsonl\n";
 }
 
 bool ParseU32(const std::string& s, uint32_t* out) {
@@ -78,6 +88,15 @@ bool ParseArgs(int argc, char** argv, Args* args) {
     else if (key == "--demod" && need_value(&value)) args->demod = value;
     else if (key == "--decoder" && need_value(&value)) args->decoder = value;
     else if (key == "--postproc" && need_value(&value)) args->postproc = value;
+    else if (key == "--asm-postproc" && need_value(&value)) args->asm_postproc = value;
+    else if (key == "--param" && need_value(&value)) {
+      const auto eq = value.find('=');
+      if (eq == std::string::npos) {
+        std::cerr << "--param requires KEY=VALUE format\n";
+        return false;
+      }
+      args->params.emplace_back(value.substr(0, eq), value.substr(eq + 1));
+    }
     else if (key == "--rate" && need_value(&value)) {
       if (!ParseU32(value, &args->sample_rate_hz)) return false;
     } else if (key == "--freq" && need_value(&value)) {
@@ -168,7 +187,10 @@ int main(int argc, char** argv) {
   plugins.SetActiveDemodulator(args.demod);
   plugins.SetActiveDecoder(args.decoder);
   plugins.SetActivePostprocessor(args.postproc);
-  plugins.SetActiveAsmPostprocessor("");
+  plugins.SetActiveAsmPostprocessor(args.asm_postproc);
+  for (const auto& [k, v] : args.params) {
+    plugins.SetParam(k, v);
+  }
   if (args.diag_interval_blocks.has_value()) {
     plugins.SetParam("diag_interval_blocks", std::to_string(*args.diag_interval_blocks));
   }
@@ -220,6 +242,7 @@ int main(int argc, char** argv) {
             << "  demod: " << args.demod << "\n"
             << "  decoder: " << (args.decoder.empty() ? "(none)" : args.decoder) << "\n"
             << "  postproc: " << (args.postproc.empty() ? "(none)" : args.postproc) << "\n"
+            << "  asm_postproc: " << (args.asm_postproc.empty() ? "(none)" : args.asm_postproc) << "\n"
             << "  sample_rate_hz: " << args.sample_rate_hz << "\n"
             << "  frequency_hz: " << args.frequency_hz << "\n"
             << "  blocks: " << blocks << "\n"
