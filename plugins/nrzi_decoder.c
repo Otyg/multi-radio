@@ -28,8 +28,10 @@ static int nrzi_dbg(void) {
 #define NLOG(...) do { if (nrzi_dbg()) fprintf(stderr, "[nrzi] " __VA_ARGS__); } while (0)
 
 typedef struct {
-  int invert;      /* 0: transition=1 (standard), 1: transition=0 */
-  int last_bit;    /* last input bit seen, for differential decode */
+  int invert;          /* 0: transition=1 (standard), 1: transition=0 */
+  int last_bit;        /* last input bit for GMSK_DATA / other sources */
+  int last_bit_asm;    /* last input bit for GMSK_ASM_DATA (kept separate
+                          so ASM branches are not corrupted by AIS branches) */
 } NrziCtx;
 
 /* ------------------------------------------------------------------ */
@@ -80,6 +82,9 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
        bit_count, source_type ? source_type : "?", ((NrziCtx*)raw)->invert);
   NrziCtx* ctx = (NrziCtx*)raw;
 
+  const int is_asm = (source_type && strcmp(source_type, "GMSK_ASM_DATA") == 0);
+  int* last = is_asm ? &ctx->last_bit_asm : &ctx->last_bit;
+
   const uint32_t byte_count = (bit_count + 7) / 8;
   uint8_t* out = (uint8_t*)calloc(byte_count, 1);
   if (!out) return;
@@ -89,9 +94,9 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
     const uint32_t mask = 1u << (7 - (i % 8));
     const int cur = (bit_bytes[bi] & mask) ? 1 : 0;
     /* NRZI decode: output bit = transition XOR invert */
-    const int transition = cur ^ ctx->last_bit;
+    const int transition = cur ^ *last;
     const int decoded = ctx->invert ? !transition : transition;
-    ctx->last_bit = cur;
+    *last = cur;
     if (decoded) out[bi] |=  (uint8_t)mask;
     else         out[bi] &= (uint8_t)~mask;
   }
