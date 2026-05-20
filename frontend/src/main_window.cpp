@@ -3661,14 +3661,6 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     if (!correctedbits.isEmpty() && correctedbits != "0")
       decoded += QString(" corrected=%1").arg(correctedbits);
 
-    AppendLog(QString("[%1] RX%2 ADS-B f=%3Hz DF=%4 ICAO=%5%6 %7")
-                  .arg(ts)
-                  .arg(receiver_id)
-                  .arg(frequency_hz, 0, 'f', 0)
-                  .arg(df)
-                  .arg(icao)
-                  .arg(decoded)
-                  .arg(payload));
     if (fixed_hdlc_log_ != nullptr)
       fixed_hdlc_log_->appendPlainText(
           QString("[%1] DF%2 %3%4 %5").arg(ts).arg(df).arg(icao).arg(decoded).arg(payload));
@@ -3686,12 +3678,14 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     if (fixed_hdlc_log_ != nullptr)
       fixed_hdlc_log_->appendPlainText(
           QString("[%1] T%2 %3").arg(ts).arg(mtype).arg(payload));
-    AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
-                  .arg(ts)
-                  .arg(receiver_id)
-                  .arg(plugin_type)
-                  .arg(frequency_hz, 0, 'f', 0)
-                  .arg(payload));
+    if (plugin_type != "AIS_POS") {
+      AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
+                    .arg(ts)
+                    .arg(receiver_id)
+                    .arg(plugin_type)
+                    .arg(frequency_hz, 0, 'f', 0)
+                    .arg(payload));
+    }
 
     // msg_type 4/21 — Base Station Report / Aid-to-Navigation: add/update as dynamic fixed object.
     if (plugin_type == "AIS_BSR" || plugin_type == "AIS_ATON") {
