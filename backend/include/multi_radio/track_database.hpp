@@ -67,11 +67,14 @@ class TrackDatabase {
                       std::optional<double> cog_degrees,
                       const std::string& source);
 
-  // --- Raw frame storage (optional) ---
+  // --- Raw frame storage ---
+  // entity_id: MMSI (AIS) or ICAO (ADS-B). msg_type: e.g. "T8" or "DF17".
   void RecordRawFrame(uint64_t ts_ms, uint32_t receiver_id,
                       const std::string& source, double frequency_hz,
                       const std::string& payload,
-                      const std::string& fields_json);
+                      const std::string& fields_json,
+                      const std::string& entity_id = "",
+                      const std::string& msg_type  = "");
 
   // --- Queries ---
   std::vector<TrackPoint> QueryTracks(const std::string& entity_id,

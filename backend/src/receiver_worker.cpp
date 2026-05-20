@@ -1291,6 +1291,87 @@ void ReceiverWorker::ProcessLoop() {
               }
             }
 
+            // --- DB recording (position + raw frame) ---
+            // Runs before the radar filter so we log all valid frames.
+            if (track_db_ && (msg.signal_type == SignalType::kAis ||
+                               msg.signal_type == SignalType::kAdsb)) {
+              const bool is_adsb = (msg.signal_type == SignalType::kAdsb);
+
+              // Determine entity ID and message type tag.
+              std::string db_entity, db_source, db_msgtype;
+              {
+                const auto id_key = is_adsb ? "icao" : "mmsi";
+                const auto it = nf.find(id_key);
+                if (it != nf.end()) db_entity = it->second;
+                db_source = is_adsb ? "ADSB" : "AIS";
+                if (is_adsb) {
+                  const auto df = nf.find("df");
+                  if (df != nf.end()) db_msgtype = "DF" + df->second;
+                } else {
+                  const auto mt = nf.find("msg_type");
+                  if (mt != nf.end()) db_msgtype = "T" + mt->second;
+                }
+              }
+
+              if (!db_entity.empty()) {
+                // Record position if lat/lon are present.
+                const auto lat_it = nf.find("lat");
+                const auto lon_it = nf.find("lon");
+                if (lat_it != nf.end() && lon_it != nf.end()) {
+                  try {
+                    const double lat = std::stod(lat_it->second);
+                    const double lon = std::stod(lon_it->second);
+                    std::optional<double> alt_ft, sog, cog;
+                    for (const char* k : {"alt_baro", "alt_geom"}) {
+                      const auto it = nf.find(k);
+                      if (it != nf.end()) {
+                        try { alt_ft = std::stod(it->second); break; } catch (...) {}
+                      }
+                    }
+                    for (const char* k : {"sog", "gs"}) {
+                      const auto it = nf.find(k);
+                      if (it != nf.end()) {
+                        try { sog = std::stod(it->second); break; } catch (...) {}
+                      }
+                    }
+                    {
+                      const auto it = nf.find("cog");
+                      if (it != nf.end()) try { cog = std::stod(it->second); } catch (...) {}
+                    }
+                    track_db_->RecordPosition(db_entity, msg.unix_ms, lat, lon,
+                                              alt_ft, sog, cog, db_source);
+                  } catch (...) {}
+                }
+
+                // Build compact JSON from normalized_fields and record raw frame.
+                std::string fields_json;
+                fields_json.reserve(nf.size() * 32);
+                fields_json = '{';
+                bool first_f = true;
+                for (const auto& [k, v] : nf) {
+                  if (!first_f) fields_json += ',';
+                  first_f = false;
+                  fields_json += '"';
+                  for (char c : k) {
+                    if (c == '"') fields_json += "\\\"";
+                    else          fields_json += c;
+                  }
+                  fields_json += "\":\"";
+                  for (char c : v) {
+                    if      (c == '"')  fields_json += "\\\"";
+                    else if (c == '\\') fields_json += "\\\\";
+                    else                fields_json += c;
+                  }
+                  fields_json += '"';
+                }
+                fields_json += '}';
+
+                track_db_->RecordRawFrame(msg.unix_ms, receiver_id_, db_source,
+                                          msg.frequency_hz, msg.payload,
+                                          fields_json, db_entity, db_msgtype);
+              }
+            }
+
             // --- Radar-relevance filter ---
             // Only forward messages that carry something the radar can display.
             const bool is_positional =

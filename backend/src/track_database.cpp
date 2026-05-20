@@ -137,11 +137,20 @@ void TrackDatabase::InitSchema() {
       source       TEXT    NOT NULL DEFAULT '',
       frequency_hz REAL,
       payload      TEXT,
-      fields_json  TEXT
+      fields_json  TEXT,
+      entity_id    TEXT    NOT NULL DEFAULT '',
+      msg_type     TEXT    NOT NULL DEFAULT ''
     );
-    CREATE INDEX IF NOT EXISTS raw_frames_ts        ON raw_frames (ts);
-    CREATE INDEX IF NOT EXISTS raw_frames_source_ts ON raw_frames (source, ts);
+    CREATE INDEX IF NOT EXISTS raw_frames_ts          ON raw_frames (ts);
+    CREATE INDEX IF NOT EXISTS raw_frames_source_ts   ON raw_frames (source, ts);
+    CREATE INDEX IF NOT EXISTS raw_frames_entity_ts   ON raw_frames (entity_id, ts);
   )sql");
+
+  // Migration: add columns to existing databases that pre-date this schema.
+  sqlite3_exec(db_, "ALTER TABLE raw_frames ADD COLUMN entity_id TEXT NOT NULL DEFAULT ''",
+               nullptr, nullptr, nullptr);
+  sqlite3_exec(db_, "ALTER TABLE raw_frames ADD COLUMN msg_type  TEXT NOT NULL DEFAULT ''",
+               nullptr, nullptr, nullptr);
 }
 
 // ----------------------------------------------------------------
@@ -172,8 +181,9 @@ void TrackDatabase::PrepareStatements() {
   )sql", -1, &stmt_insert_track_, nullptr), "prepare insert_track");
 
   SqliteCheck(sqlite3_prepare_v2(db_, R"sql(
-    INSERT INTO raw_frames (ts, receiver_id, source, frequency_hz, payload, fields_json)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO raw_frames (ts, receiver_id, source, frequency_hz, payload, fields_json,
+                            entity_id, msg_type)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   )sql", -1, &stmt_insert_raw_, nullptr), "prepare insert_raw");
 }
 
@@ -284,7 +294,9 @@ void TrackDatabase::RecordPosition(const std::string& entity_id, uint64_t ts_ms,
 void TrackDatabase::RecordRawFrame(uint64_t ts_ms, uint32_t receiver_id,
                                     const std::string& source, double frequency_hz,
                                     const std::string& payload,
-                                    const std::string& fields_json) {
+                                    const std::string& fields_json,
+                                    const std::string& entity_id,
+                                    const std::string& msg_type) {
   std::lock_guard<std::mutex> lock(mu_);
   auto* s = stmt_insert_raw_;
   sqlite3_reset(s);
@@ -294,6 +306,8 @@ void TrackDatabase::RecordRawFrame(uint64_t ts_ms, uint32_t receiver_id,
   sqlite3_bind_double(s, 4, frequency_hz);
   sqlite3_bind_text  (s, 5, payload.c_str(),     -1, SQLITE_TRANSIENT);
   sqlite3_bind_text  (s, 6, fields_json.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text  (s, 7, entity_id.c_str(),   -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text  (s, 8, msg_type.c_str(),    -1, SQLITE_TRANSIENT);
   sqlite3_step(s);
 }
 
