@@ -405,9 +405,13 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
       painter.drawEllipse(p, 3.2, 3.2);
     }
 
-    // Speed vector — COG direction, fixed 250 m length.
+    // Speed vector — COG direction, length proportional to SOG.
+    // Reference: 40 kn (vessel) or 600 kn (aircraft) → inner radar ring radius.
+    // vec_km * px_per_km = (sog / ref_sog) * radius / kRingCount
+    // (range_km_ cancels: the length is zoom-invariant relative to the rings).
     if (t.sog >= kMinSogForVector) {
-      const double vec_km  = 0.25;
+      const double ref_sog = (t.kind == RadarTargetKind::kAircraft) ? 600.0 : 40.0;
+      const double vec_km  = (t.sog / ref_sog) * (range_km_ / kRingCount);
       const double cog_rad = t.cog * (M_PI / 180.0);
       const double ex = p.x() + std::sin(cog_rad) * vec_km * px_per_km;
       const double ey = p.y() - std::cos(cog_rad) * vec_km * px_per_km;
