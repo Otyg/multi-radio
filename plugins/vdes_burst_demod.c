@@ -242,8 +242,14 @@ static void reset_to_idle(VdesBurstDemodCtx* ctx) {
     memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
     if (ctx->symsync)
         symsync_crcf_set_lf_bw(ctx->symsync, ctx->sync_bw_preamble);
-    if (ctx->pll)
+    if (ctx->pll) {
         nco_crcf_pll_set_bandwidth(ctx->pll, ctx->pll_bw_preamble);
+        /* Reset NCO frequency to zero so each burst estimates its own carrier
+         * offset from scratch.  Without this, corrections from the previous
+         * burst pollute the preamble accumulator of the next one. */
+        nco_crcf_set_frequency(ctx->pll, 0.0f);
+        nco_crcf_set_phase(ctx->pll, 0.0f);
+    }
 }
 
 static void emit_bits(VdesBurstDemodCtx* ctx, double freq_hz, uint64_t unix_ms,
