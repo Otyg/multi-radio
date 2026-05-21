@@ -59,11 +59,18 @@ def load_blocks(path):
             iq = d[0::2].astype(np.float32) + 1j * d[1::2].astype(np.float32)
             yield iq / 32768.0
 
+DC_NOTCH_HZ = 2_000   # nolla ut ±2 kHz runt 0 Hz i alla FFT-beräkningar
+
+def apply_dc_notch(spec, freqs):
+    """Nollar ut DC-spiken (±DC_NOTCH_HZ runt 0 Hz) i ett spektrum in-place."""
+    spec[np.abs(freqs) < DC_NOTCH_HZ] = 0.0
+
 def channel_power(iq, offset_hz, sr, bw_hz=60_000):
-    """Effekt i ett smalt band runt offset_hz (enkel FFT-filterimitation)."""
+    """Effekt i ett smalt band runt offset_hz med DC-notch."""
     n = len(iq)
     spec = np.abs(np.fft.fft(iq)) ** 2
     freqs = np.fft.fftfreq(n, 1.0 / sr)
+    apply_dc_notch(spec, freqs)
     mask = np.abs(freqs - offset_hz) < bw_hz / 2
     return float(spec[mask].mean()) if mask.any() else 0.0
 
@@ -74,6 +81,7 @@ def measure_bandwidth(iq, offset_hz, sr, fft_n=8192):
     """
     spec  = np.abs(np.fft.fftshift(np.fft.fft(iq, n=fft_n))) ** 2
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_n, 1.0 / sr))
+    apply_dc_notch(spec, freqs)
 
     # Begränsa till ±120 kHz runt offset (täcker även 100 kHz-kanaler)
     roi   = np.abs(freqs - offset_hz) < 120_000
@@ -164,9 +172,13 @@ def generate_waterfall(path, sr, center_mhz, burst_blocks_per_ch):
         return
 
     spec = np.empty((n_frames, fft_n), dtype=np.float32)
+    freqs_stft = np.fft.fftshift(np.fft.fftfreq(fft_n, 1.0 / sr))
+    dc_mask    = np.abs(freqs_stft) < DC_NOTCH_HZ
     for i in range(n_frames):
-        seg      = iq[i * hop : i * hop + fft_n] * window
-        spec[i]  = np.fft.fftshift(np.abs(np.fft.fft(seg)) ** 2)
+        seg     = iq[i * hop : i * hop + fft_n] * window
+        row     = np.fft.fftshift(np.abs(np.fft.fft(seg)) ** 2)
+        row[dc_mask] = 0.0
+        spec[i] = row
     spec_db = 10 * np.log10(spec + 1e-12)
 
     freqs_khz = np.fft.fftshift(np.fft.fftfreq(fft_n, 1.0 / sr)) / 1e3

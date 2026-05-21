@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +29,7 @@ struct Args {
   std::optional<uint32_t> diag_interval_blocks;
   std::optional<double> squelch_db;
   double frequency_hz = 0.0;
+  double freq_offset_hz = 0.0;  /* mix signal by this offset before demod */
   bool jsonl = false;
 };
 
@@ -45,6 +47,7 @@ void Usage(const char* argv0) {
       << "  --block-pairs N       IQ pairs per replay block (default: 16384)\n"
       << "  --diag-blocks N       set diag_interval_blocks on plugins\n"
       << "  --squelch-db DB       set squelch_db on plugins\n"
+      << "  --freq-offset HZ      mix IQ by this offset before demod (e.g. -37500)\n"
       << "  --jsonl               print every plugin message as one JSON object\n"
       << "\n"
       << "AIS dual example:\n"
@@ -111,6 +114,8 @@ bool ParseArgs(int argc, char** argv, Args* args) {
       double parsed = 0.0;
       if (!ParseDouble(value, &parsed)) return false;
       args->squelch_db = parsed;
+    } else if (key == "--freq-offset" && need_value(&value)) {
+      if (!ParseDouble(value, &args->freq_offset_hz)) return false;
     } else if (key == "--jsonl") {
       args->jsonl = true;
     } else if (key == "--help" || key == "-h") {
@@ -200,6 +205,14 @@ int main(int argc, char** argv) {
     plugins.SetParam("squelch_db", s.str());
   }
 
+  // NCO state for optional frequency shift (--freq-offset).
+  const bool do_mix = (args.freq_offset_hz != 0.0);
+  double nco_phase = 0.0;
+  const double nco_step = do_mix
+      ? (-2.0 * M_PI * args.freq_offset_hz / args.sample_rate_hz)
+      : 0.0;
+  std::vector<int16_t> mixed_buf;  // reused per block if mixing
+
   std::vector<int16_t> buf(static_cast<size_t>(args.block_pairs) * 2u);
   uint64_t blocks = 0;
   uint64_t iq_pairs = 0;
@@ -221,8 +234,31 @@ int main(int argc, char** argv) {
 
     multi_radio::IQSampleBlock block;
     block.sample_rate_hz = args.sample_rate_hz;
-    block.center_frequency_hz = static_cast<uint32_t>(args.frequency_hz + 0.5);
-    block.interleaved_iq.assign(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(pairs * 2u));
+    block.center_frequency_hz = static_cast<uint32_t>(
+        args.frequency_hz + args.freq_offset_hz + 0.5);
+
+    if (do_mix) {
+      // Multiply each IQ pair by exp(j*nco_phase) to shift by freq_offset_hz.
+      mixed_buf.resize(pairs * 2u);
+      for (size_t n = 0; n < pairs; ++n) {
+        const double i_in = static_cast<double>(buf[n * 2u]);
+        const double q_in = static_cast<double>(buf[n * 2u + 1u]);
+        const double c = std::cos(nco_phase);
+        const double s = std::sin(nco_phase);
+        mixed_buf[n * 2u]      = static_cast<int16_t>(i_in * c - q_in * s);
+        mixed_buf[n * 2u + 1u] = static_cast<int16_t>(i_in * s + q_in * c);
+        nco_phase += nco_step;
+        if (nco_phase >  M_PI) nco_phase -= 2.0 * M_PI;
+        if (nco_phase < -M_PI) nco_phase += 2.0 * M_PI;
+      }
+      block.interleaved_iq.assign(
+          mixed_buf.begin(),
+          mixed_buf.begin() + static_cast<std::ptrdiff_t>(pairs * 2u));
+    } else {
+      block.interleaved_iq.assign(
+          buf.begin(),
+          buf.begin() + static_cast<std::ptrdiff_t>(pairs * 2u));
+    }
 
     plugins.ProcessIq(block, [&](const multi_radio::PluginMessage& msg) {
       messages++;
