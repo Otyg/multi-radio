@@ -342,14 +342,14 @@ static void process_sym(VdesBurstDemodCtx* ctx,
         if (ctx->pream_n >= ctx->preamble_min_syms ||
             ctx->pream_total >= ctx->preamble_max_syms) {
 
-            /* One-shot carrier correction from averaged preamble phase. */
+            /* One-shot carrier correction from averaged preamble phase.
+             * excess_per_sym is in rad/symbol.  The NCO is stepped once per
+             * symbol output (not once per input sample), so the correction
+             * unit is rad/step = rad/symbol — no BD_K division needed. */
             float avg_phase = atan2f((float)ctx->pream_acc_q,
                                      (float)ctx->pream_acc_i);
-            /* Expected avg_phase = π/4 (preamble) + carrier_offset_per_symbol.
-               Apply the excess as a frequency correction. */
-            float excess_per_sym    = wrap_pi(avg_phase - (float)(M_PI / 4.0));
-            float correction_per_samp = -excess_per_sym / (float)BD_K;
-            nco_crcf_adjust_frequency(ctx->pll, correction_per_samp);
+            float excess_per_sym = wrap_pi(avg_phase - (float)(M_PI / 4.0));
+            nco_crcf_adjust_frequency(ctx->pll, -excess_per_sym);
 
             ctx->last_freq_err_hz  = excess_per_sym *
                                      (float)ctx->symbol_rate_baud / (2.0f * (float)M_PI);
