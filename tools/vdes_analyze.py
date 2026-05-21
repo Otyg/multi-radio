@@ -25,10 +25,15 @@ BLOCK       = 4096           # IQ-par per analysblock (~2 ms)
 CHANNEL_HZ  = [-62500, -37500, -12500, +12500, +37500, +62500]
 CHANNEL_NAMES = ["CH24","CH84","CH25","CH85","CH26","CH86"]
 
-BW_GMSK_LOW  =  7_000        # GMSK 9600 bps: typisk -10 dB BW 8–16 kHz
-BW_GMSK_HIGH = 22_000
-BW_VDES_LOW  = 25_000        # pi/4-DQPSK 28800 bps: typisk -10 dB BW 28–45 kHz
-BW_VDES_HIGH = 55_000
+# Bandbreddsklassificering vid -10 dB
+# GMSK 9600 bps (AIS-liknande):         ~8–20 kHz
+# VDES pi/4-DQPSK 25 kHz-kanal:         ~20–35 kHz   (t.ex. 9600–19200 bps)
+# VDES pi/4-DQPSK 50 kHz-kanal:         ~35–65 kHz   (t.ex. 28800–57600 bps)
+# VDES pi/4-DQPSK 100 kHz-kanal:        ~65–115 kHz  (t.ex. 57600+ bps)
+BW_GMSK_LOW   =  7_000
+BW_GMSK_HIGH  = 22_000
+BW_VDES_LOW   = 22_000   # nedre kant VDES (25 kHz kanal)
+BW_VDES_HIGH  = 115_000  # övre kant VDES (100 kHz kanal)
 
 NOISE_PERCENTILE = 15        # andel "tysta" block för brusgolvsberäkning
 BURST_THRESHOLD  = 6.0       # dB över brusgolv för burstdetektion
@@ -46,7 +51,7 @@ def load_blocks(path):
             iq = d[0::2].astype(np.float32) + 1j * d[1::2].astype(np.float32)
             yield iq / 32768.0
 
-def channel_power(iq, offset_hz, sr, bw_hz=20_000):
+def channel_power(iq, offset_hz, sr, bw_hz=60_000):
     """Effekt i ett smalt band runt offset_hz (enkel FFT-filterimitation)."""
     n = len(iq)
     spec = np.abs(np.fft.fft(iq)) ** 2
@@ -62,8 +67,8 @@ def measure_bandwidth(iq, offset_hz, sr, fft_n=8192):
     spec  = np.abs(np.fft.fftshift(np.fft.fft(iq, n=fft_n))) ** 2
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_n, 1.0 / sr))
 
-    # Begränsa till ±80 kHz runt offset
-    roi   = np.abs(freqs - offset_hz) < 80_000
+    # Begränsa till ±120 kHz runt offset (täcker även 100 kHz-kanaler)
+    roi   = np.abs(freqs - offset_hz) < 120_000
     if not roi.any():
         return None, None
 
@@ -88,13 +93,17 @@ def measure_bandwidth(iq, offset_hz, sr, fft_n=8192):
 def modulation_guess(bw_hz):
     if bw_hz is None:
         return "—"
-    if BW_GMSK_LOW <= bw_hz <= BW_GMSK_HIGH:
-        return "GMSK 9600 bps (AIS-liknande)"
-    if BW_VDES_LOW <= bw_hz <= BW_VDES_HIGH:
-        return "pi/4-DQPSK 28800 bps (VDES!)"
     if bw_hz < BW_GMSK_LOW:
         return f"Smalband {bw_hz/1000:.1f} kHz (CW/FSK?)"
-    return f"Bred {bw_hz/1000:.1f} kHz (okänd)"
+    if bw_hz <= BW_GMSK_HIGH:
+        return "GMSK 9600 bps (AIS-liknande)"
+    if bw_hz <= 35_000:
+        return "VDES pi/4-DQPSK  25 kHz-kanal (~9600–19200 bps)"
+    if bw_hz <= 65_000:
+        return "VDES pi/4-DQPSK  50 kHz-kanal (~28800–57600 bps)"
+    if bw_hz <= BW_VDES_HIGH:
+        return "VDES pi/4-DQPSK 100 kHz-kanal (~57600+ bps)"
+    return f"Mycket bred {bw_hz/1000:.1f} kHz (okänd)"
 
 # ── Huvud-analys ──────────────────────────────────────────────────────
 
