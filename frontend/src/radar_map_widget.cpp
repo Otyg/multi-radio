@@ -411,7 +411,7 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
     // (range_km_ cancels: the length is zoom-invariant relative to the rings).
     if (t.sog >= kMinSogForVector) {
       const double ref_sog = (t.kind == RadarTargetKind::kAircraft) ? 600.0 : 40.0;
-      const double vec_km  = (t.sog / ref_sog) * (range_km_ / kRingCount);
+      const double vec_km  = (t.sog / ref_sog) * (range_km_ / kRingCount) * 0.5;
       const double cog_rad = t.cog * (M_PI / 180.0);
       const double ex = p.x() + std::sin(cog_rad) * vec_km * px_per_km;
       const double ey = p.y() - std::cos(cog_rad) * vec_km * px_per_km;
