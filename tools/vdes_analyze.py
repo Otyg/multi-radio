@@ -15,9 +15,17 @@ Utdata per kanal:
   - Duty cycle och burstlängder
   - Slutsats: VDES pi/4-DQPSK / AIS GMSK / Ingen signal
 """
-import sys, os, struct
+import sys, os
 import numpy as np
 from collections import defaultdict
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")   # headless — sparar till fil utan display
+    import matplotlib.pyplot as plt
+    HAS_MPL = True
+except ImportError:
+    HAS_MPL = False
 
 # ── Konstanter ────────────────────────────────────────────────────────
 SR          = 2_048_000      # sample rate default (overridden per file)
@@ -104,6 +112,107 @@ def modulation_guess(bw_hz):
     if bw_hz <= BW_VDES_HIGH:
         return "VDES pi/4-DQPSK 100 kHz-kanal (~57600+ bps)"
     return f"Mycket bred {bw_hz/1000:.1f} kHz (okänd)"
+
+# ── Vattenfall ────────────────────────────────────────────────────────
+
+def generate_waterfall(path, sr, center_mhz, burst_blocks_per_ch):
+    """
+    Hittar det tätaste 10-sekunders fönstret av burstar, laddar det IQ-data
+    och sparar ett vattenfall-PNG med kanalmarkeringar.
+    """
+    if not HAS_MPL:
+        print("  (matplotlib saknas — ingen vattenfallsbild genererad)")
+        return
+
+    all_burst_idx = set()
+    for ci in range(len(CHANNEL_HZ)):
+        all_burst_idx.update(burst_blocks_per_ch[ci].tolist())
+
+    if not all_burst_idx:
+        return
+
+    # Hitta det 10-sekunders block-fönster med flest burst-block.
+    win_blocks = max(1, int(10 * sr / BLOCK))
+    sorted_b   = sorted(all_burst_idx)
+    max_block  = sorted_b[-1]
+
+    best_start, best_count = 0, 0
+    step = max(1, win_blocks // 20)
+    for s in range(0, max(1, max_block - win_blocks + 1), step):
+        c = sum(1 for b in sorted_b if s <= b < s + win_blocks)
+        if c > best_count:
+            best_count, best_start = c, s
+
+    # Ladda fönstret som ett sammanhängande IQ-block.
+    byte_off = best_start * BLOCK * 4
+    n_load   = min(win_blocks, max_block - best_start + 1) * BLOCK
+    with open(path, "rb") as f:
+        f.seek(byte_off)
+        raw = f.read(n_load * 4)
+
+    d  = np.frombuffer(raw, dtype=np.int16)
+    iq = (d[0::2].astype(np.float32) + 1j * d[1::2].astype(np.float32)) / 32768.0
+
+    # STFT — fönsterstorlek anpassad så att varje rad = ~2 ms.
+    fft_n  = max(256, min(2048, int(sr * 0.002)))
+    fft_n  = 1 << (fft_n - 1).bit_length()   # närmaste 2^N
+    hop    = fft_n // 2
+    window = np.hanning(fft_n)
+
+    n_frames = (len(iq) - fft_n) // hop
+    if n_frames <= 0:
+        return
+
+    spec = np.empty((n_frames, fft_n), dtype=np.float32)
+    for i in range(n_frames):
+        seg      = iq[i * hop : i * hop + fft_n] * window
+        spec[i]  = np.fft.fftshift(np.abs(np.fft.fft(seg)) ** 2)
+    spec_db = 10 * np.log10(spec + 1e-12)
+
+    freqs_khz = np.fft.fftshift(np.fft.fftfreq(fft_n, 1.0 / sr)) / 1e3
+    t_ms      = (np.arange(n_frames) * hop) / sr * 1e3
+
+    # Fokusera x-axeln på det intressanta bandet (±130 kHz).
+    roi = np.abs(freqs_khz) <= 130
+    spec_roi   = spec_db[:, roi]
+    freqs_roi  = freqs_khz[roi]
+
+    vmin = np.percentile(spec_roi, 5)
+    vmax = np.percentile(spec_roi, 99.5)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.imshow(spec_roi,
+              aspect="auto", origin="lower", interpolation="nearest",
+              extent=[freqs_roi[0], freqs_roi[-1], t_ms[0], t_ms[-1]],
+              cmap="rainbow", vmin=vmin, vmax=vmax)
+
+    # Markera kanalcentra.
+    for off, name in zip(CHANNEL_HZ, CHANNEL_NAMES):
+        kh = off / 1e3
+        if freqs_roi[0] <= kh <= freqs_roi[-1]:
+            ax.axvline(kh, color="cyan", alpha=0.6, linewidth=0.8, linestyle="--")
+            ax.text(kh, t_ms[-1] * 0.98, name,
+                    color="cyan", fontsize=7, ha="center", va="top",
+                    bbox=dict(facecolor="black", alpha=0.4, pad=1, linewidth=0))
+
+    ax.set_xlabel("Frekvens (kHz från center)")
+    ax.set_ylabel("Tid (ms)")
+    rf_start = center_mhz + freqs_roi[0] / 1e3
+    rf_stop  = center_mhz + freqs_roi[-1] / 1e3
+    ax.set_title(
+        f"Vattenfall — {os.path.basename(path)}\n"
+        f"Center {center_mhz:.4f} MHz  |  "
+        f"RF {rf_start:.4f}–{rf_stop:.4f} MHz  |  "
+        f"SR {sr/1e6:.3f} Msps  |  "
+        f"tätaste 10 s ({best_count} burst-block)"
+    )
+
+    plt.tight_layout()
+    out = os.path.splitext(path)[0] + "_waterfall.png"
+    plt.savefig(out, dpi=130)
+    plt.close(fig)
+    print(f"  Vattenfall sparat: {out}")
+
 
 # ── Huvud-analys ──────────────────────────────────────────────────────
 
@@ -209,11 +318,13 @@ def analyze_file(path, center_mhz, sr):
                   f"max={run_ms_arr.max():.1f} ms")
             if len(runs) > 1:
                 gaps = np.diff(sorted(burst_blocks[most_active_ci]))
-                gap_ms = gaps[gaps > 1] * BLOCK / SR * 1000
+                gap_ms = gaps[gaps > 1] * BLOCK / sr * 1000
                 if len(gap_ms):
                     print(f"  Gap (mellanrum): median={np.median(gap_ms):.0f} ms")
 
     print(f"\n>>> {'VDES-trafik troligen FUNNEN' if any_vdes else 'Ingen VDES-trafik detekterad'} <<<")
+
+    generate_waterfall(path, sr, center_mhz, burst_blocks)
 
 # ── Jämförelse av två filer (fartygs-TX vs kust-TX) ──────────────────
 
