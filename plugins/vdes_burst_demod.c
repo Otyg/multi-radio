@@ -310,84 +310,60 @@ static void process_sym(VdesBurstDemodCtx* ctx,
         return;
     }
 
-    /* differential phase */
+    /* Differential phase — compute d ONCE and reuse for both phi and accumulator.
+       Save prev_sym BEFORE updating so d is conj(prev)·curr, not |curr|². */
     {
         liquid_float_complex d = conjf(ctx->prev_sym) * corrected;
         phi = atan2f(cimagf(d), crealf(d));
+
+        if (ctx->state == BD_PREAMBLE) {
+            /* Accumulate ALL symbols during preamble — no per-symbol filter.
+               The VDES preamble is ALL +π/4 transitions by design, so the
+               vector average of d gives exp(j·(π/4 + carrier_offset_per_sym)).
+               Works even for large carrier offsets. */
+            ctx->pream_acc_i += crealf(d);
+            ctx->pream_acc_q += cimagf(d);
+            ctx->pream_n++;
+        }
     }
+    /* Update reference for next symbol (after d is computed). */
     ctx->prev_sym = corrected;
     ctx->pream_total++;
 
     if (ctx->state == BD_PREAMBLE) {
-        float dist_from_pi4 = fabsf(wrap_pi(phi - (float)(M_PI / 4.0)));
-        int is_preamble_sym = (dist_from_pi4 < ctx->preamble_tol_rad);
-
-        /* PLL active during preamble */
+        /* PLL active during preamble — drives toward nearest constellation. */
         {
             float tgt = nearest_pi4(phi);
             float err = wrap_pi(phi - tgt);
             nco_crcf_pll_step(ctx->pll, 0.25f * err);
         }
 
-        if (is_preamble_sym) {
-            liquid_float_complex d = conjf(ctx->prev_sym) * ctx->prev_sym;
-            /* Recompute d from stored prev correctly */
-            {
-                /* Re-derive d (prev_sym was already updated above, use corrected) */
-                liquid_float_complex prev2, curr2;
-                /* AGC normalises so we can use corrected directly */
-                prev2 = ctx->prev_sym;   /* already updated */
-                curr2 = corrected;
-                d = conjf(prev2) * curr2;
-            }
-            ctx->pream_acc_i += crealf(d);
-            ctx->pream_acc_q += cimagf(d);
-            ctx->pream_n++;
+        /* Transition after preamble_min_syms or preamble_max_syms symbols. */
+        if (ctx->pream_n >= ctx->preamble_min_syms ||
+            ctx->pream_total >= ctx->preamble_max_syms) {
+
+            /* One-shot carrier correction from averaged preamble phase. */
+            float avg_phase = atan2f((float)ctx->pream_acc_q,
+                                     (float)ctx->pream_acc_i);
+            /* Expected avg_phase = π/4 (preamble) + carrier_offset_per_symbol.
+               Apply the excess as a frequency correction. */
+            float excess_per_sym    = wrap_pi(avg_phase - (float)(M_PI / 4.0));
+            float correction_per_samp = -excess_per_sym / (float)BD_K;
+            nco_crcf_adjust_frequency(ctx->pll, correction_per_samp);
+
+            ctx->last_freq_err_hz  = excess_per_sym *
+                                     (float)ctx->symbol_rate_baud / (2.0f * (float)M_PI);
+            ctx->last_pream_syms   = ctx->pream_n;
+
+            VLOG("preamble→demod: n=%u avg_phase=%.3f freq_err=%.1fHz\n",
+                 ctx->pream_n, (double)avg_phase, (double)ctx->last_freq_err_hz);
+
+            /* Freeze symbol-sync loop. */
+            symsync_crcf_set_lf_bw(ctx->symsync, BD_SYNC_BW_FROZEN);
+            ctx->state = BD_DEMOD;
         }
 
-        /* Decide if preamble is done */
-        {
-            int enough = (ctx->pream_n >= ctx->preamble_min_syms);
-            int force  = (ctx->pream_total >= ctx->preamble_max_syms);
-
-            if ((enough && !is_preamble_sym) || force) {
-                /* Estimate and apply carrier correction */
-                if (ctx->pream_n >= 4u) {
-                    float avg_phase = atan2f((float)ctx->pream_acc_q,
-                                             (float)ctx->pream_acc_i);
-                    /* avg_phase ≈ π/4 + freq_err×2π/sym_rate;
-                       excess phase per symbol = avg_phase − π/4 */
-                    float excess_per_sym = wrap_pi(avg_phase - (float)(M_PI / 4.0));
-                    float correction_per_sample = -excess_per_sym / (float)BD_K;
-                    nco_crcf_adjust_frequency(ctx->pll, correction_per_sample);
-
-                    ctx->last_freq_err_hz =
-                        -excess_per_sym * (float)ctx->symbol_rate_baud / (2.0f*(float)M_PI);
-                    ctx->last_pream_syms = ctx->pream_n;
-
-                    VLOG("preamble end: n=%u avg_phase=%.4f freq_err=%.1fHz\n",
-                         ctx->pream_n, (double)avg_phase,
-                         (double)ctx->last_freq_err_hz);
-                }
-
-                /* Freeze symbol sync */
-                symsync_crcf_set_lf_bw(ctx->symsync, BD_SYNC_BW_FROZEN);
-                ctx->state = BD_DEMOD;
-
-                /* If the transition was triggered by a non-preamble symbol,
-                   decode it now (first real data symbol / sync word bit). */
-                if (!force && !is_preamble_sym) {
-                    float tgt = nearest_pi4(phi);
-                    uint8_t b0, b1;
-                    phase_to_bits(tgt, &b0, &b1);
-                    mr_push_bit(ctx->bit_buf, &ctx->bit_count, BD_MAX_BITS, b0);
-                    mr_push_bit(ctx->bit_buf, &ctx->bit_count, BD_MAX_BITS, b1);
-                }
-            }
-        }
-
-    } else { /* BD_DEMOD */
-        /* No PLL update — carrier is frozen */
+    } else { /* BD_DEMOD — PLL frozen, carrier correction applied */
         float tgt = nearest_pi4(phi);
         uint8_t b0, b1;
         phase_to_bits(tgt, &b0, &b1);

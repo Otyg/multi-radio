@@ -461,7 +461,7 @@ void PluginHost::EmitFromPlugin(const char* signal_type, const char* payload,
   if (state->decoder_fn && state->decoder_ctx && signal_type && payload && payload[0]) {
     const std::string sig(signal_type);
     if (sig == "FSK_DATA" || sig == "GMSK_DATA" || sig == "GMSK_ASM_DATA" ||
-        sig == "VDES_ASM_DATA") {
+        sig == "VDES_ASM_DATA" || sig == "VDES_BURST_DATA") {
       // Convert hex payload → bytes, then call decoder.
       const size_t hex_len = std::strlen(payload);
       const size_t byte_count = hex_len / 2;
