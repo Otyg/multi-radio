@@ -271,19 +271,19 @@ static void emit_bits(VdesBurstDemodCtx* ctx, double freq_hz, uint64_t unix_ms,
 
 static void process_sym(VdesBurstDemodCtx* ctx,
                          liquid_float_complex sym,
+                         float pre_agc_energy,   /* avg per-sample energy BEFORE AGC */
                          double freq_hz, uint64_t unix_ms,
                          MrEmitFn emit_fn, void* user_data) {
     liquid_float_complex corrected;
-    float energy, phi;
+    float phi;
     int falling;
 
     /* carrier correction */
     nco_crcf_mix_down(ctx->pll, sym, &corrected);
     nco_crcf_step(ctx->pll);
 
-    /* signal gate */
-    energy  = crealf(corrected)*crealf(corrected) + cimagf(corrected)*cimagf(corrected);
-    falling = mr_signal_gate_update(&ctx->gate, energy / (float)BD_K, MR_GATE_HOLD_SYMS);
+    /* signal gate — use pre-AGC energy so AGC normalisation doesn't mask noise */
+    falling = mr_signal_gate_update(&ctx->gate, pre_agc_energy, MR_GATE_HOLD_SYMS);
 
     if (!ctx->gate.gate_open) {
         if (falling && ctx->bit_count >= BD_MIN_BITS) {
@@ -497,17 +497,33 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
     }
     msresamp_crcf_execute(ctx->resamp, ctx->in_buf, num_pairs, ctx->resamp_out, &nr);
 
-    /* AGC and symbol sync */
-    for (i = 0u; i < nr; ++i) {
-        liquid_float_complex agc_out;
-        unsigned int nsym = 0u;
+    /* AGC and symbol sync.
+     * Pre-AGC energy is accumulated over the samples that correspond to each
+     * output symbol so the gate can distinguish signal from noise even though
+     * AGC normalises amplitude to unity. */
+    {
+        float pre_energy_acc = 0.0f;
+        uint32_t pre_energy_n = 0u;
+        for (i = 0u; i < nr; ++i) {
+            liquid_float_complex agc_in = ctx->resamp_out[i];
+            float re = crealf(agc_in), im = cimagf(agc_in);
+            pre_energy_acc += re*re + im*im;
+            pre_energy_n++;
 
-        agc_crcf_execute(ctx->agc, ctx->resamp_out[i], &agc_out);
-        symsync_crcf_execute(ctx->symsync, &agc_out, 1u, ctx->sym_buf, &nsym);
+            liquid_float_complex agc_out;
+            unsigned int nsym = 0u;
+            agc_crcf_execute(ctx->agc, agc_in, &agc_out);
+            symsync_crcf_execute(ctx->symsync, &agc_out, 1u, ctx->sym_buf, &nsym);
 
-        for (unsigned int s = 0u; s < nsym; ++s) {
-            process_sym(ctx, ctx->sym_buf[s],
-                        freq_hz, unix_ms, emit_fn, user_data);
+            for (unsigned int s = 0u; s < nsym; ++s) {
+                float sym_e = (pre_energy_n > 0u)
+                            ? pre_energy_acc / (float)pre_energy_n
+                            : 0.0f;
+                pre_energy_acc = 0.0f;
+                pre_energy_n   = 0u;
+                process_sym(ctx, ctx->sym_buf[s], sym_e,
+                            freq_hz, unix_ms, emit_fn, user_data);
+            }
         }
     }
 
