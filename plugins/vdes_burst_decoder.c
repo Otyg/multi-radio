@@ -37,25 +37,28 @@
 /* ── built-in sync patterns ───────────────────────────────────────────── */
 
 /*
- * 28-bit pattern: {1} + Barker-13 + {0} + ~Barker-13.
- * Used as default in vdes_asm_decoder; kept as primary candidate here.
+ * ITU-R M.2092-2 §A2-1.2.3.3: VDES VDE-TER training sequence (27 bits):
+ *   111111001101010000011001010
+ * Each training bit maps to a pi/4-DQPSK dibit:
+ *   1 → dibit (1,1) = -3pi/4 differential phase
+ *   0 → dibit (0,0) = +pi/4 differential phase
+ *
+ * The burst demodulator (vdes_burst_demod) consumes the first 16 training
+ * symbols (bits 0-15) during preamble accumulation without emitting bits.
+ * The remaining 11 training symbols (bits 16-26) are the first bits emitted:
+ *   training bits 16-26: 0,0,0,1,1,0,0,1,0,1,0
+ *   as dibits:           00 00 00 11 11 00 00 11 00 11 00
+ *
+ * False-positive rate: C(22,2)*2/2^22 ≈ 110 ppm → 1 false hit / ~900 kbit.
  */
-static const uint8_t kSync28[28] = {
-    1,
-    1,1,1,1,1,0,0,1,1,0,1,0,1,
-    0,
-    0,0,0,0,0,1,1,0,0,1,0,1,0
-};
-
-/*
- * VDES ASM 24-bit unique word candidate.
- * NOTE: verify against ITU-R M.2092 table when ground-truth is available.
- * Pattern corresponds to 0xD5A7B2.
- */
-static const uint8_t kVDES_UW24[24] = {
-    1,1,0,1,0,1,0,1,   /* 0xD5 */
-    1,0,1,0,0,1,1,1,   /* 0xA7 */
-    1,0,1,1,0,0,1,0    /* 0xB2 */
+static const uint8_t kVDES_TRAIN22[22] = {
+    0,0,  0,0,  0,0,          /* training bits 16,17,18 = 0 */
+    1,1,  1,1,                /* training bits 19,20 = 1 */
+    0,0,  0,0,                /* training bits 21,22 = 0 */
+    1,1,                      /* training bit 23 = 1 */
+    0,0,                      /* training bit 24 = 0 */
+    1,1,                      /* training bit 25 = 1 */
+    0,0                       /* training bit 26 = 0 */
 };
 
 typedef struct {
@@ -66,18 +69,14 @@ typedef struct {
 } SyncDef;
 
 /*
- * Per-pattern false-positive rate at random (both polarities):
- *   sync28 (28 bits, 2 err): C(28,2)*2/2^28 ≈ 3e-6  → ~3 hits / 1 Mbit
- *   vdes_uw (24 bits, 1 err): C(24,1)*2/2^24 ≈ 3e-6  → ~3 hits / 1 Mbit
- *
- * 8-bit patterns are excluded from the defaults: C(8,2)*2/256 ≈ 29 % per
- * position makes them useless as a gate at any non-zero error tolerance.
+ * vdes_train22 (22 bits, 2 err): C(22,2)*2/2^22 ≈ 110 ppm
+ *   → ~1 false hit per 900 kbit at 76800 bps ≈ once per 12 s (acceptable).
+ * With 1 error: C(22,1)*2/2^22 ≈ 10 ppm → once per 130 s (conservative).
  */
 static const SyncDef kBuiltinPatterns[] = {
-    { "sync28",  kSync28,    28u, 2u },
-    { "vdes_uw", kVDES_UW24, 24u, 1u },
+    { "vdes_train22", kVDES_TRAIN22, 22u, 2u },
 };
-#define BD_NUM_BUILTIN 2u
+#define BD_NUM_BUILTIN 1u
 
 /* ── context ──────────────────────────────────────────────────────────── */
 

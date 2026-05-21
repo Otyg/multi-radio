@@ -354,7 +354,7 @@ static void process_sym(VdesBurstDemodCtx* ctx,
              * unit is rad/step = rad/symbol — no BD_K division needed. */
             float avg_phase = atan2f((float)ctx->pream_acc_q,
                                      (float)ctx->pream_acc_i);
-            float excess_per_sym = wrap_pi(avg_phase - (float)(M_PI / 4.0));
+            float excess_per_sym = wrap_pi(avg_phase - (float)(-3.0 * M_PI / 4.0));
             /* corrected = sym × exp(-j·ω_nco·n).  Residual carrier per symbol =
              * ω_c - ω_nco.  excess_per_sym estimates this residual.  To cancel
              * it we must increase ω_nco by +excess, not decrease it. */
