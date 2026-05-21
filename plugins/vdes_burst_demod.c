@@ -349,7 +349,10 @@ static void process_sym(VdesBurstDemodCtx* ctx,
             float avg_phase = atan2f((float)ctx->pream_acc_q,
                                      (float)ctx->pream_acc_i);
             float excess_per_sym = wrap_pi(avg_phase - (float)(M_PI / 4.0));
-            nco_crcf_adjust_frequency(ctx->pll, -excess_per_sym);
+            /* corrected = sym × exp(-j·ω_nco·n).  Residual carrier per symbol =
+             * ω_c - ω_nco.  excess_per_sym estimates this residual.  To cancel
+             * it we must increase ω_nco by +excess, not decrease it. */
+            nco_crcf_adjust_frequency(ctx->pll, +excess_per_sym);
 
             ctx->last_freq_err_hz  = excess_per_sym *
                                      (float)ctx->symbol_rate_baud / (2.0f * (float)M_PI);
