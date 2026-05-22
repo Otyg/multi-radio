@@ -78,39 +78,39 @@ def modulate_bits(bits, sym_rate, sample_rate, freq_offset_hz=0.0,
                   beta=0.35, rolloff_syms=6):
     """
     Modulerar ett bitfält till komplexa baseband-sampler med pi/4-DQPSK.
-    Returnerar lista av komplexa floats.
+    Tillämpar RRC-pulsformning (matchar symsync_crcf beta i demodeln).
 
     bits         = list av 0/1, längd måste vara jämnt antal (dibitar)
-    beta         = raised cosine roll-off
+    beta         = roll-off
     rolloff_syms = filter half-length i symboler
     """
     assert len(bits) % 2 == 0, "Antalet bitar måste vara jämnt (dibitar)"
 
-    sps = sample_rate / sym_rate          # sampler per symbol (float)
+    sps    = sample_rate / sym_rate
     n_syms = len(bits) // 2
 
     # Generera symbolfaserna
     theta = 0.0
-    syms = []
+    syms  = []
     for i in range(n_syms):
         d0, d1 = bits[2*i], bits[2*i + 1]
         theta += DIBIT_PHASE[(d0, d1)]
         syms.append(complex(math.cos(theta), math.sin(theta)))
 
-    # Interpolera till sample_rate med raised cosine
-    # Enkel nearest-neighbour interpolation (tillräcklig för test)
+    # Interpolera till sample_rate med RRC-pulsformning.
+    # Varje symbol s_i bidrar med s_i × h((sample - center_i)/sps)
+    # till alla sampler inom rolloff_syms symbolperioder.
     total_samples = int(round(n_syms * sps)) + int(rolloff_syms * sps) * 2
     out = [0+0j] * total_samples
     delay = int(rolloff_syms * sps)
 
     for i, s in enumerate(syms):
         center = int(round(i * sps)) + delay
-        # Raised cosine pulse
         for k in range(-int(rolloff_syms * sps), int(rolloff_syms * sps) + 1):
             idx = center + k
             if 0 <= idx < total_samples:
                 t = k / sps
-                out[idx] += s * _rc_pulse(t, beta)
+                out[idx] += s * _rrc_pulse(t, beta)
 
     # Normalisera
     peak = max(abs(s) for s in out) if out else 1.0
@@ -126,18 +126,24 @@ def modulate_bits(bits, sym_rate, sample_rate, freq_offset_hz=0.0,
     return out
 
 
-def _rc_pulse(t, beta):
-    """Raised cosine pulse h(t) vid symbolpunkten t (i symbolperioder)."""
-    eps = 1e-9
-    if abs(t) < eps:
-        return 1.0
-    if abs(beta) > eps and abs(abs(2*beta*t) - 1.0) < eps:
-        return (math.pi / 4) * math.sin(math.pi / (2 * beta))
-    num = math.sin(math.pi * t) * math.cos(math.pi * beta * t)
-    den = math.pi * t * (1 - (2 * beta * t)**2)
-    if abs(den) < eps:
-        return 1.0
-    return num / den
+def _rrc_pulse(t, beta):
+    """
+    Root Raised Cosine (RRC) pulssvaret h(t).
+    Singulariteten vid t = ±1/(4β) hanteras med ±0.02 symbolers tolerans
+    (bredare än minsta sample-avstånd för sps ≥ 4).
+    """
+    if abs(t) < 1e-7:
+        return 1.0 + beta * (4.0 / math.pi - 1.0)
+    sing = 1.0 / (4.0 * beta)
+    if abs(abs(t) - sing) < 0.02:
+        return (beta / math.sqrt(2.0)) * (
+            (1.0 + 2.0 / math.pi) * math.sin(math.pi / (4.0 * beta))
+            + (1.0 - 2.0 / math.pi) * math.cos(math.pi / (4.0 * beta))
+        )
+    pt  = math.pi * t
+    num = math.sin(pt * (1.0 - beta)) + 4.0 * beta * t * math.cos(pt * (1.0 + beta))
+    den = pt * (1.0 - (4.0 * beta * t) ** 2)
+    return num / den if abs(den) > 1e-12 else 1.0
 
 
 def add_awgn(samples, snr_db):

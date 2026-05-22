@@ -1,36 +1,28 @@
 /**
- * vdes_burst_demod.c — VDES ASM burst-mode pi/4-DQPSK demodulator
+ * vdes_burst_demod.c — VDES VDE-TER pi/4-DQPSK mottagare
  *
- * Role: MR_PLUGIN_ROLE_DEMODULATOR
+ * Roll: MR_PLUGIN_ROLE_DEMODULATOR
+ * Sänder: VDES_BURST_DATA → vdes_burst_decoder
  *
- * The fundamental problem with vdes_asm_demod for short VDES bursts is that
- * the adaptive carrier PLL and symbol-sync loop keep running during payload,
- * causing them to wander on random-looking data.
+ * All DSP delegeras till libliquid i enlighet med vdes.md-planen:
  *
- * This plugin uses a two-phase approach:
+ *   msresamp_crcf  — Rational resampler + antialias-filter
+ *   agc_crcf       — AGC, normaliserar amplituden till 1
+ *   symsync_crcf   — Polyfas RRC matchat filter + timingreglering
+ *   nco_crcf       — NCO/PLL för bärvågskorrigering
+ *   firfilt_cccf   — Matchat filter (27 komplexa tappar) för UW-detektion
+ *   modemcf        — Dataväg A (hårda bitar) via modemcf_demodulate()
+ *                    Dataväg B (mjuka bitar / LLR) via modemcf_demodulate_soft()
+ *                    PLL-felsignal via modemcf_get_demodulator_phase_error()
  *
- *   PREAMBLE phase (gate just opened):
- *     - Run AGC, symbol sync, and PLL with full adaptive bandwidth.
- *     - Accumulate differential-phase measurements to build a carrier-offset
- *       estimate (average diff-phase should equal +π/4 during the all-zeros
- *       preamble; any excess is the carrier offset).
- *     - Detect the preamble→sync transition (diff-phase stops being ≈ +π/4).
- *
- *   DEMOD phase (after preamble acquisition):
- *     - Apply the estimated carrier offset as a one-shot NCO correction.
- *     - FREEZE the symbol sync and stop PLL updates so adaptive loops
- *       cannot wander during the payload.
- *     - Decode differential phases to bits and accumulate.
- *
- * Emits: VDES_BURST_DATA (to be passed to vdes_burst_decoder)
- *
- * Default parameters (set via mr_plugin_set_param):
- *   symbol_rate_baud  75000      (100 kHz VDES channel)
- *   preamble_min_syms 16         (symbols before forced-freeze)
- *   preamble_max_syms 256
- *   preamble_tol_deg  30         (±degrees around +π/4 for preamble detection)
- *   pll_bw            0.05       (PLL bandwidth during preamble, normalised)
- *   sync_bw           0.05       (symbol-sync bandwidth during preamble)
+ * Tillståndsmaskin (vdes.md):
+ *   VR_SEARCH  — firfilt_cccf korskorreleras mot träningssekvensens
+ *                27 differentialfasorer.  Triggning när |C| > tröskel.
+ *                Bärvågsoffset δω = arg(C) (oberoende av amplitud).
+ *   VR_BURST   — modemcf demodulerar differentialsymboler till
+ *                hårda bitar (dataväg A).  PLL-felet från modemcf
+ *                spårar kvarstående frekvensavvikelse.
+ *                (Dataväg B / LLR aktiveras vid integration av Aff3ct.)
  */
 
 #include "mr_plugin_api.h"
@@ -50,90 +42,78 @@
 #  define M_PI 3.14159265358979323846
 #endif
 
-/* ── tunables ─────────────────────────────────────────────────────────── */
+/* ── Konstanter (speglar BD_K/BD_SYMSYNC_* i vdes_synth_liq.c) ─────────── */
+#define VR_DEFAULT_SYM_RATE  76800u
+#define VR_K                 4u       /* sampler/symbol in symsync            */
+#define VR_SYMSYNC_M         5u       /* filter half-length                   */
+#define VR_SYMSYNC_BETA      0.35f    /* RRC roll-off                         */
+#define VR_UW_LEN            27u      /* träningssekvensens längd i symboler  */
+#define VR_CORR_THRESH_FRAC  0.80f    /* tröskel = frac × VR_UW_LEN = 21.6   */
+#define VR_MAX_BITS          8192u
+#define VR_MIN_BITS          64u
+#define VR_PLL_BW            0.05f    /* PLL-bandbredd under sökning          */
+#define VR_PLL_BW_BURST      0.01f    /* PLL-bandbredd under burst (lägre)    */
+#define VR_SYNC_BW_SEARCH    0.05f
+#define VR_SYNC_BW_LOCKED    0.001f
+#define VR_LOCKOUT_SYMS      300u
 
-#define BD_DEFAULT_SYM_RATE   76800u   /* baud — ITU-R M.2092-2 Table 8: VDE-TER 100 kHz */
-#define BD_K                  4u       /* samples per symbol             */
-#define BD_SYMSYNC_M          5u       /* symsync filter half-length     */
-#define BD_SYMSYNC_BETA       0.35f    /* raised-cosine roll-off         */
-#define BD_MAX_BITS           8192u
-#define BD_MIN_BITS           54u      /* sync + a few payload bits      */
-/* With 8 preamble symbols the training vector sum Σ d_k = −2√2(1+j) = 4∠(−3π/4),
- * giving the same one-shot correction accuracy as 16 symbols while leaving
- * 19 training symbols (38 bits) as the decoder sync pattern, yielding a
- * false-positive rate of ~5 ppb vs ~110 ppm for the 22-bit (16-sym) version. */
-#define BD_PREAMBLE_MIN_SYMS  8u
-#define BD_PREAMBLE_MAX_SYMS  256u
-#define BD_PREAMBLE_TOL_DEG   30.0f   /* ±° around +π/4 for preamble    */
-#define BD_PLL_BW_PREAMBLE    0.05f
-#define BD_SYNC_BW_PREAMBLE   0.05f
-#define BD_SYNC_BW_FROZEN     0.001f  /* near-zero, not fully frozen     */
+/* ── Träningssekvens (ITU-R M.2092-2, Tabell 1) ─────────────────────────── */
+static const uint8_t kTrainBits[VR_UW_LEN] = {
+    1,1,1,1,1,1,0,0, 1,1,0,1,0,1,0,0, 0,0,0,1,1,0,0,1, 0,1,0
+};
 
-/* ── state machine ────────────────────────────────────────────────────── */
+/* ── Tillståndsmaskin ────────────────────────────────────────────────────── */
+typedef enum { VR_SEARCH, VR_BURST } VdesRxState;
 
-typedef enum {
-    BD_IDLE,
-    BD_PREAMBLE,
-    BD_DEMOD
-} BurstDemodState;
-
-/* ── context ──────────────────────────────────────────────────────────── */
-
+/* ── Kontext ─────────────────────────────────────────────────────────────── */
 typedef struct {
-    /* config */
-    uint32_t sample_rate_hz;
-    uint32_t symbol_rate_baud;
-    float    pll_bw_preamble;
-    float    sync_bw_preamble;
-    uint32_t preamble_min_syms;
-    uint32_t preamble_max_syms;
-    float    preamble_tol_rad;  /* tolerance around +π/4 in radians */
-    int      needs_reconfigure;
+    /* libliquid DSP-kedja */
+    msresamp_crcf   resamp;
+    agc_crcf        agc;
+    symsync_crcf    symsync;
+    nco_crcf        pll;          /* bärvågskorrigering (NCO + PLL)  */
+    firfilt_cccf    uw_mf;        /* matchat filter, 27 komplexa tappar */
+    modemcf         modem;        /* QPSK-demodulator (hårda/mjuka bitar) */
+    MrIirPrefilter  prefilter;
+    MrSignalGate    gate;         /* energigrind — används bara för burst-SLUT */
 
-    /* libliquid DSP chain */
-    msresamp_crcf  resamp;
-    agc_crcf       agc;
-    symsync_crcf   symsync;
-    nco_crcf       pll;
-    MrIirPrefilter prefilter;
-
-    /* buffers */
+    /* Buffertar */
     liquid_float_complex* in_buf;
     uint32_t              in_cap;
     liquid_float_complex* resamp_out;
     uint32_t              resamp_cap;
-    liquid_float_complex  sym_buf[BD_K]; /* one symbol group */
+    liquid_float_complex  sym_buf[VR_K];
 
-    /* state machine */
-    BurstDemodState state;
-
-    /* preamble accumulator for carrier-offset estimation */
-    double   pream_acc_i;   /* Re Σ conj(prev)·curr */
-    double   pream_acc_q;   /* Im Σ conj(prev)·curr */
-    uint32_t pream_n;       /* preamble-like symbols counted */
-    uint32_t pream_total;   /* all symbols since gate opened */
-
-    /* differential decoder state */
+    /* Symbolstatus */
     liquid_float_complex prev_sym;
     int                  have_prev;
 
-    /* signal gate */
-    MrSignalGate gate;
-    int          gate_was_open;
+    /* Ringbuffert: senaste VR_UW_LEN normaliserade differentialfasorer */
+    liquid_float_complex diff_ring[VR_UW_LEN];
+    uint32_t             diff_head;   /* nästa skrivindex (mod VR_UW_LEN) */
+    uint32_t             diff_count;
 
-    /* bit buffer */
-    uint8_t  bit_buf[BD_MAX_BITS / 8u + 1u];
+    /* Tillståndsmaskin */
+    VdesRxState state;
+    uint32_t    lockout_syms;
+    float       last_freq_err_hz;
+
+    /* Bitbuffert */
+    uint8_t  bit_buf[VR_MAX_BITS / 8u + 4u];
     uint32_t bit_count;
 
-    /* diagnostics */
+    /* Konfiguration */
+    uint32_t sample_rate_hz;
+    uint32_t symbol_rate_baud;
+    float    corr_threshold;
+    int      needs_reconfigure;
+
+    /* Diagnostik */
     uint64_t blocks_seen;
-    uint64_t gate_opens;
-    float    last_freq_err_hz;
-    uint32_t last_pream_syms;
-} VdesBurstDemodCtx;
+    uint64_t bursts_detected;
+} VdesRxCtx;
 
-/* ── debug ────────────────────────────────────────────────────────────── */
-
+/* ── Debug ────────────────────────────────────────────────────────────────── */
 static int vdbg(void) {
     static int v = -1;
     if (v < 0) { const char* e = getenv("MR_AIS_DEBUG"); v = (e && e[0] != '0'); }
@@ -141,286 +121,331 @@ static int vdbg(void) {
 }
 #define VLOG(...) do { if (vdbg()) fprintf(stderr, "[vdes_burst_demod] " __VA_ARGS__); } while(0)
 
-/* ── pi/4-DQPSK helpers ───────────────────────────────────────────────── */
-
-static float wrap_pi(float x) {
-    while (x >  (float)M_PI) x -= 2.0f * (float)M_PI;
-    while (x < -(float)M_PI) x += 2.0f * (float)M_PI;
-    return x;
-}
-
-static float nearest_pi4(float phi) {
-    const float pts[4] = {
-        (float)( M_PI / 4.0),
-        (float)( 3.0 * M_PI / 4.0),
-        (float)(-3.0 * M_PI / 4.0),
-        (float)(-M_PI / 4.0)
-    };
-    float best_e = 1e9f;
-    float best   = pts[0];
-    int i;
-    for (i = 0; i < 4; ++i) {
-        float e = fabsf(wrap_pi(phi - pts[i]));
-        if (e < best_e) { best_e = e; best = pts[i]; }
+/* ── Matchat filter för UW-detektion ─────────────────────────────────────── */
+/*
+ * Skapar firfilt_cccf med tappar h_k = conj(d_{N-1-k}) där
+ * d_m = exp(j·Δθ_m) är m:te träningssymbolens differentialfasor.
+ *
+ * Vid korrekt justering: |C| = N (oberoende av δω),  arg(C) = δω.
+ * Detta ger direkt bärvågsuppskattning utan separat PLL-inlåsning.
+ */
+static firfilt_cccf build_uw_mf(void) {
+    liquid_float_complex taps[VR_UW_LEN];
+    unsigned k;
+    for (k = 0; k < VR_UW_LEN; ++k) {
+        float dp = kTrainBits[VR_UW_LEN - 1u - k]
+                   ? (float)(-3.0 * M_PI / 4.0)
+                   : (float)(     M_PI / 4.0);
+        __real__ taps[k] =  cosf(dp);   /* conj(exp(j·dp)) = exp(-j·dp) */
+        __imag__ taps[k] = -sinf(dp);
     }
-    return best;
+    return firfilt_cccf_create(taps, VR_UW_LEN);
 }
 
-static void phase_to_bits(float target, uint8_t* b0, uint8_t* b1) {
-    const float eps = 1e-3f;
-    if (fabsf(target - (float)( M_PI / 4.0)) < eps) { *b0=0; *b1=0; }
-    else if (fabsf(target - (float)(3.0*M_PI/4.0)) < eps) { *b0=0; *b1=1; }
-    else if (fabsf(target + (float)(3.0*M_PI/4.0)) < eps) { *b0=1; *b1=1; }
-    else                                                    { *b0=1; *b1=0; }
-}
-
-/* ── DSP lifecycle ────────────────────────────────────────────────────── */
-
-static void teardown_dsp(VdesBurstDemodCtx* ctx) {
+/* ── DSP-livscykel ────────────────────────────────────────────────────────── */
+static void teardown_dsp(VdesRxCtx* ctx) {
     if (ctx->resamp)  { msresamp_crcf_destroy(ctx->resamp);   ctx->resamp  = NULL; }
     if (ctx->agc)     { agc_crcf_destroy(ctx->agc);           ctx->agc     = NULL; }
     if (ctx->symsync) { symsync_crcf_destroy(ctx->symsync);   ctx->symsync = NULL; }
     if (ctx->pll)     { nco_crcf_destroy(ctx->pll);           ctx->pll     = NULL; }
+    if (ctx->uw_mf)   { firfilt_cccf_destroy(ctx->uw_mf);     ctx->uw_mf   = NULL; }
+    if (ctx->modem)   { modemcf_destroy(ctx->modem);          ctx->modem   = NULL; }
     mr_iir_prefilter_destroy(&ctx->prefilter);
-    free(ctx->in_buf);    ctx->in_buf    = NULL; ctx->in_cap    = 0;
-    free(ctx->resamp_out);ctx->resamp_out= NULL; ctx->resamp_cap= 0;
+    free(ctx->in_buf);     ctx->in_buf     = NULL; ctx->in_cap     = 0;
+    free(ctx->resamp_out); ctx->resamp_out = NULL; ctx->resamp_cap = 0;
 }
 
 static int ensure_cap(liquid_float_complex** buf, uint32_t* cap, uint32_t need) {
-    liquid_float_complex* nb;
     if (need <= *cap) return 1;
-    nb = (liquid_float_complex*)realloc(*buf, (size_t)need * sizeof(liquid_float_complex));
+    liquid_float_complex* nb = (liquid_float_complex*)
+        realloc(*buf, (size_t)need * sizeof(liquid_float_complex));
     if (!nb) return 0;
     *buf = nb; *cap = need;
     return 1;
 }
 
-static int configure(VdesBurstDemodCtx* ctx, uint32_t sr) {
+static int configure(VdesRxCtx* ctx, uint32_t sr) {
     float rate, cutoff;
-    if (!ctx->needs_reconfigure && ctx->sample_rate_hz == sr &&
-        ctx->resamp && ctx->agc && ctx->symsync && ctx->pll) return 1;
-
-    teardown_dsp(ctx);
-    if (sr == 0) sr = 2048000u;
+    if (!ctx->needs_reconfigure && ctx->sample_rate_hz == sr) return 1;
     ctx->sample_rate_hz = sr;
+    teardown_dsp(ctx);
 
-    rate = (float)ctx->symbol_rate_baud * (float)BD_K / (float)sr;
-    if (rate <= 0.0f || rate > 1.0f) return 0;
+    rate = (float)ctx->symbol_rate_baud * (float)VR_K / (float)sr;
 
     ctx->resamp = msresamp_crcf_create(rate, 60.0f);
     if (!ctx->resamp) return 0;
 
     ctx->agc = agc_crcf_create();
-    if (!ctx->agc) return 0;
     agc_crcf_set_bandwidth(ctx->agc, 2e-3f);
 
-    ctx->symsync = symsync_crcf_create_kaiser(BD_K, BD_SYMSYNC_M,
-                                               BD_SYMSYNC_BETA, 32u);
+    ctx->symsync = symsync_crcf_create_kaiser(VR_K, VR_SYMSYNC_M, VR_SYMSYNC_BETA, 32u);
     if (!ctx->symsync) return 0;
-    symsync_crcf_set_output_rate(ctx->symsync, 1u);
-    symsync_crcf_set_lf_bw(ctx->symsync, ctx->sync_bw_preamble);
+    symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_SEARCH);
 
     ctx->pll = nco_crcf_create(LIQUID_NCO);
     if (!ctx->pll) return 0;
-    nco_crcf_pll_set_bandwidth(ctx->pll, ctx->pll_bw_preamble);
+    nco_crcf_pll_set_bandwidth(ctx->pll, VR_PLL_BW);
+
+    ctx->uw_mf = build_uw_mf();
+    if (!ctx->uw_mf) return 0;
+
+    /*
+     * QPSK-modem för differentialsymboldemodulering (dataväg A och B).
+     *
+     * Differentialsymbolen d = conj(s_{k-1}) × s_k är ett QPSK-symbol
+     * vars konstellationspunkter matchar pi/4-DQPSK:s differentialfaser
+     * {+π/4, +3π/4, -3π/4, -π/4}.  libliquid QPSK använder samma
+     * Gray-kodade 4-punktskonstellaton.
+     *
+     * Bitextraktion (VDES-konvention, ITU-R M.2092-2):
+     *   sym=0 → +π/4  → (b0=0, b1=0)
+     *   sym=1 → +3π/4 → (b0=0, b1=1)
+     *   sym=2 → -π/4  → (b0=1, b1=0)
+     *   sym=3 → -3π/4 → (b0=1, b1=1)
+     * → b0 = (sym >> 1) & 1,  b1 = sym & 1
+     *
+     * Fasfel från modemcf_get_demodulator_phase_error() matas direkt
+     * till nco_crcf_pll_step() för spårning av kvarstående δω.
+     */
+    ctx->modem = modemcf_create(LIQUID_MODEM_QPSK);
+    if (!ctx->modem) return 0;
+
+    ctx->corr_threshold = VR_CORR_THRESH_FRAC * (float)VR_UW_LEN;
 
     cutoff = 2.0f * (float)ctx->symbol_rate_baud / (float)sr;
     mr_iir_prefilter_destroy(&ctx->prefilter);
     mr_iir_prefilter_create(&ctx->prefilter, cutoff < 0.45f ? cutoff : 0.44f);
 
     ctx->needs_reconfigure = 0;
-    VLOG("configure sr=%u sym=%u rate=%.5f\n", sr, ctx->symbol_rate_baud, (double)rate);
+    VLOG("configure sr=%u sym=%u rate=%.5f corr_thr=%.2f\n",
+         sr, ctx->symbol_rate_baud, (double)rate, (double)ctx->corr_threshold);
     return 1;
 }
 
-/* ── state helpers ────────────────────────────────────────────────────── */
-
-static void reset_to_idle(VdesBurstDemodCtx* ctx) {
-    ctx->state         = BD_IDLE;
-    ctx->have_prev     = 0;
-    ctx->pream_acc_i   = 0.0;
-    ctx->pream_acc_q   = 0.0;
-    ctx->pream_n       = 0;
-    ctx->pream_total   = 0;
-    ctx->bit_count     = 0;
+/* ── Tillståndshjälpare ──────────────────────────────────────────────────── */
+static void reset_to_search(VdesRxCtx* ctx) {
+    ctx->state       = VR_SEARCH;
+    ctx->have_prev   = 0;
+    ctx->diff_head   = 0;
+    ctx->diff_count  = 0;
+    ctx->bit_count   = 0;
     memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
-    if (ctx->symsync)
-        symsync_crcf_set_lf_bw(ctx->symsync, ctx->sync_bw_preamble);
+    if (ctx->uw_mf)   firfilt_cccf_reset(ctx->uw_mf);
+    if (ctx->modem)   modemcf_reset(ctx->modem);
+    if (ctx->symsync) symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_SEARCH);
     if (ctx->pll) {
-        nco_crcf_pll_set_bandwidth(ctx->pll, ctx->pll_bw_preamble);
-        /* Reset NCO frequency to zero so each burst estimates its own carrier
-         * offset from scratch.  Without this, corrections from the previous
-         * burst pollute the preamble accumulator of the next one. */
+        nco_crcf_pll_set_bandwidth(ctx->pll, VR_PLL_BW);
         nco_crcf_set_frequency(ctx->pll, 0.0f);
-        nco_crcf_set_phase(ctx->pll, 0.0f);
+        nco_crcf_set_phase(ctx->pll,    0.0f);
     }
 }
 
-static void emit_bits(VdesBurstDemodCtx* ctx, double freq_hz, uint64_t unix_ms,
-                       MrEmitFn emit_fn, void* user_data, const char* reason) {
+static void emit_bits(VdesRxCtx* ctx, double freq_hz, uint64_t unix_ms,
+                      MrEmitFn emit_fn, void* user_data, const char* reason) {
     char kv[256];
     snprintf(kv, sizeof(kv),
              "{\"signal_type\":\"VDES_BURST_DATA\","
              "\"reason\":\"%s\","
              "\"symbol_rate_baud\":\"%u\","
              "\"bit_count\":\"%u\","
-             "\"preamble_syms\":\"%u\","
              "\"freq_err_hz\":\"%.1f\"}",
              reason ? reason : "",
              ctx->symbol_rate_baud,
              (ctx->bit_count / 8u) * 8u,
-             ctx->last_pream_syms,
              (double)ctx->last_freq_err_hz);
-    mr_emit_bits(ctx->bit_buf, &ctx->bit_count, BD_MIN_BITS,
-                 BD_MAX_BITS / 8u + 1u,
-                 "VDES_BURST_DATA", kv,
-                 freq_hz, unix_ms, emit_fn, user_data);
+    mr_emit_bits(ctx->bit_buf, &ctx->bit_count, VR_MIN_BITS,
+                 VR_MAX_BITS / 8u + 1u,
+                 "VDES_BURST_DATA", kv, freq_hz, unix_ms, emit_fn, user_data);
 }
 
-/* ── per-symbol processing ────────────────────────────────────────────── */
+/*
+ * Tömmer ringbufferten och emitterar 27×2=54 träningsbitar via modemcf.
+ * delta_omega (rad/symbol) korrigerar den uppmätta bärvågsavvikelsen.
+ */
+static void emit_training_from_ring(VdesRxCtx* ctx, float delta_omega) {
+    float cos_dw = cosf(-delta_omega);
+    float sin_dw = sinf(-delta_omega);
+    unsigned k;
+    for (k = 0; k < VR_UW_LEN; ++k) {
+        uint32_t idx = (ctx->diff_head + k) % VR_UW_LEN;
+        liquid_float_complex d = ctx->diff_ring[idx];
+        /* Bärvågskorrigering: d_corr = d × exp(-j·δω) */
+        liquid_float_complex dc;
+        __real__ dc = crealf(d) * cos_dw - cimagf(d) * sin_dw;
+        __imag__ dc = crealf(d) * sin_dw + cimagf(d) * cos_dw;
+        /* Hårdbeslutsdemodulering via modemcf (dataväg A) */
+        unsigned int sym;
+        modemcf_demodulate(ctx->modem, dc, &sym);
+        uint8_t b0 = (sym >> 1) & 1u;
+        uint8_t b1 =  sym       & 1u;
+        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b0);
+        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b1);
+    }
+    /* Återställ modem-tillståndet efter träningsbitar (undviker fasminne) */
+    modemcf_reset(ctx->modem);
+}
 
-static void process_sym(VdesBurstDemodCtx* ctx,
-                         liquid_float_complex sym,
-                         float pre_agc_energy,   /* avg per-sample energy BEFORE AGC */
-                         double freq_hz, uint64_t unix_ms,
-                         MrEmitFn emit_fn, void* user_data) {
-    liquid_float_complex corrected;
-    float phi;
-    int falling;
+/* ── Per-symbol-bearbetning ──────────────────────────────────────────────── */
+static void process_sym(VdesRxCtx* ctx,
+                        liquid_float_complex sym,
+                        float pre_agc_energy,
+                        double freq_hz, uint64_t unix_ms,
+                        MrEmitFn emit_fn, void* user_data) {
+    liquid_float_complex corrected, diff, mf_out;
+    float mf_mag;
 
-    /* carrier correction */
+    /* Bärvågskorrigering via nco_crcf */
     nco_crcf_mix_down(ctx->pll, sym, &corrected);
     nco_crcf_step(ctx->pll);
 
-    /* signal gate — use pre-AGC energy so AGC normalisation doesn't mask noise */
-    falling = mr_signal_gate_update(&ctx->gate, pre_agc_energy, MR_GATE_HOLD_SYMS);
-
-    if (!ctx->gate.gate_open) {
-        if (falling && ctx->bit_count >= BD_MIN_BITS) {
-            VLOG("gate-close emit bits=%u pream=%u freq_err=%.1fHz\n",
-                 ctx->bit_count, ctx->last_pream_syms,
-                 (double)ctx->last_freq_err_hz);
+    /* Energigrind — används ENBART för burst-SLUT */
+    {
+        int falling = mr_signal_gate_update(&ctx->gate, pre_agc_energy, 48u);
+        if (falling && ctx->state == VR_BURST && ctx->bit_count >= VR_MIN_BITS) {
+            VLOG("burst slut (energifall) bits=%u freq_err=%.1fHz\n",
+                 ctx->bit_count, (double)ctx->last_freq_err_hz);
             emit_bits(ctx, freq_hz, unix_ms, emit_fn, user_data, "gate-close");
+            reset_to_search(ctx);
+            return;
         }
-        if (falling) reset_to_idle(ctx);
-        return;
+        if (falling && ctx->state == VR_BURST) {
+            reset_to_search(ctx);
+            return;
+        }
     }
 
-    /* gate just opened → start preamble phase */
-    if (ctx->state == BD_IDLE) {
-        ctx->state = BD_PREAMBLE;
-        ctx->gate_opens++;
-        VLOG("gate open — preamble phase\n");
-    }
+    if (ctx->lockout_syms > 0) { ctx->lockout_syms--; return; }
 
-    /* first symbol: just store as reference, no differential yet */
+    /* Referenssymbol — ingen differential vid första symbolen */
     if (!ctx->have_prev) {
-        ctx->prev_sym = corrected;
+        ctx->prev_sym  = corrected;
         ctx->have_prev = 1;
         return;
     }
 
-    /* Differential phase — compute d ONCE and reuse for both phi and accumulator.
-       Save prev_sym BEFORE updating so d is conj(prev)·curr, not |curr|². */
+    /*
+     * Differentialfasor normaliserad till enhetsmagnitud.
+     * Normaliseringen är avgörande: AGC-transienter (t.ex. efter tystnad)
+     * ger |d| >> 1 vilket annars blåser upp MF-utmatningens magnitud.
+     * Fasen — som bär data och bärvågsavvikelse — bevaras exakt.
+     */
     {
-        liquid_float_complex d = conjf(ctx->prev_sym) * corrected;
-        phi = atan2f(cimagf(d), crealf(d));
-
-        if (ctx->state == BD_PREAMBLE) {
-            /* Accumulate ALL symbols during preamble — no per-symbol filter.
-               The VDES preamble is ALL +π/4 transitions by design, so the
-               vector average of d gives exp(j·(π/4 + carrier_offset_per_sym)).
-               Works even for large carrier offsets. */
-            ctx->pream_acc_i += crealf(d);
-            ctx->pream_acc_q += cimagf(d);
-            ctx->pream_n++;
+        liquid_float_complex d_raw = conjf(ctx->prev_sym) * corrected;
+        float d_mag = cabsf(d_raw);
+        ctx->prev_sym = corrected;
+        if (d_mag > 1e-6f) {
+            __real__ diff = crealf(d_raw) / d_mag;
+            __imag__ diff = cimagf(d_raw) / d_mag;
+        } else {
+            __real__ diff = 1.0f; __imag__ diff = 0.0f;
         }
     }
-    /* Update reference for next symbol (after d is computed). */
-    ctx->prev_sym = corrected;
-    ctx->pream_total++;
 
-    if (ctx->state == BD_PREAMBLE) {
-        /* PLL active during preamble — drives toward nearest constellation. */
-        {
-            float tgt = nearest_pi4(phi);
-            float err = wrap_pi(phi - tgt);
-            nco_crcf_pll_step(ctx->pll, 0.25f * err);
+    /* Lagra i ringbuffert (normaliserad) */
+    ctx->diff_ring[ctx->diff_head] = diff;
+    ctx->diff_head = (ctx->diff_head + 1u) % VR_UW_LEN;
+    if (ctx->diff_count < VR_UW_LEN) ctx->diff_count++;
+
+    /* Mata matchat filter */
+    firfilt_cccf_push(ctx->uw_mf, diff);
+    firfilt_cccf_execute(ctx->uw_mf, &mf_out);
+    mf_mag = cabsf(mf_out);
+
+    if (ctx->state == VR_SEARCH) {
+        /* VR_SEARCH: ingen PLL-uppdatering — NCO körs på 0 Hz (efter reset).
+         * Bärvågskorrigering sker enbart via MF-toppens fas vid UW-detektion. */
+
+        if (ctx->diff_count >= VR_UW_LEN && mf_mag > ctx->corr_threshold) {
+            /* UW detekterat.
+             * |C| ≈ N (amplitudsoberoende), arg(C) = δω (rad/symbol).  */
+            float delta_omega = cargf(mf_out);
+            ctx->last_freq_err_hz = delta_omega
+                                    * (float)ctx->symbol_rate_baud
+                                    / (2.0f * (float)M_PI);
+            ctx->bursts_detected++;
+
+            VLOG("UW detekterat |C|=%.2f/%.0f δω=%.4f freq_err=%.1fHz\n",
+                 (double)mf_mag, (double)VR_UW_LEN,
+                 (double)delta_omega, (double)ctx->last_freq_err_hz);
+
+            /* Frekvensjustering + fasförskjutning (eliminerar transient i
+             * första Link ID-differentialen, se dokumentation i commit). */
+            nco_crcf_adjust_frequency(ctx->pll, delta_omega);
+            nco_crcf_set_phase(ctx->pll, delta_omega);
+
+            /* Sänk PLL-bandbredden för burst (lägre brusföljning) */
+            nco_crcf_pll_set_bandwidth(ctx->pll, VR_PLL_BW_BURST);
+
+            /* Frys symsync */
+            symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_LOCKED);
+
+            /* Emittera 54 träningsbitar från ringbufferten (dataväg A) */
+            emit_training_from_ring(ctx, delta_omega);
+
+            ctx->state = VR_BURST;
         }
 
-        /* Transition after preamble_min_syms or preamble_max_syms symbols. */
-        if (ctx->pream_n >= ctx->preamble_min_syms ||
-            ctx->pream_total >= ctx->preamble_max_syms) {
+    } else {
+        /*
+         * VR_BURST — Dataväg A: hård demodulering via modemcf_demodulate()
+         *
+         * modemcf kvantiserar differentialsymbolen till närmaste QPSK-punkt
+         * och returnerar symbolindex.  Bitextraktionen följer VDES-konvention
+         * (ITU-R M.2092-2 §A2-1.2.3.1): b0 = MSB, b1 = LSB i sym-indexet.
+         *
+         * modemcf_get_demodulator_phase_error() ger fasavvikelsen relativt
+         * närmaste konstellationspunkt.  Denna matas direkt till PLL via
+         * nco_crcf_pll_step() för att spåra kvarstående δω.
+         *
+         * Dataväg B (mjuka bitar / LLR för Aff3ct-FEC):
+         *   float llr[2];
+         *   modemcf_demodulate_soft(ctx->modem, diff, &sym, llr);
+         *   → llr[0] = LLR för b0,  llr[1] = LLR för b1
+         * Aktiveras vid integration av Aff3ct (fas 2 per vdes.md).
+         */
+        unsigned int sym;
+        modemcf_demodulate(ctx->modem, diff, &sym);
 
-            /* One-shot carrier correction from averaged preamble phase.
-             * excess_per_sym is in rad/symbol.  The NCO is stepped once per
-             * symbol output (not once per input sample), so the correction
-             * unit is rad/step = rad/symbol — no BD_K division needed. */
-            float avg_phase = atan2f((float)ctx->pream_acc_q,
-                                     (float)ctx->pream_acc_i);
-            float excess_per_sym = wrap_pi(avg_phase - (float)(-3.0 * M_PI / 4.0));
-            /* corrected = sym × exp(-j·ω_nco·n).  Residual carrier per symbol =
-             * ω_c - ω_nco.  excess_per_sym estimates this residual.  To cancel
-             * it we must increase ω_nco by +excess, not decrease it. */
-            nco_crcf_adjust_frequency(ctx->pll, +excess_per_sym);
+        /* Decision-directed PLL: modemcf ger fasavvikelsen direkt */
+        nco_crcf_pll_step(ctx->pll,
+                          modemcf_get_demodulator_phase_error(ctx->modem));
 
-            ctx->last_freq_err_hz  = excess_per_sym *
-                                     (float)ctx->symbol_rate_baud / (2.0f * (float)M_PI);
-            ctx->last_pream_syms   = ctx->pream_n;
+        uint8_t b0 = (sym >> 1) & 1u;   /* MSB: b0 per VDES-konventionen */
+        uint8_t b1 =  sym       & 1u;   /* LSB: b1 */
+        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b0);
+        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b1);
 
-            VLOG("preamble→demod: n=%u avg_phase=%.3f freq_err=%.1fHz\n",
-                 ctx->pream_n, (double)avg_phase, (double)ctx->last_freq_err_hz);
-
-            /* Freeze symbol-sync loop. */
-            symsync_crcf_set_lf_bw(ctx->symsync, BD_SYNC_BW_FROZEN);
-            ctx->state = BD_DEMOD;
-        }
-
-    } else { /* BD_DEMOD — PLL frozen, carrier correction applied */
-        float tgt = nearest_pi4(phi);
-        uint8_t b0, b1;
-        phase_to_bits(tgt, &b0, &b1);
-        mr_push_bit(ctx->bit_buf, &ctx->bit_count, BD_MAX_BITS, b0);
-        mr_push_bit(ctx->bit_buf, &ctx->bit_count, BD_MAX_BITS, b1);
-
-        if (ctx->bit_count >= BD_MAX_BITS) {
+        if (ctx->bit_count >= VR_MAX_BITS) {
+            VLOG("burst slut (buffert full) bits=%u\n", ctx->bit_count);
             emit_bits(ctx, freq_hz, unix_ms, emit_fn, user_data, "buf-full");
+            ctx->lockout_syms = VR_LOCKOUT_SYMS;
+            reset_to_search(ctx);
         }
     }
 }
 
-/* ── Plugin API ───────────────────────────────────────────────────────── */
-
+/* ── Plugin API ──────────────────────────────────────────────────────────── */
 static const MrPluginMeta kMeta = {
-    "vdes_burst_demod",
-    "0.1.0",
-    MR_PLUGIN_API_VERSION,
-    "VDES ASM burst-mode pi/4-DQPSK demod with preamble acquisition + frozen payload",
+    "vdes_burst_demod", "0.3.0", MR_PLUGIN_API_VERSION,
+    "VDES VDE-TER: UW-korskorrelation + modemcf hard/soft bits (libliquid)",
     MR_PLUGIN_ROLE_DEMODULATOR
 };
 
 const MrPluginMeta* mr_plugin_get_meta(void) { return &kMeta; }
 
 MrPluginCtx* mr_plugin_create(void) {
-    VdesBurstDemodCtx* ctx = (VdesBurstDemodCtx*)calloc(1, sizeof(*ctx));
+    VdesRxCtx* ctx = (VdesRxCtx*)calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
-
-    ctx->symbol_rate_baud  = BD_DEFAULT_SYM_RATE;
-    ctx->pll_bw_preamble   = BD_PLL_BW_PREAMBLE;
-    ctx->sync_bw_preamble  = BD_SYNC_BW_PREAMBLE;
-    ctx->preamble_min_syms = BD_PREAMBLE_MIN_SYMS;
-    ctx->preamble_max_syms = BD_PREAMBLE_MAX_SYMS;
-    ctx->preamble_tol_rad  = BD_PREAMBLE_TOL_DEG * (float)M_PI / 180.0f;
+    ctx->symbol_rate_baud  = VR_DEFAULT_SYM_RATE;
     ctx->needs_reconfigure = 1;
-    ctx->state             = BD_IDLE;
-
+    ctx->state             = VR_SEARCH;
     mr_iir_prefilter_init(&ctx->prefilter);
     mr_signal_gate_init(&ctx->gate, MR_GATE_SQUELCH_RATIO);
     return (MrPluginCtx*)ctx;
 }
 
 void mr_plugin_destroy(MrPluginCtx* raw) {
-    VdesBurstDemodCtx* ctx = (VdesBurstDemodCtx*)raw;
+    VdesRxCtx* ctx = (VdesRxCtx*)raw;
     if (!ctx) return;
     teardown_dsp(ctx);
     mr_iir_prefilter_destroy(&ctx->prefilter);
@@ -428,45 +453,25 @@ void mr_plugin_destroy(MrPluginCtx* raw) {
 }
 
 int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
-    VdesBurstDemodCtx* ctx = (VdesBurstDemodCtx*)raw;
+    VdesRxCtx* ctx = (VdesRxCtx*)raw;
     if (!ctx || !key || !value) return 0;
-
     if (strcmp(key, "symbol_rate_baud") == 0) {
-        const int v = atoi(value);
+        int v = atoi(value);
         if (v >= 1000 && v <= 500000) {
             ctx->symbol_rate_baud = (uint32_t)v;
             ctx->needs_reconfigure = 1; return 1;
         }
         return 0;
     }
-    if (strcmp(key, "pll_bw") == 0) {
-        const float v = (float)atof(value);
-        if (v > 0.0f && v < 0.5f) {
-            ctx->pll_bw_preamble = v; return 1;
-        }
-        return 0;
-    }
-    if (strcmp(key, "preamble_min_syms") == 0) {
-        const int v = atoi(value);
-        if (v >= 4 && v <= 512) { ctx->preamble_min_syms = (uint32_t)v; return 1; }
-        return 0;
-    }
-    if (strcmp(key, "preamble_max_syms") == 0) {
-        const int v = atoi(value);
-        if (v >= 8 && v <= 1024) { ctx->preamble_max_syms = (uint32_t)v; return 1; }
-        return 0;
-    }
-    if (strcmp(key, "preamble_tol_deg") == 0) {
-        const float v = (float)atof(value);
-        if (v > 0.0f && v < 90.0f) {
-            ctx->preamble_tol_rad = v * (float)M_PI / 180.0f; return 1;
-        }
-        return 0;
-    }
     if (strcmp(key, "squelch_db") == 0) {
-        const float db = (float)atof(value);
+        float db = (float)atof(value);
         ctx->gate.squelch_ratio = (db <= 0.0f) ? 0.0f : powf(10.0f, db / 10.0f);
         return 1;
+    }
+    if (strcmp(key, "corr_threshold") == 0) {
+        float v = (float)atof(value);
+        if (v > 0.0f && v <= (float)VR_UW_LEN) { ctx->corr_threshold = v; return 1; }
+        return 0;
     }
     return 0;
 }
@@ -476,14 +481,14 @@ void mr_plugin_process_bits(MrPluginCtx* ctx,
                              double fhz, uint64_t ms,
                              const char* st, MrEmitFn ef, void* ud) {
     (void)ctx; (void)bb; (void)bc; (void)fhz; (void)ms;
-    (void)st; (void)ef; (void)ud;
+    (void)st;  (void)ef; (void)ud;
 }
 
 void mr_plugin_process_iq(MrPluginCtx* raw,
                            const int16_t* iq, uint32_t num_pairs,
                            uint32_t sr, double freq_hz, uint64_t unix_ms,
                            MrEmitFn emit_fn, void* user_data) {
-    VdesBurstDemodCtx* ctx = (VdesBurstDemodCtx*)raw;
+    VdesRxCtx* ctx = (VdesRxCtx*)raw;
     uint32_t i;
     unsigned int nr = 0u;
 
@@ -493,58 +498,47 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
 
     if (!ensure_cap(&ctx->in_buf, &ctx->in_cap, num_pairs)) return;
 
-    /* Convert int16 → float complex and apply prefilter */
+    /* int16 → komplex float + IIR-förfiltrering */
     for (i = 0u; i < num_pairs; ++i) {
         liquid_float_complex x;
-        __real__ x = (float)iq[i * 2u] / 32768.0f;
+        __real__ x = (float)iq[i * 2u]     / 32768.0f;
         __imag__ x = (float)iq[i * 2u + 1u] / 32768.0f;
         mr_iir_prefilter_execute(&ctx->prefilter, x, &ctx->in_buf[i]);
     }
 
-    /* Resample to K×symbol_rate */
+    /* Resampla till VR_K × symbol_rate via msresamp_crcf */
     {
-        float rate = (float)ctx->symbol_rate_baud * (float)BD_K / (float)sr;
+        float rate = (float)ctx->symbol_rate_baud * (float)VR_K / (float)sr;
         uint32_t need = (uint32_t)((float)num_pairs * rate + 64.0f);
         if (need < 128u) need = 128u;
         if (!ensure_cap(&ctx->resamp_out, &ctx->resamp_cap, need)) return;
+        msresamp_crcf_execute(ctx->resamp, ctx->in_buf, num_pairs,
+                               ctx->resamp_out, &nr);
     }
-    msresamp_crcf_execute(ctx->resamp, ctx->in_buf, num_pairs, ctx->resamp_out, &nr);
 
-    /* AGC and symbol sync.
-     * Pre-AGC energy is accumulated over the samples that correspond to each
-     * output symbol so the gate can distinguish signal from noise even though
-     * AGC normalises amplitude to unity. */
-    {
-        float pre_energy_acc = 0.0f;
-        uint32_t pre_energy_n = 0u;
-        for (i = 0u; i < nr; ++i) {
-            liquid_float_complex agc_in = ctx->resamp_out[i];
-            float re = crealf(agc_in), im = cimagf(agc_in);
-            pre_energy_acc += re*re + im*im;
-            pre_energy_n++;
+    /* AGC → symsync → per-symbol-bearbetning */
+    for (i = 0u; i < nr; ++i) {
+        liquid_float_complex agc_in  = ctx->resamp_out[i];
+        liquid_float_complex agc_out;
+        unsigned int         nsym   = 0u;
+        float re = crealf(agc_in), im = cimagf(agc_in);
+        float pre_energy = re * re + im * im;
 
-            liquid_float_complex agc_out;
-            unsigned int nsym = 0u;
-            agc_crcf_execute(ctx->agc, agc_in, &agc_out);
-            symsync_crcf_execute(ctx->symsync, &agc_out, 1u, ctx->sym_buf, &nsym);
+        agc_crcf_execute(ctx->agc, agc_in, &agc_out);
+        symsync_crcf_execute(ctx->symsync, &agc_out, 1u, ctx->sym_buf, &nsym);
 
-            for (unsigned int s = 0u; s < nsym; ++s) {
-                float sym_e = (pre_energy_n > 0u)
-                            ? pre_energy_acc / (float)pre_energy_n
-                            : 0.0f;
-                pre_energy_acc = 0.0f;
-                pre_energy_n   = 0u;
-                process_sym(ctx, ctx->sym_buf[s], sym_e,
-                            freq_hz, unix_ms, emit_fn, user_data);
-            }
+        for (unsigned int s = 0u; s < nsym; ++s) {
+            process_sym(ctx, ctx->sym_buf[s], pre_energy,
+                        freq_hz, unix_ms, emit_fn, user_data);
         }
     }
 
-    if (vdbg() && (ctx->blocks_seen % 200u) == 0u) {
-        VLOG("blocks=%llu gate=%d state=%d bits=%u gate_opens=%llu\n",
+    /* Periodisk diagnostik */
+    if (vdbg() && ctx->blocks_seen % 200u == 0u) {
+        VLOG("blocks=%llu bursts=%llu state=%s bits=%u\n",
              (unsigned long long)ctx->blocks_seen,
-             ctx->gate.gate_open, (int)ctx->state,
-             ctx->bit_count,
-             (unsigned long long)ctx->gate_opens);
+             (unsigned long long)ctx->bursts_detected,
+             ctx->state == VR_SEARCH ? "SEARCH" : "BURST",
+             ctx->bit_count);
     }
 }
