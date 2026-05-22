@@ -132,7 +132,7 @@ def rsc_encode_bit(state, input_bit):
     return x, y2, y3, new_state
 
 # ── Huvud-avkodningsfunktion ──────────────────────────────────────────────
-def decode_candidate(candidate_hex, label="", inverted=False):
+def decode_candidate(candidate_hex, label="", inverted=False, link_id_max_offset=64):
     print(f"\n{'='*60}")
     print(f"Kandidat: {label or candidate_hex[:24]}...")
     print(f"{'='*60}")
@@ -150,12 +150,24 @@ def decode_candidate(candidate_hex, label="", inverted=False):
     print(f"Första 64 bitar: {ones_head} ettor ({100*ones_head/len(head):.0f}%)")
 
     # Steg 1: Sök Link ID (testar både råa RM-kodord och OTA-mönster XOR mask)
-    hits = find_link_id(bits, max_offset=64, max_errors=4)
+    hits = find_link_id(bits, max_offset=link_id_max_offset, max_errors=4)
     if not hits:
-        print("Inget Link ID hittades (max 4 fel inom 64-bitars offset, raw+OTA).")
-        # Visa råa bitar som hex för vidare diagnos
+        print("Inget Link ID hittades (max 4 fel inom offset-fönster, raw+OTA).")
+        # Hamming-diagnos: närmaste träff bland alla LID-mönster, alla offset
+        best_diag = (0, 99, 0, 'raw')
+        for offset in range(min(link_id_max_offset + 32, len(bits) - 32)):
+            window = bits[offset:offset + 32]
+            for lid, pattern, variant in (
+                [(lid, pat, 'raw') for lid, pat in LINK_IDS.items()] +
+                [(lid, pat, 'ota') for lid, pat in LINK_IDS_OTA.items()]
+            ):
+                err = hamming(window, pattern)
+                if err < best_diag[1]:
+                    best_diag = (offset, err, lid, variant)
+        off_d, err_d, lid_d, var_d = best_diag
         raw_hex = ''.join(f'{byte:02X}' for byte in data[:16])
         print(f"Råa bytes (16): {raw_hex}")
+        print(f"Bästa LID-träff: LID{lid_d} ({var_d}) offset={off_d} Hamming={err_d}/32")
         return
 
     best_off, best_lid, best_err, best_var = hits[0]
@@ -233,6 +245,22 @@ if __name__ == "__main__":
                     burst_data.append(float(fields.get("freq_err_hz", "0")))
                 except ValueError:
                     pass
+                # Also try to decode the raw demod output directly (no decoder plugin needed).
+                hex_data = obj.get("payload", "")
+                if hex_data:
+                    fe = fields.get("freq_err_hz", "?")
+                    bc = fields.get("bit_count", "?")
+                    label = (f"RAW f={obj.get('frequency_hz',0):.0f}Hz "
+                             f"freq_err={fe}Hz bits={bc}")
+                    # Search with generous offset — gate may open anywhere in training
+                    result = decode_candidate(hex_data, label, inverted=False,
+                                              link_id_max_offset=100)
+                    if result is None:
+                        result = decode_candidate(hex_data, label, inverted=True,
+                                                  link_id_max_offset=100)
+                    if result is not None:
+                        n_decoded += 1
+                    n_total += 1
                 continue
             if sig != "VDES_ASM_CANDIDATE":
                 continue
