@@ -37,35 +37,37 @@
 /* ── built-in sync patterns ───────────────────────────────────────────── */
 
 /*
- * ITU-R M.2092-2 §A2-1.2.3.3: VDES VDE-TER training sequence (27 bits):
- *   111111001101010000011001010
- * Each training bit maps to a pi/4-DQPSK dibit:
- *   1 → dibit (1,1) = -3pi/4 differential phase
- *   0 → dibit (0,0) = +pi/4 differential phase
+ * Search for the Link ID directly in the bit stream.
  *
- * The burst demodulator (vdes_burst_demod, BD_PREAMBLE_MIN_SYMS=8) consumes
- * the first 8 training symbols (bits 0-7) during preamble accumulation.
- * The remaining 19 training symbols (bits 8-26) are the first bits emitted:
- *   training bits 8-26: 1,1,0,1,0,1,0,0,0,0,0,1,1,0,0,1,0,1,0
- *   as dibits: 11 11 00 11 00 11 00 00 00 00 00 11 11 00 00 11 00 11 00
+ * Because the signal gate opens at an arbitrary point during the VDES training
+ * sequence, the demodulator's first emitted bit is NOT necessarily at a fixed
+ * training-sequence position.  The Link ID (32 bits, §A2-1.2.3.4) always
+ * follows immediately after the training sequence, so searching for it works
+ * regardless of gate timing.
  *
- * False-positive rate: C(38,2)*2/2^38 ≈ 5 ppb → effectively zero false hits.
- * Must be kept in sync with BD_PREAMBLE_MIN_SYMS in vdes_burst_demod.c.
+ * Two variants per Link ID are tried:
+ *   raw  = Reed-Muller (32,6) codeword from Table 3 (ITU-R M.2092-2)
+ *   ota  = codeword XOR scramble mask 0xC2E28E4F (§A2-1.2.3.4)
+ *
+ * The decoder emits the candidate starting FROM the sync hit position, so the
+ * first 32 bits of every candidate are the (possibly inverted) Link ID.
+ *
+ * False-positive rate per 32-bit pattern at 4 errors:
+ *   C(32,4)*2/2^32 ≈ 39 ppm; 8 patterns total → ~310 ppm per position.
+ *   Over a 5000-bit burst: ~1.5 false hits — confirmed/rejected by CRC in Python.
  */
-static const uint8_t kVDES_TRAIN38[38] = {
-    1,1, 1,1,                 /* training bits  8, 9 = 1 */
-    0,0,                      /* training bit  10 = 0 */
-    1,1,                      /* training bit  11 = 1 */
-    0,0,                      /* training bit  12 = 0 */
-    1,1,                      /* training bit  13 = 1 */
-    0,0, 0,0, 0,0, 0,0, 0,0, /* training bits 14-18 = 0 */
-    1,1, 1,1,                 /* training bits 19,20 = 1 */
-    0,0, 0,0,                 /* training bits 21,22 = 0 */
-    1,1,                      /* training bit  23 = 1 */
-    0,0,                      /* training bit  24 = 0 */
-    1,1,                      /* training bit  25 = 1 */
-    0,0                       /* training bit  26 = 0 */
-};
+
+/* Raw Reed-Muller codewords (Table 3) */
+static const uint8_t kLID5r[32]  = {1,1,0,1,0,1,0,1, 1,1,1,0,1,1,0,1, 0,1,1,1,1,1,1,0, 1,0,1,1,1,1,1,1};
+static const uint8_t kLID11r[32] = {1,1,1,0,1,1,0,1, 0,0,1,0,1,1,1,0, 1,1,0,0,0,0,1,0, 0,1,1,1,1,1,0,0};
+static const uint8_t kLID17r[32] = {1,0,0,0,0,1,1,1, 0,0,1,1,0,1,1,1, 0,0,1,0,0,1,0,0, 1,1,1,0,0,1,0,1};
+static const uint8_t kLID19r[32] = {1,0,0,0,1,1,1,1, 0,1,0,0,1,0,0,0, 0,0,1,0,0,1,0,0, 0,0,0,1,1,0,1,0};
+
+/* OTA = codeword XOR 0xC2E28E4F (§A2-1.2.3.4 scramble mask) */
+static const uint8_t kLID5o[32]  = {0,0,0,1,0,1,1,1, 0,0,0,0,1,1,1,1, 1,1,1,1,0,0,0,0, 1,1,1,1,0,0,0,0};
+static const uint8_t kLID11o[32] = {0,0,1,0,1,1,1,1, 1,1,0,0,1,1,0,0, 0,1,0,0,1,1,0,0, 0,0,1,1,0,0,1,1};
+static const uint8_t kLID17o[32] = {0,1,0,0,0,1,0,1, 1,1,0,1,0,1,0,1, 1,0,1,0,1,0,1,0, 1,0,1,0,1,0,1,0};
+static const uint8_t kLID19o[32] = {0,1,0,0,1,1,0,1, 1,0,1,0,1,0,1,0, 1,0,1,0,1,0,1,0, 0,1,0,1,0,1,0,1};
 
 typedef struct {
     const char*    name;
@@ -74,15 +76,17 @@ typedef struct {
     uint32_t       max_errors; /* pattern-specific ceiling; 0 = exact match only */
 } SyncDef;
 
-/*
- * vdes_train38 (38 bits, 3 err): C(38,3)*2/2^38 ≈ 62 ppb
- *   → ~1 false hit per 16 Gbits — essentially zero false positives.
- * 3 errors tolerated to handle modest channel noise without missing real bursts.
- */
 static const SyncDef kBuiltinPatterns[] = {
-    { "vdes_train38", kVDES_TRAIN38, 38u, 3u },
+    { "lid5o",  kLID5o,  32u, 4u },
+    { "lid11o", kLID11o, 32u, 4u },
+    { "lid17o", kLID17o, 32u, 4u },
+    { "lid19o", kLID19o, 32u, 4u },
+    { "lid5r",  kLID5r,  32u, 4u },
+    { "lid11r", kLID11r, 32u, 4u },
+    { "lid17r", kLID17r, 32u, 4u },
+    { "lid19r", kLID19r, 32u, 4u },
 };
-#define BD_NUM_BUILTIN 1u
+#define BD_NUM_BUILTIN 8u
 
 /* ── context ──────────────────────────────────────────────────────────── */
 
@@ -412,7 +416,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 emit_candidate_bits(ctx, freq_hz, unix_ms, emit_fn, user_data,
                                     source_type, "user",
                                     i, err, inv,
-                                    i + (uint32_t)ctx->user_sync_len);
+                                    i);
                 i += ctx->candidate_bits;
                 continue;
             }
@@ -441,10 +445,12 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                     emit_diag_sync(ctx, freq_hz, unix_ms, emit_fn, user_data,
                                    source_type, kBuiltinPatterns[p].name,
                                    i, err, inv, ctx->candidate_bits);
+                    /* Candidate starts AT the sync (Link ID position), not after it,
+                     * so the Python decoder sees the Link ID as bits[0:32]. */
                     emit_candidate_bits(ctx, freq_hz, unix_ms, emit_fn, user_data,
                                         source_type, kBuiltinPatterns[p].name,
                                         i, err, inv,
-                                        i + (uint32_t)slen);
+                                        i);
                     i += ctx->candidate_bits;
                 }
             }
