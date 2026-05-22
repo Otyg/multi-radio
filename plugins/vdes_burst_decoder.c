@@ -43,22 +43,28 @@
  *   1 → dibit (1,1) = -3pi/4 differential phase
  *   0 → dibit (0,0) = +pi/4 differential phase
  *
- * The burst demodulator (vdes_burst_demod) consumes the first 16 training
- * symbols (bits 0-15) during preamble accumulation without emitting bits.
- * The remaining 11 training symbols (bits 16-26) are the first bits emitted:
- *   training bits 16-26: 0,0,0,1,1,0,0,1,0,1,0
- *   as dibits:           00 00 00 11 11 00 00 11 00 11 00
+ * The burst demodulator (vdes_burst_demod, BD_PREAMBLE_MIN_SYMS=8) consumes
+ * the first 8 training symbols (bits 0-7) during preamble accumulation.
+ * The remaining 19 training symbols (bits 8-26) are the first bits emitted:
+ *   training bits 8-26: 1,1,0,1,0,1,0,0,0,0,0,1,1,0,0,1,0,1,0
+ *   as dibits: 11 11 00 11 00 11 00 00 00 00 00 11 11 00 00 11 00 11 00
  *
- * False-positive rate: C(22,2)*2/2^22 ≈ 110 ppm → 1 false hit / ~900 kbit.
+ * False-positive rate: C(38,2)*2/2^38 ≈ 5 ppb → effectively zero false hits.
+ * Must be kept in sync with BD_PREAMBLE_MIN_SYMS in vdes_burst_demod.c.
  */
-static const uint8_t kVDES_TRAIN22[22] = {
-    0,0,  0,0,  0,0,          /* training bits 16,17,18 = 0 */
-    1,1,  1,1,                /* training bits 19,20 = 1 */
-    0,0,  0,0,                /* training bits 21,22 = 0 */
-    1,1,                      /* training bit 23 = 1 */
-    0,0,                      /* training bit 24 = 0 */
-    1,1,                      /* training bit 25 = 1 */
-    0,0                       /* training bit 26 = 0 */
+static const uint8_t kVDES_TRAIN38[38] = {
+    1,1, 1,1,                 /* training bits  8, 9 = 1 */
+    0,0,                      /* training bit  10 = 0 */
+    1,1,                      /* training bit  11 = 1 */
+    0,0,                      /* training bit  12 = 0 */
+    1,1,                      /* training bit  13 = 1 */
+    0,0, 0,0, 0,0, 0,0, 0,0, /* training bits 14-18 = 0 */
+    1,1, 1,1,                 /* training bits 19,20 = 1 */
+    0,0, 0,0,                 /* training bits 21,22 = 0 */
+    1,1,                      /* training bit  23 = 1 */
+    0,0,                      /* training bit  24 = 0 */
+    1,1,                      /* training bit  25 = 1 */
+    0,0                       /* training bit  26 = 0 */
 };
 
 typedef struct {
@@ -69,12 +75,12 @@ typedef struct {
 } SyncDef;
 
 /*
- * vdes_train22 (22 bits, 2 err): C(22,2)*2/2^22 ≈ 110 ppm
- *   → ~1 false hit per 900 kbit at 76800 bps ≈ once per 12 s (acceptable).
- * With 1 error: C(22,1)*2/2^22 ≈ 10 ppm → once per 130 s (conservative).
+ * vdes_train38 (38 bits, 3 err): C(38,3)*2/2^38 ≈ 62 ppb
+ *   → ~1 false hit per 16 Gbits — essentially zero false positives.
+ * 3 errors tolerated to handle modest channel noise without missing real bursts.
  */
 static const SyncDef kBuiltinPatterns[] = {
-    { "vdes_train22", kVDES_TRAIN22, 22u, 2u },
+    { "vdes_train38", kVDES_TRAIN38, 38u, 3u },
 };
 #define BD_NUM_BUILTIN 1u
 

@@ -217,6 +217,7 @@ if __name__ == "__main__":
         # Läs JSONL från stdin (från vdes_replay --jsonl | ...)
         n_total = 0
         n_decoded = 0
+        burst_data = []   # (freq_err_hz,) from VDES_BURST_DATA messages
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -225,7 +226,15 @@ if __name__ == "__main__":
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if obj.get("signal_type") != "VDES_ASM_CANDIDATE":
+            sig = obj.get("signal_type", "")
+            if sig == "VDES_BURST_DATA":
+                fields = obj.get("fields", {})
+                try:
+                    burst_data.append(float(fields.get("freq_err_hz", "0")))
+                except ValueError:
+                    pass
+                continue
+            if sig != "VDES_ASM_CANDIDATE":
                 continue
             n_total += 1
             hex_data = obj.get("payload", "")
@@ -239,6 +248,20 @@ if __name__ == "__main__":
             result = decode_candidate(hex_data, label, inverted=inverted)
             if result is not None:
                 n_decoded += 1
+        if burst_data:
+            import statistics
+            print(f"\n--- VDES_BURST_DATA: {len(burst_data)} bursts demodulated ---")
+            print(f"    freq_err_hz: min={min(burst_data):.0f}  max={max(burst_data):.0f}"
+                  f"  median={statistics.median(burst_data):.0f}")
+            buckets = [0, 0, 0, 0]  # <500, 500-2000, 2000-10000, >10000 Hz
+            for e in burst_data:
+                ae = abs(e)
+                if ae < 500: buckets[0] += 1
+                elif ae < 2000: buckets[1] += 1
+                elif ae < 10000: buckets[2] += 1
+                else: buckets[3] += 1
+            print(f"    |err|<500Hz: {buckets[0]}  500-2kHz: {buckets[1]}"
+                  f"  2-10kHz: {buckets[2]}  >10kHz: {buckets[3]}")
         print(f"\n--- {n_total} kandidater, {n_decoded} med Link ID funnet ---")
     else:
         # Offline mot hårdkodade testkandidater

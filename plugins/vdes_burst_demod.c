@@ -52,13 +52,17 @@
 
 /* ── tunables ─────────────────────────────────────────────────────────── */
 
-#define BD_DEFAULT_SYM_RATE   75000u   /* baud  — 100 kHz VDES channel  */
+#define BD_DEFAULT_SYM_RATE   76800u   /* baud — ITU-R M.2092-2 Table 8: VDE-TER 100 kHz */
 #define BD_K                  4u       /* samples per symbol             */
 #define BD_SYMSYNC_M          5u       /* symsync filter half-length     */
 #define BD_SYMSYNC_BETA       0.35f    /* raised-cosine roll-off         */
 #define BD_MAX_BITS           8192u
 #define BD_MIN_BITS           54u      /* sync + a few payload bits      */
-#define BD_PREAMBLE_MIN_SYMS  16u
+/* With 8 preamble symbols the training vector sum Σ d_k = −2√2(1+j) = 4∠(−3π/4),
+ * giving the same one-shot correction accuracy as 16 symbols while leaving
+ * 19 training symbols (38 bits) as the decoder sync pattern, yielding a
+ * false-positive rate of ~5 ppb vs ~110 ppm for the 22-bit (16-sym) version. */
+#define BD_PREAMBLE_MIN_SYMS  8u
 #define BD_PREAMBLE_MAX_SYMS  256u
 #define BD_PREAMBLE_TOL_DEG   30.0f   /* ±° around +π/4 for preamble    */
 #define BD_PLL_BW_PREAMBLE    0.05f
