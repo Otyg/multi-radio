@@ -40,7 +40,8 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from vdes_decode import decode_candidate
 
 # Filnamnsformat: raw_<timestamp>_<centerfreq>_<samplerate>_<n>.iq16
-_IQ_RE = re.compile(r'^raw_(\d+)_(\d+)_(\d+)_(\d+)\.iq16$')
+# Timestamp kan vara Unix-heltal (1716624000) eller ISO 8601 (20260521T054751Z)
+_IQ_RE = re.compile(r'^raw_([^_]+)_(\d+)_(\d+)_(\d+)\.iq16$')
 
 # VDES VDE-TER standardband och kanalsteg
 BAND_LO_DEFAULT = 161_787_500
@@ -52,11 +53,11 @@ CANDIDATE_BITS = 1922
 
 
 def parse_filename(name):
-    """Returnerar (timestamp, center_hz, sample_rate, n) eller None."""
+    """Returnerar (timestamp_str, center_hz, sample_rate, n) eller None."""
     m = _IQ_RE.match(name)
     if not m:
         return None
-    return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    return m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
 
 
 def channel_offsets(center_hz, sample_rate, band_lo, band_hi, ch_step):
