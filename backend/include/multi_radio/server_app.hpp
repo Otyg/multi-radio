@@ -21,6 +21,13 @@ struct ServerConfig {
   std::filesystem::path log_dir = "./logs";
   size_t log_max_bytes = 5 * 1024 * 1024;
   size_t log_max_files = 5;
+
+  // Optional position-only endpoint.  Empty = disabled.
+  // Only PositionService (StreamPositions) is registered on this port —
+  // audio, IQ, decoded messages, and control RPCs are never exposed here.
+  // If position_auth_token is empty the endpoint requires no authentication.
+  std::string position_bind_address;
+  std::string position_auth_token;
 };
 
 class ServerApp {

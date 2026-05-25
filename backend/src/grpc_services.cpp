@@ -668,11 +668,68 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
   std::string auth_token_;
 };
 
+class PositionServiceImpl final : public v1::PositionService::Service {
+ public:
+  PositionServiceImpl(TargetTracker* target_tracker, std::string auth_token)
+      : target_tracker_(target_tracker), auth_token_(std::move(auth_token)) {}
+
+  grpc::Status StreamPositions(grpc::ServerContext* context,
+                                const v1::StreamPositionsRequest* /*request*/,
+                                grpc::ServerWriter<v1::RadarSnapshot>* writer) override {
+    if (!auth_token_.empty() && !auth::ValidateBearerToken(*context, auth_token_)) {
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    }
+    if (!target_tracker_) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "target tracker not available");
+    }
+
+    while (!context->IsCancelled()) {
+      for (int i = 0; i < 20 && !context->IsCancelled(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      if (context->IsCancelled()) break;
+
+      const auto snap = target_tracker_->TakeSnapshot();
+
+      v1::RadarSnapshot response;
+      response.set_snapshot_ms(snap.snapshot_ms);
+      for (const auto& t : snap.targets) {
+        auto* pt = response.add_targets();
+        pt->set_id(t.id);
+        pt->set_label(t.label);
+        pt->set_kind(t.kind);
+        pt->set_lat(t.lat);
+        pt->set_lon(t.lon);
+        pt->set_sog_knots(t.sog_knots);
+        pt->set_cog_degrees(t.cog_degrees);
+        pt->set_has_altitude(t.has_altitude);
+        pt->set_altitude_ft(t.altitude_ft);
+        pt->set_last_seen_ms(t.last_seen_ms);
+      }
+      for (const auto& rid : snap.removed_ids) {
+        response.add_removed_ids(rid);
+      }
+
+      if (!writer->Write(response)) break;
+    }
+    return grpc::Status::OK;
+  }
+
+ private:
+  TargetTracker* target_tracker_;
+  std::string    auth_token_;
+};
+
 }  // namespace
 
 class ServerApp::Impl {
  public:
-  explicit Impl(std::string auth_token) : auth_token_(std::move(auth_token)) {}
+  Impl(std::string auth_token,
+       std::string position_bind_address,
+       std::string position_auth_token)
+      : auth_token_(std::move(auth_token)),
+        position_bind_address_(std::move(position_bind_address)),
+        position_auth_token_(std::move(position_auth_token)) {}
 
   bool Run(ReceiverManager* receiver_manager, PluginHost* plugin_host, EventBus* event_bus,
            TargetTracker* target_tracker, TrackDatabase* track_db,
@@ -694,21 +751,39 @@ class ServerApp::Impl {
       return false;
     }
 
+    if (!position_bind_address_.empty()) {
+      position_service_ = std::make_unique<PositionServiceImpl>(target_tracker, position_auth_token_);
+      grpc::ServerBuilder pos_builder;
+      pos_builder.AddListeningPort(position_bind_address_, grpc::InsecureServerCredentials());
+      pos_builder.RegisterService(position_service_.get());
+      position_server_ = pos_builder.BuildAndStart();
+      if (position_server_) {
+        std::cout << "Position-only gRPC endpoint on " << position_bind_address_
+                  << (position_auth_token_.empty() ? " (no auth)" : " (auth enabled)") << "\n";
+      } else {
+        std::cerr << "Warning: failed to start position gRPC server on "
+                  << position_bind_address_ << "\n";
+      }
+    }
+
     server_->Wait();
     return true;
   }
 
   void Shutdown() {
-    if (server_) {
-      server_->Shutdown();
-    }
+    if (position_server_) position_server_->Shutdown();
+    if (server_) server_->Shutdown();
   }
 
  private:
   std::string auth_token_;
+  std::string position_bind_address_;
+  std::string position_auth_token_;
   std::unique_ptr<RadioControlServiceImpl> radio_control_service_;
-  std::unique_ptr<TelemetryServiceImpl> telemetry_service_;
-  std::unique_ptr<grpc::Server> server_;
+  std::unique_ptr<TelemetryServiceImpl>    telemetry_service_;
+  std::unique_ptr<PositionServiceImpl>     position_service_;
+  std::unique_ptr<grpc::Server>            server_;
+  std::unique_ptr<grpc::Server>            position_server_;
 };
 
 ServerApp::ServerApp(ServerConfig config)
@@ -729,7 +804,9 @@ bool ServerApp::Init(std::string* error) {
   std::unique_ptr<IRadioDeviceFactory> factory = CreateRtlSdrFactory();
   receiver_manager_ = std::make_unique<ReceiverManager>(
       std::move(factory), event_bus_, plugin_host_, logger_, track_db_, target_tracker_);
-  impl_ = std::make_unique<Impl>(config_.auth_token);
+  impl_ = std::make_unique<Impl>(config_.auth_token,
+                                  config_.position_bind_address,
+                                  config_.position_auth_token);
   if (error != nullptr) {
     error->clear();
   }

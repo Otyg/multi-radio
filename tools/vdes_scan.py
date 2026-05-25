@@ -4,19 +4,20 @@ vdes_scan.py — Scannar en katalog med IQ-inspelningar efter VDES-meddelanden.
 
 Filnamnsformat: raw_<timestamp>_<center-freq>_<sample-rate>_<n>.iq16
 
-Söker igenom kanalraster och symbolhastigheter för varje fil och rapporterar
-alla VDES-meddelanden som hittas (avkodade, med CRC-kontroll).
+Söker som standard igenom hela filens bandbredd med 25 kHz kanalsteg och
+symbolhastigheterna 76800, 38400 och 19200 baud (25/50/100 kHz-kanaler).
+FFT-prescan begränsar automatiskt vilka kanalpositioner som provas.
 
 Användning:
   python3 tools/vdes_scan.py <katalog> [alternativ]
 
 Alternativ:
   --sym-rates RATE[,RATE...]   Symbolhastigheter att prova, kommaseparerade
-                               (standard: 76800)
+                               (standard: 76800,38400,19200)
   --offsets OFF[,OFF...]       Fasta offset-värden i Hz (ersätter kanal-sweep)
   --ch-step HZ                 Kanalsteg för offset-sweep (standard: 25000)
-  --band-lo HZ                 Undre bandgräns (standard: 161787500)
-  --band-hi HZ                 Övre bandgräns (standard: 161937500)
+  --band-lo HZ                 Undre bandgräns Hz; standard: hela filens bandbredd
+  --band-hi HZ                 Övre bandgräns Hz; standard: hela filens bandbredd
   --squelch DB                 Squelch-tröskel i dB (standard: 3)
   --no-squelch                 Stäng av squelch (sätter tröskeln till -100 dB)
   --no-prescan                 Hoppa över FFT-förhandsscan (försök alla kanaler)
@@ -44,10 +45,8 @@ from vdes_decode import decode_candidate
 # Timestamp kan vara Unix-heltal (1716624000) eller ISO 8601 (20260521T054751Z)
 _IQ_RE = re.compile(r'^raw_([^_]+)_(\d+)_(\d+)_(\d+)\.iq16$')
 
-# VDES VDE-TER standardband och kanalsteg
-BAND_LO_DEFAULT = 161_787_500
-BAND_HI_DEFAULT = 161_937_500
-CH_STEP_DEFAULT =      25_000
+CH_STEP_DEFAULT = 25_000
+SYM_RATES_DEFAULT = '76800,38400,19200'
 
 # candidate_bits: generöst fönster som täcker LID11 (≈482) och LID17 (≈1922)
 CANDIDATE_BITS = 1922
@@ -62,8 +61,21 @@ def parse_filename(name):
 
 
 def channel_offsets(center_hz, sample_rate, band_lo, band_hi, ch_step):
-    """Alla kanaloffset (Hz) inom bandwidth och band, med lite marginal."""
-    half_bw = sample_rate / 2 - ch_step
+    """
+    Alla kanaloffset (Hz) att prova.
+
+    Om band_lo/band_hi är None sweepas hela filens bandbredd (center ± rate/2)
+    med ett ch_step-marginellt avstånd från kanterna.
+    Om band_lo/band_hi är satta begränsas sökningen till det bandet.
+    """
+    half_bw = sample_rate / 2 - ch_step  # lite marginal mot kanten
+
+    if band_lo is None or band_hi is None:
+        # Hela bandbredden: jämna steg centrade kring 0
+        start = -(int(half_bw) // ch_step) * ch_step
+        stop  =  (int(half_bw) // ch_step) * ch_step
+        return list(range(start, stop + 1, ch_step))
+
     offsets = []
     f = band_lo
     while f <= band_hi:
@@ -75,7 +87,7 @@ def channel_offsets(center_hz, sample_rate, band_lo, band_hi, ch_step):
 
 
 def power_prescan(iq_path, center_hz, sample_rate, offsets,
-                  margin_db=30, block=65536):
+                  margin_db=30, block=65536, ch_step=CH_STEP_DEFAULT):
     """
     Snabb FFT-effektscan. Returnerar (active_offsets, powers_dict).
     active_offsets innehåller de kanaler som är inom margin_db under toppeffekten.
@@ -107,7 +119,7 @@ def power_prescan(iq_path, center_hz, sample_rate, offsets,
 
     power /= n_blocks
     freq_axis = center_hz + np.fft.fftfreq(block, d=1.0 / sample_rate)
-    half_ch   = CH_STEP_DEFAULT // 2
+    half_ch   = ch_step // 2
 
     powers = {}
     for offset in offsets:
@@ -181,7 +193,7 @@ def run_replay(iq_path, center_hz, sample_rate, freq_offset, sym_rate,
 
 
 def scan_file(iq_path, center_hz, sample_rate, sym_rates, offsets,
-              squelch_db, prescan, prescan_margin, verbose):
+              squelch_db, prescan, prescan_margin, ch_step, verbose):
     """
     Scannar en fil. Returnerar lista med fynd-dicts.
     """
@@ -190,7 +202,8 @@ def scan_file(iq_path, center_hz, sample_rate, sym_rates, offsets,
 
     if prescan and offsets:
         active, powers = power_prescan(iq_path, center_hz, sample_rate,
-                                        offsets, margin_db=prescan_margin)
+                                        offsets, margin_db=prescan_margin,
+                                        ch_step=ch_step)
         if verbose and powers:
             print(f'  Prescan: {len(active)}/{len(offsets)} aktiva kanaler '
                   f'(tröskelmarginal {prescan_margin} dB)')
@@ -235,16 +248,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('directory', help='Katalog med IQ-filer')
-    ap.add_argument('--sym-rates', default='76800',
-                    help='Symbolhastigheter, kommaseparerade (standard: 76800)')
+    ap.add_argument('--sym-rates', default=SYM_RATES_DEFAULT,
+                    help=f'Symbolhastigheter, kommaseparerade (standard: {SYM_RATES_DEFAULT})')
     ap.add_argument('--offsets',
                     help='Fasta offset-värden i Hz, kommaseparerade')
     ap.add_argument('--ch-step', type=int, default=CH_STEP_DEFAULT,
                     help=f'Kanalsteg Hz (standard: {CH_STEP_DEFAULT})')
-    ap.add_argument('--band-lo', type=int, default=BAND_LO_DEFAULT,
-                    help=f'Undre bandgräns Hz (standard: {BAND_LO_DEFAULT})')
-    ap.add_argument('--band-hi', type=int, default=BAND_HI_DEFAULT,
-                    help=f'Övre bandgräns Hz (standard: {BAND_HI_DEFAULT})')
+    ap.add_argument('--band-lo', type=int, default=None,
+                    help='Undre bandgräns Hz (standard: hela filens bandbredd)')
+    ap.add_argument('--band-hi', type=int, default=None,
+                    help='Övre bandgräns Hz (standard: hela filens bandbredd)')
     ap.add_argument('--squelch', type=float, default=3.0,
                     help='Squelch dB (standard: 3)')
     ap.add_argument('--no-squelch', action='store_true',
@@ -306,6 +319,7 @@ def main():
             squelch_db=squelch_db,
             prescan=not args.no_prescan,
             prescan_margin=args.prescan_margin,
+            ch_step=args.ch_step,
             verbose=args.verbose,
         )
         all_findings.extend(findings)

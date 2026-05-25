@@ -232,6 +232,9 @@ message StreamRadarSnapshotsRequest {
   bool   include_all_receivers = 2;
 }
 
+// Used by PositionService — streams all tracked targets, no other data.
+message StreamPositionsRequest {}
+
 service RadioControlService {
   rpc ListReceivers(ListReceiversRequest) returns (ListReceiversResponse);
   rpc GetReceiverStatus(GetReceiverStatusRequest) returns (GetReceiverStatusResponse);
@@ -253,4 +256,12 @@ service TelemetryService {
   rpc StreamAudioFrames(StreamAudioFramesRequest) returns (stream AudioFrame);
   rpc StreamIqFrames(StreamIqFramesRequest) returns (stream IqFrame);
   rpc StreamRadarSnapshots(StreamRadarSnapshotsRequest) returns (stream RadarSnapshot);
+}
+
+// Position-only service — suitable for exposure on a separate port.
+// Streams RadarSnapshots (AIS/ADS-B targets) and nothing else.
+// If the server is configured with a position_auth_token, clients must supply
+// it as a Bearer token; an empty token disables authentication on this service.
+service PositionService {
+  rpc StreamPositions(StreamPositionsRequest) returns (stream RadarSnapshot);
 }

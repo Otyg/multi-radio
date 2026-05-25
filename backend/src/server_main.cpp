@@ -18,10 +18,12 @@ std::string GetEnvOrDefault(const char* key, const std::string& fallback) {
 
 int main() {
   multi_radio::ServerConfig config;
-  config.bind_address = GetEnvOrDefault("MR_BIND_ADDRESS", config.bind_address);
-  config.auth_token = GetEnvOrDefault("MR_AUTH_TOKEN", config.auth_token);
-  config.plugin_dir = GetEnvOrDefault("MR_PLUGIN_DIR", config.plugin_dir.string());
-  config.log_dir = GetEnvOrDefault("MR_LOG_DIR", config.log_dir.string());
+  config.bind_address            = GetEnvOrDefault("MR_BIND_ADDRESS",            config.bind_address);
+  config.auth_token              = GetEnvOrDefault("MR_AUTH_TOKEN",              config.auth_token);
+  config.plugin_dir              = GetEnvOrDefault("MR_PLUGIN_DIR",              config.plugin_dir.string());
+  config.log_dir                 = GetEnvOrDefault("MR_LOG_DIR",                 config.log_dir.string());
+  config.position_bind_address   = GetEnvOrDefault("MR_POSITION_BIND_ADDRESS",   "");
+  config.position_auth_token     = GetEnvOrDefault("MR_POSITION_AUTH_TOKEN",     "");
 
   multi_radio::ServerApp app(config);
 
