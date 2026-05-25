@@ -22,13 +22,14 @@
  *   VR_BURST   — modemcf demodulerar differentialsymboler till
  *                hårda bitar (dataväg A).  PLL-felet från modemcf
  *                spårar kvarstående frekvensavvikelse.
+ *                Burst avslutas när bit_count >= burst_bits (= 54 + candidate_bits).
+ *                Ingen squelch-baserad energigrind; UW-korrlatorn körs kontinuerligt.
  *                (Dataväg B / LLR aktiveras vid integration av Aff3ct.)
  */
 
 #include "mr_plugin_api.h"
 #include "mr_bit_buf.h"
 #include "mr_iir_prefilter.h"
-#include "mr_signal_gate.h"
 
 #include <liquid/liquid.h>
 
@@ -75,7 +76,6 @@ typedef struct {
     firfilt_cccf    uw_mf;        /* matchat filter, 27 komplexa tappar */
     modemcf         modem;        /* QPSK-demodulator (hårda/mjuka bitar) */
     MrIirPrefilter  prefilter;
-    MrSignalGate    gate;         /* energigrind för burst-SLUT-detektion */
 
     /* Buffertar */
     liquid_float_complex* in_buf;
@@ -107,6 +107,7 @@ typedef struct {
     uint32_t sample_rate_hz;
     uint32_t symbol_rate_baud;
     float    corr_threshold;
+    uint32_t burst_bits;       /* max bitar per burst (= 54 + candidate_bits) */
     int      needs_reconfigure;
 
     /* Diagnostik */
@@ -282,7 +283,6 @@ static void emit_training_bits(VdesRxCtx* ctx) {
 /* ── Per-symbol-bearbetning ──────────────────────────────────────────────── */
 static void process_sym(VdesRxCtx* ctx,
                         liquid_float_complex sym,
-                        float pre_agc_energy,
                         double freq_hz, uint64_t unix_ms,
                         MrEmitFn emit_fn, void* user_data) {
     liquid_float_complex corrected, diff, mf_out;
@@ -291,22 +291,6 @@ static void process_sym(VdesRxCtx* ctx,
     /* Bärvågskorrigering via nco_crcf */
     nco_crcf_mix_down(ctx->pll, sym, &corrected);
     nco_crcf_step(ctx->pll);
-
-    /* Energigrind — burst-SLUT-detektion */
-    {
-        int falling = mr_signal_gate_update(&ctx->gate, pre_agc_energy, 48u);
-        if (falling && ctx->state == VR_BURST && ctx->bit_count >= VR_MIN_BITS) {
-            VLOG("burst slut (energifall) bits=%u freq_err=%.1fHz\n",
-                 ctx->bit_count, (double)ctx->last_freq_err_hz);
-            emit_bits(ctx, freq_hz, unix_ms, emit_fn, user_data, "gate-close");
-            reset_to_search(ctx);
-            return;
-        }
-        if (falling && ctx->state == VR_BURST) {
-            reset_to_search(ctx);
-            return;
-        }
-    }
 
     if (ctx->lockout_syms > 0) { ctx->lockout_syms--; return; }
 
@@ -414,9 +398,10 @@ static void process_sym(VdesRxCtx* ctx,
                  ctx->bit_count, (ctx->bit_count - 54u) / 2u,
                  (double)symsync_crcf_get_tau(ctx->symsync));
 
-        if (ctx->bit_count >= VR_MAX_BITS) {
-            VLOG("burst slut (buffert full) bits=%u\n", ctx->bit_count);
-            emit_bits(ctx, freq_hz, unix_ms, emit_fn, user_data, "buf-full");
+        if (ctx->bit_count >= ctx->burst_bits) {
+            VLOG("burst slut (burst_bits=%u) bits=%u\n",
+                 ctx->burst_bits, ctx->bit_count);
+            emit_bits(ctx, freq_hz, unix_ms, emit_fn, user_data, "burst-limit");
             ctx->lockout_syms = VR_LOCKOUT_SYMS;
             reset_to_search(ctx);
         }
@@ -438,8 +423,8 @@ MrPluginCtx* mr_plugin_create(void) {
     ctx->symbol_rate_baud  = VR_DEFAULT_SYM_RATE;
     ctx->needs_reconfigure = 1;
     ctx->state             = VR_SEARCH;
+    ctx->burst_bits        = VR_MAX_BITS;
     mr_iir_prefilter_init(&ctx->prefilter);
-    mr_signal_gate_init(&ctx->gate, MR_GATE_SQUELCH_RATIO);
     return (MrPluginCtx*)ctx;
 }
 
@@ -462,10 +447,18 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
         }
         return 0;
     }
+    if (strcmp(key, "candidate_bits") == 0) {
+        int v = atoi(value);
+        if (v > 0) {
+            /* burst_bits = UW training (54 bitar) + candidate window */
+            uint32_t b = 54u + (uint32_t)v;
+            ctx->burst_bits = (b < VR_MAX_BITS) ? b : VR_MAX_BITS;
+            return 1;
+        }
+        return 0;
+    }
     if (strcmp(key, "squelch_db") == 0) {
-        float db = (float)atof(value);
-        ctx->gate.squelch_ratio = (db <= 0.0f) ? 0.0f : powf(10.0f, db / 10.0f);
-        return 1;
+        return 1;  /* accepted but ignored — burst-end is length-based, not energy-based */
     }
     if (strcmp(key, "corr_threshold") == 0) {
         float v = (float)atof(value);
@@ -520,14 +513,12 @@ void mr_plugin_process_iq(MrPluginCtx* raw,
         liquid_float_complex agc_in  = ctx->resamp_out[i];
         liquid_float_complex agc_out;
         unsigned int         nsym   = 0u;
-        float re = crealf(agc_in), im = cimagf(agc_in);
-        float pre_energy = re * re + im * im;
 
         agc_crcf_execute(ctx->agc, agc_in, &agc_out);
         symsync_crcf_execute(ctx->symsync, &agc_out, 1u, ctx->sym_buf, &nsym);
 
         for (unsigned int s = 0u; s < nsym; ++s) {
-            process_sym(ctx, ctx->sym_buf[s], pre_energy,
+            process_sym(ctx, ctx->sym_buf[s],
                         freq_hz, unix_ms, emit_fn, user_data);
         }
     }
