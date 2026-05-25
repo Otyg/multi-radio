@@ -18,6 +18,7 @@ Alternativ:
   --band-lo HZ                 Undre bandgräns (standard: 161787500)
   --band-hi HZ                 Övre bandgräns (standard: 161937500)
   --squelch DB                 Squelch-tröskel i dB (standard: 3)
+  --no-squelch                 Stäng av squelch (sätter tröskeln till -100 dB)
   --no-prescan                 Hoppa över FFT-förhandsscan (försök alla kanaler)
   --prescan-margin DB          Dynamisk marginal under toppsignal vid prescan
                                (standard: 30 dB); kanaler under tröskeln hoppas
@@ -246,6 +247,8 @@ def main():
                     help=f'Övre bandgräns Hz (standard: {BAND_HI_DEFAULT})')
     ap.add_argument('--squelch', type=float, default=3.0,
                     help='Squelch dB (standard: 3)')
+    ap.add_argument('--no-squelch', action='store_true',
+                    help='Stäng av squelch (sätter tröskeln till -100 dB)')
     ap.add_argument('--no-prescan', action='store_true',
                     help='Hoppa över FFT-förhandsscanning')
     ap.add_argument('--prescan-margin', type=float, default=30.0,
@@ -253,7 +256,8 @@ def main():
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
 
-    sym_rates = [int(r.strip()) for r in args.sym_rates.split(',')]
+    sym_rates   = [int(r.strip()) for r in args.sym_rates.split(',')]
+    squelch_db  = -100.0 if args.no_squelch else args.squelch
 
     if not os.path.isfile(REPLAY):
         print(f'Fel: vdes_replay saknas: {REPLAY}', file=sys.stderr)
@@ -299,7 +303,7 @@ def main():
         findings = scan_file(
             iq_path, center_hz, sample_rate,
             sym_rates, offsets,
-            squelch_db=args.squelch,
+            squelch_db=squelch_db,
             prescan=not args.no_prescan,
             prescan_margin=args.prescan_margin,
             verbose=args.verbose,
