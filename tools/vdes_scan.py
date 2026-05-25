@@ -1,155 +1,335 @@
 #!/usr/bin/env python3
 """
-vdes_scan.py — Snabb kanalscanner för VDE-TER IQ-inspelningar.
+vdes_scan.py — Scannar en katalog med IQ-inspelningar efter VDES-meddelanden.
 
-Beräknar medeleffekt per 25 kHz-kanal inom det avsatta VDE-TER-bandet
-(161.7875–161.9375 MHz) och pekar ut var signalaktivitet finns.
+Filnamnsformat: raw_<timestamp>_<center-freq>_<sample-rate>_<n>.iq16
+
+Söker igenom kanalraster och symbolhastigheter för varje fil och rapporterar
+alla VDES-meddelanden som hittas (avkodade, med CRC-kontroll).
 
 Användning:
-  python3 tools/vdes_scan.py RAW.iq16 [CENTER_HZ] [SAMPLE_RATE_HZ]
+  python3 tools/vdes_scan.py <katalog> [alternativ]
 
-Standardvärden: center=161862500, rate=2048000
+Alternativ:
+  --sym-rates RATE[,RATE...]   Symbolhastigheter att prova, kommaseparerade
+                               (standard: 76800)
+  --offsets OFF[,OFF...]       Fasta offset-värden i Hz (ersätter kanal-sweep)
+  --ch-step HZ                 Kanalsteg för offset-sweep (standard: 25000)
+  --band-lo HZ                 Undre bandgräns (standard: 161787500)
+  --band-hi HZ                 Övre bandgräns (standard: 161937500)
+  --squelch DB                 Squelch-tröskel i dB (standard: 3)
+  --no-prescan                 Hoppa över FFT-förhandsscan (försök alla kanaler)
+  --prescan-margin DB          Dynamisk marginal under toppsignal vid prescan
+                               (standard: 30 dB); kanaler under tröskeln hoppas
+  -v, --verbose                Visa varje sondering
 """
 
 import sys
-import struct
-import math
+import os
+import re
+import argparse
+import json
+import subprocess
+import io
+from contextlib import redirect_stdout
 
-CENTER_HZ   = 161_862_500
-SAMPLE_RATE = 2_048_000
-BLOCK       = 65536          # samples per FFT
-SKIP_BLOCKS = 0              # hoppa över de första N blocken
+ROOT   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPLAY = os.path.join(ROOT, 'build', 'tools', 'vdes_replay')
 
-# VDE-TER-band: 161.7875–161.9375 MHz, 25 kHz-kanalsteg
-BAND_LO  = 161_787_500
-BAND_HI  = 161_937_500
-CH_STEP  =      25_000
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+from vdes_decode import decode_candidate
 
-def channel_centers(center, rate, band_lo, band_hi, step):
-    """Alla kanalcentra som faller inom bandet OCH inom FFT-täckning."""
-    half = rate / 2
-    freqs = []
+# Filnamnsformat: raw_<timestamp>_<centerfreq>_<samplerate>_<n>.iq16
+_IQ_RE = re.compile(r'^raw_(\d+)_(\d+)_(\d+)_(\d+)\.iq16$')
+
+# VDES VDE-TER standardband och kanalsteg
+BAND_LO_DEFAULT = 161_787_500
+BAND_HI_DEFAULT = 161_937_500
+CH_STEP_DEFAULT =      25_000
+
+# candidate_bits: generöst fönster som täcker LID11 (≈482) och LID17 (≈1922)
+CANDIDATE_BITS = 1922
+
+
+def parse_filename(name):
+    """Returnerar (timestamp, center_hz, sample_rate, n) eller None."""
+    m = _IQ_RE.match(name)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+
+
+def channel_offsets(center_hz, sample_rate, band_lo, band_hi, ch_step):
+    """Alla kanaloffset (Hz) inom bandwidth och band, med lite marginal."""
+    half_bw = sample_rate / 2 - ch_step
+    offsets = []
     f = band_lo
     while f <= band_hi:
-        offset = f - center
-        if abs(offset) <= half:
-            freqs.append(f)
-        f += step
-    return freqs
-
-def fft_mag_sq(samples):
-    """Radix-2 Cooley-Tukey DFT (enkel Python, tillräcklig för power scan)."""
-    import cmath
-    n = len(samples)
-    if n == 1:
-        return [abs(samples[0])**2]
-    even = fft_mag_sq(samples[0::2])
-    odd  = fft_mag_sq(samples[1::2])
-    # We only need magnitudes; use numpy-free approach via manual recursion —
-    # but for speed just return a simple periodogram via Welch-style binning.
-    # (Replaced below by numpy when available.)
-    raise NotImplementedError
-
-def run(iq_path, center_hz, sample_rate):
-    ch_freqs = channel_centers(center_hz, sample_rate, BAND_LO, BAND_HI, CH_STEP)
-    if not ch_freqs:
-        print("Inga kanaler inom täckning.")
-        return
-
-    # Bin-index per kanalcentrum
-    def freq_to_bin(f):
         offset = f - center_hz
-        return round(offset / sample_rate * BLOCK) % BLOCK
+        if abs(offset) <= half_bw:
+            offsets.append(int(offset))
+        f += ch_step
+    return offsets
 
+
+def power_prescan(iq_path, center_hz, sample_rate, offsets,
+                  margin_db=30, block=65536):
+    """
+    Snabb FFT-effektscan. Returnerar (active_offsets, powers_dict).
+    active_offsets innehåller de kanaler som är inom margin_db under toppeffekten.
+    Kräver numpy; utan numpy returneras alla offsets ofiltrerade.
+    """
     try:
         import numpy as np
-        use_numpy = True
     except ImportError:
-        use_numpy = False
-        print("(numpy saknas — installera för bättre precision)", file=sys.stderr)
+        return offsets, {}
 
-    # Ackumulera effekt per frekvensbin
-    if use_numpy:
-        power = np.zeros(BLOCK, dtype=np.float64)
-        n_blocks = 0
-        with open(iq_path, 'rb') as f:
-            for _ in range(SKIP_BLOCKS):
-                f.read(BLOCK * 4)
+    power = np.zeros(block, dtype=np.float64)
+    n_blocks = 0
+    try:
+        with open(iq_path, 'rb') as fh:
             while True:
-                raw = f.read(BLOCK * 4)
-                if len(raw) < BLOCK * 4:
+                raw = fh.read(block * 4)
+                if len(raw) < block * 4:
                     break
                 iq = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
                 c  = (iq[0::2] + 1j * iq[1::2]) / 32768.0
-                # Hamming window
-                c *= np.hamming(BLOCK)
-                F  = np.fft.fft(c)
-                power += np.abs(F)**2
+                c *= np.hamming(block)
+                power += np.abs(np.fft.fft(c)) ** 2
                 n_blocks += 1
-        if n_blocks == 0:
-            print("Inga fullständiga block hittades.", file=sys.stderr)
-            return
-        power /= n_blocks
-        # FFT-frekvens: bin k → frekvens center + k/N*rate (med wrap för negativa)
-        freq_axis = center_hz + np.fft.fftfreq(BLOCK, d=1/sample_rate)
-        # Per kanal: snitt av binnar inom ±CH_STEP/2
-        half_ch = CH_STEP // 2
-        results = []
-        for cf in ch_freqs:
-            mask = np.abs(freq_axis - cf) < half_ch
-            p = float(np.mean(power[mask])) if np.any(mask) else 0.0
-            results.append((cf, p))
+    except OSError:
+        return offsets, {}
+
+    if n_blocks == 0:
+        return offsets, {}
+
+    power /= n_blocks
+    freq_axis = center_hz + np.fft.fftfreq(block, d=1.0 / sample_rate)
+    half_ch   = CH_STEP_DEFAULT // 2
+
+    powers = {}
+    for offset in offsets:
+        cf   = center_hz + offset
+        mask = np.abs(freq_axis - cf) < half_ch
+        p    = float(np.mean(power[mask])) if np.any(mask) else 0.0
+        powers[offset] = 10.0 * np.log10(p) if p > 0 else -99.0
+
+    if not powers:
+        return offsets, powers
+
+    max_p     = max(powers.values())
+    threshold = max_p - margin_db
+    active    = [o for o in offsets if powers.get(o, -99.0) >= threshold]
+    return active, powers
+
+
+def run_replay(iq_path, center_hz, sample_rate, freq_offset, sym_rate,
+               squelch_db, verbose):
+    """
+    Kör vdes_replay för en given fil och kanaloffset.
+    Returnerar lista med dicts: {crc_ok, crc_fail, decode_output, raw_payload}.
+    """
+    cmd = [
+        REPLAY,
+        '--iq',          iq_path,
+        '--rate',        str(sample_rate),
+        '--freq',        str(center_hz),
+        '--freq-offset', str(freq_offset),
+        '--demod',       'vdes_burst_demod',
+        '--decoder',     'vdes_burst_decoder',
+        '--param',       f'symbol_rate_baud={sym_rate}',
+        '--param',       f'candidate_bits={CANDIDATE_BITS}',
+        '--param',       f'squelch_db={squelch_db}',
+        '--jsonl',
+    ]
+
+    try:
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                              timeout=120)
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print('    [timeout]')
+        return []
+
+    hits = []
+    for line in proc.stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get('signal_type') != 'VDES_ASM_CANDIDATE':
+            continue
+
+        payload  = obj.get('payload', '')
+        fields   = obj.get('fields', {})
+        inverted = fields.get('sync_inverted', '0') == '1'
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            decode_candidate(payload, label='', inverted=inverted)
+        output = buf.getvalue().strip()
+
+        hits.append({
+            'crc_ok':       '✓ OK' in output,
+            'crc_fail':     'CRC' in output and '✓ OK' not in output,
+            'decode_output': output,
+            'raw_payload':  payload,
+        })
+    return hits
+
+
+def scan_file(iq_path, center_hz, sample_rate, sym_rates, offsets,
+              squelch_db, prescan, prescan_margin, verbose):
+    """
+    Scannar en fil. Returnerar lista med fynd-dicts.
+    """
+    fname    = os.path.basename(iq_path)
+    findings = []
+
+    if prescan and offsets:
+        active, powers = power_prescan(iq_path, center_hz, sample_rate,
+                                        offsets, margin_db=prescan_margin)
+        if verbose and powers:
+            print(f'  Prescan: {len(active)}/{len(offsets)} aktiva kanaler '
+                  f'(tröskelmarginal {prescan_margin} dB)')
     else:
-        # Fallback utan numpy: bara total power per block
-        results = [(cf, 0.0) for cf in ch_freqs]
-        print("Kör utan numpy — kan bara rapportera total effekt.", file=sys.stderr)
+        active = offsets
 
-    # Sortera efter effekt, skriv ut
-    ref_db = max(p for _, p in results) if results else 1.0
-    if ref_db <= 0:
-        ref_db = 1.0
+    if not active:
+        active = offsets  # fallback: prova alla om prescan ger noll
 
-    print(f"\nVDE-TER kanalscanner  center={center_hz/1e6:.4f} MHz  "
-          f"rate={sample_rate/1e6:.3f} MHz  block={BLOCK}")
-    print(f"{'Kanal (MHz)':>14}  {'Offset (kHz)':>14}  {'Rel. effekt (dB)':>18}  Kommentar")
-    print("-" * 65)
+    for offset in active:
+        for sym_rate in sym_rates:
+            chan_mhz = (center_hz + offset) / 1e6
+            if verbose:
+                print(f'  {chan_mhz:.4f} MHz  ({offset:+d} Hz)  '
+                      f'{sym_rate} baud ... ', end='', flush=True)
 
-    sorted_r = sorted(results, key=lambda x: -x[1])
-    top_p    = sorted_r[0][1] if sorted_r else 1.0
+            hits = run_replay(iq_path, center_hz, sample_rate, offset,
+                              sym_rate, squelch_db, verbose)
 
-    for cf, p in results:
-        offset_khz = (cf - center_hz) / 1000
-        db = 10 * math.log10(p / ref_db) if p > 0 else -99.0
-        rel = 10 * math.log10(p / top_p) if p > 0 and top_p > 0 else -99.0
-        comment = ""
-        if rel > -3:
-            comment = "*** TOPP"
-        elif rel > -10:
-            comment = "* aktiv?"
-        print(f"  {cf/1e6:12.5f}  {offset_khz:+14.1f}  {db:+18.1f}  {comment}")
+            if verbose:
+                ok   = sum(1 for h in hits if h['crc_ok'])
+                fail = sum(1 for h in hits if h['crc_fail'])
+                print(f'{len(hits)} kandidat(er)'
+                      + (f'  ✓ {ok} CRC OK' if ok else '')
+                      + (f'  ✗ {fail} CRC fel' if fail else ''))
 
-    print()
-    print("Kanalcentra med högst effekt (sorterat):")
-    for cf, p in sorted_r[:5]:
-        offset_khz = (cf - center_hz) / 1000
-        db = 10 * math.log10(p / ref_db) if p > 0 else -99.0
-        print(f"  {cf/1e6:.5f} MHz  offset={offset_khz:+.0f} kHz  {db:+.1f} dB (rel)")
+            for h in hits:
+                findings.append({
+                    'file':         fname,
+                    'offset_hz':    offset,
+                    'chan_mhz':     chan_mhz,
+                    'sym_rate':     sym_rate,
+                    'crc_ok':       h['crc_ok'],
+                    'crc_fail':     h['crc_fail'],
+                    'decode_output': h['decode_output'],
+                })
 
-    print()
-    print("Förslag på vdes_replay-kommando för den starkaste kanalen:")
-    best_cf, _ = sorted_r[0]
-    best_offset = best_cf - center_hz
-    print(f"  --freq-offset {best_offset:.0f} "
-          f"  # kanalnr ca {best_cf/1e6:.4f} MHz")
+    return findings
 
 
-if __name__ == "__main__":
-    path   = sys.argv[1] if len(sys.argv) > 1 else None
-    center = int(sys.argv[2]) if len(sys.argv) > 2 else CENTER_HZ
-    rate   = int(sys.argv[3]) if len(sys.argv) > 3 else SAMPLE_RATE
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('directory', help='Katalog med IQ-filer')
+    ap.add_argument('--sym-rates', default='76800',
+                    help='Symbolhastigheter, kommaseparerade (standard: 76800)')
+    ap.add_argument('--offsets',
+                    help='Fasta offset-värden i Hz, kommaseparerade')
+    ap.add_argument('--ch-step', type=int, default=CH_STEP_DEFAULT,
+                    help=f'Kanalsteg Hz (standard: {CH_STEP_DEFAULT})')
+    ap.add_argument('--band-lo', type=int, default=BAND_LO_DEFAULT,
+                    help=f'Undre bandgräns Hz (standard: {BAND_LO_DEFAULT})')
+    ap.add_argument('--band-hi', type=int, default=BAND_HI_DEFAULT,
+                    help=f'Övre bandgräns Hz (standard: {BAND_HI_DEFAULT})')
+    ap.add_argument('--squelch', type=float, default=3.0,
+                    help='Squelch dB (standard: 3)')
+    ap.add_argument('--no-prescan', action='store_true',
+                    help='Hoppa över FFT-förhandsscanning')
+    ap.add_argument('--prescan-margin', type=float, default=30.0,
+                    help='Marginal under toppsignal vid prescan i dB (standard: 30)')
+    ap.add_argument('-v', '--verbose', action='store_true')
+    args = ap.parse_args()
 
-    if path is None:
-        print(__doc__)
+    sym_rates = [int(r.strip()) for r in args.sym_rates.split(',')]
+
+    if not os.path.isfile(REPLAY):
+        print(f'Fel: vdes_replay saknas: {REPLAY}', file=sys.stderr)
         sys.exit(1)
 
-    run(path, center, rate)
+    directory = os.path.abspath(args.directory)
+    if not os.path.isdir(directory):
+        print(f'Fel: katalogen finns inte: {directory}', file=sys.stderr)
+        sys.exit(1)
+
+    # Hitta alla matchande IQ-filer
+    iq_files = []
+    for name in sorted(os.listdir(directory)):
+        parsed = parse_filename(name)
+        if parsed is None:
+            continue
+        ts, center_hz, sample_rate, n = parsed
+        iq_files.append((os.path.join(directory, name), center_hz, sample_rate))
+
+    if not iq_files:
+        print(f'Inga IQ-filer med rätt namnformat hittades i {directory}')
+        print('Förväntat format: raw_<timestamp>_<center-hz>_<sample-rate>_<n>.iq16')
+        sys.exit(1)
+
+    print(f'\nVDES-scanner  {len(iq_files)} fil(er)  sym_rates={sym_rates}')
+    print('=' * 60)
+
+    all_findings = []
+
+    for iq_path, center_hz, sample_rate in iq_files:
+        if args.offsets:
+            offsets = [int(o.strip()) for o in args.offsets.split(',')]
+        else:
+            offsets = channel_offsets(center_hz, sample_rate,
+                                       args.band_lo, args.band_hi, args.ch_step)
+
+        print(f'\n{os.path.basename(iq_path)}')
+        print(f'  center={center_hz/1e6:.4f} MHz  '
+              f'rate={sample_rate/1e6:.3f} MHz  '
+              f'{len(offsets)} kanalposition(er)  '
+              f'{len(offsets)*len(sym_rates)} sondering(ar)')
+
+        findings = scan_file(
+            iq_path, center_hz, sample_rate,
+            sym_rates, offsets,
+            squelch_db=args.squelch,
+            prescan=not args.no_prescan,
+            prescan_margin=args.prescan_margin,
+            verbose=args.verbose,
+        )
+        all_findings.extend(findings)
+
+        ok_hits   = [f for f in findings if f['crc_ok']]
+        fail_hits = [f for f in findings if f['crc_fail'] and not f['crc_ok']]
+
+        if ok_hits:
+            print(f'  ✓ {len(ok_hits)} VDES-meddelande(n) med CRC OK:')
+            for h in ok_hits:
+                print(f'    {h["chan_mhz"]:.4f} MHz  ({h["offset_hz"]:+d} Hz)  '
+                      f'{h["sym_rate"]} baud')
+                for line in h['decode_output'].splitlines():
+                    print(f'      {line}')
+        if fail_hits:
+            print(f'  ? {len(fail_hits)} kandidat(er) med CRC-fel '
+                  f'(möjlig signal men avkodning misslyckades)')
+        if not ok_hits and not fail_hits:
+            print('  — inget hittat')
+
+    print(f'\n{"="*60}')
+    total_ok   = sum(1 for f in all_findings if f['crc_ok'])
+    total_fail = sum(1 for f in all_findings if f['crc_fail'] and not f['crc_ok'])
+    print(f'  Totalt: {total_ok} CRC OK  {total_fail} CRC-fel  '
+          f'i {len(iq_files)} fil(er)')
+    print(f'{"="*60}\n')
+
+    sys.exit(0 if total_ok > 0 or total_fail == 0 else 1)
+
+
+if __name__ == '__main__':
+    main()
