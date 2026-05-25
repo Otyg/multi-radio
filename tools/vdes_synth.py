@@ -74,19 +74,36 @@ DIBIT_PHASE = {
     (1, 0): -math.pi / 4,
 }
 
+# Exakta RRC-koefficienter från libliquid (k=4, m=5, beta=0.35):
+# liquid_firdes_prototype(LIQUID_FIRFILT_RRC, 4, 5, 0.35, 0.0, h)
+# Filterets fördröjning = m*k/2 = 10 sampler vid 4×symbolhastighet.
+_LIQUID_RRC_K4M5B35 = [
+    0.0075026425, -0.0023777592, -0.0116266143, -0.0102706710,
+    0.0020429923,  0.0133202625,  0.0095723830, -0.0095490692,
+   -0.0254536718, -0.0147751728,  0.0256149787,  0.0653443933,
+    0.0571193360, -0.0220726319, -0.1351641417, -0.1886331439,
+   -0.0846904367,  0.2068709880,  0.6077735424,  0.9571257830,
+    1.0956338644,  0.9571257830,  0.6077735424,  0.2068709880,
+   -0.0846904367, -0.1886331439, -0.1351641417, -0.0220726319,
+    0.0571193360,  0.0653443933,  0.0256149787, -0.0147751728,
+   -0.0254536718, -0.0095490692,  0.0095723830,  0.0133202625,
+    0.0020429923, -0.0102706710, -0.0116266143, -0.0023777592,
+    0.0075026425,
+]
+_RRC_K = 4   # sampler per symbol vid filterets samplingshastighet
+
+
 def modulate_bits(bits, sym_rate, sample_rate, freq_offset_hz=0.0,
-                  beta=0.35, rolloff_syms=6):
+                  beta=0.35, rolloff_syms=5):
     """
     Modulerar ett bitfält till komplexa baseband-sampler med pi/4-DQPSK.
-    Tillämpar RRC-pulsformning (matchar symsync_crcf beta i demodeln).
-
-    bits         = list av 0/1, längd måste vara jämnt antal (dibitar)
-    beta         = roll-off
-    rolloff_syms = filter half-length i symboler
+    Använder exakt samma RRC-prototype (k=4, m=5, beta=0.35) som libliquid
+    firinterp_crcf_create_prototype och symsync_crcf, vilket garanterar
+    noll ISI vid korrekt samplings-tidpunkt.
     """
     assert len(bits) % 2 == 0, "Antalet bitar måste vara jämnt (dibitar)"
+    import numpy as np
 
-    sps    = sample_rate / sym_rate
     n_syms = len(bits) // 2
 
     # Generera symbolfaserna
@@ -97,53 +114,52 @@ def modulate_bits(bits, sym_rate, sample_rate, freq_offset_hz=0.0,
         theta += DIBIT_PHASE[(d0, d1)]
         syms.append(complex(math.cos(theta), math.sin(theta)))
 
-    # Interpolera till sample_rate med RRC-pulsformning.
-    # Varje symbol s_i bidrar med s_i × h((sample - center_i)/sps)
-    # till alla sampler inom rolloff_syms symbolperioder.
-    total_samples = int(round(n_syms * sps)) + int(rolloff_syms * sps) * 2
-    out = [0+0j] * total_samples
-    delay = int(rolloff_syms * sps)
+    # Bygg impulstog vid k×symbolhastighet (4×76800 = 307200 Hz).
+    # Prepend m=5 nollsymboler för att värma upp TX RRC-filtret (samma som
+    # vdes_synth_liq.c BD_SYMSYNC_M pre-flush), sedan trimma bort dessa m*k
+    # sampler ur utgången.  Utan pre-flush lägger np.convolve till en
+    # m*k = 20-samplers TX-grupp­fördröjning som förskjuter tau i mottagaren.
+    k = _RRC_K
+    m = rolloff_syms   # = 5; BD_SYMSYNC_M i libliquid-kedjan
+    n_total = (m + n_syms) * k
+    impulse = np.zeros(n_total, dtype=complex)
+    impulse[m * k :: k] = syms   # faktiska symboler börjar vid m*k
 
-    for i, s in enumerate(syms):
-        center = int(round(i * sps)) + delay
-        for k in range(-int(rolloff_syms * sps), int(rolloff_syms * sps) + 1):
-            idx = center + k
-            if 0 <= idx < total_samples:
-                t = k / sps
-                out[idx] += s * _rrc_pulse(t, beta)
+    # Filtrera med RRC-prototyp → signal vid 307200 Hz
+    h = np.array(_LIQUID_RRC_K4M5B35)
+    full = np.convolve(impulse, h)   # längd = n_total + len(h) - 1
 
-    # Normalisera
-    peak = max(abs(s) for s in out) if out else 1.0
+    # Ta bort pre-flush-rampen (m*k sampler) och håll resten inkl. TX RRC-svansen
+    # (2*m*k = 40 extra sampler = 10 symbolperioder).  Svansen innehåller
+    # huvudloberna för de sista m symbolerna och är nödvändig för att mottagarens
+    # symsync-MF (fördröjning m symboler) ska hinna dekodera alla n_syms symboler.
+    filtered = full[m * k :]
+
+    # Rationell resampling 307200 → sample_rate via FFT (ideal sinc-interpolation).
+    # sample_rate/307200 = sample_rate/(k*sym_rate) — måste vara rationellt.
+    fs_interp = k * sym_rate   # = 307200 Hz
+    ratio = sample_rate / fs_interp
+    n_in  = len(filtered)
+    n_out = int(round(n_in * ratio))
+    F = np.fft.fft(filtered, n_in)
+    # Zero-pad/truncate i frekvensdomänen
+    F_out = np.zeros(n_out, dtype=complex)
+    half = min(n_in, n_out) // 2
+    F_out[:half]    = F[:half]
+    F_out[n_out-half:] = F[n_in-half:n_in]
+    out_np = np.fft.ifft(F_out) * (n_out / n_in)
+
+    # Normalisera amplituden
+    peak = np.max(np.abs(out_np))
     if peak > 0:
-        out = [s / peak for s in out]
+        out_np /= peak
 
     # Applicera frekvensoffset
     if freq_offset_hz != 0.0:
-        for n in range(len(out)):
-            phase = 2 * math.pi * freq_offset_hz * n / sample_rate
-            out[n] *= complex(math.cos(phase), math.sin(phase))
+        t = np.arange(len(out_np)) / sample_rate
+        out_np *= np.exp(2j * math.pi * freq_offset_hz * t)
 
-    return out
-
-
-def _rrc_pulse(t, beta):
-    """
-    Root Raised Cosine (RRC) pulssvaret h(t).
-    Singulariteten vid t = ±1/(4β) hanteras med ±0.02 symbolers tolerans
-    (bredare än minsta sample-avstånd för sps ≥ 4).
-    """
-    if abs(t) < 1e-7:
-        return 1.0 + beta * (4.0 / math.pi - 1.0)
-    sing = 1.0 / (4.0 * beta)
-    if abs(abs(t) - sing) < 0.02:
-        return (beta / math.sqrt(2.0)) * (
-            (1.0 + 2.0 / math.pi) * math.sin(math.pi / (4.0 * beta))
-            + (1.0 - 2.0 / math.pi) * math.cos(math.pi / (4.0 * beta))
-        )
-    pt  = math.pi * t
-    num = math.sin(pt * (1.0 - beta)) + 4.0 * beta * t * math.cos(pt * (1.0 + beta))
-    den = pt * (1.0 - (4.0 * beta * t) ** 2)
-    return num / den if abs(den) > 1e-12 else 1.0
+    return out_np.tolist()
 
 
 def add_awgn(samples, snr_db):
@@ -224,7 +240,12 @@ def main():
     ap.add_argument('--burst-gap-ms', type=float, default=50.0, metavar='MS')
     ap.add_argument('--lid',          type=int,   default=11, choices=[11, 17])
     ap.add_argument('--payload',      type=str,   default=None, metavar='HEX')
+    ap.add_argument('--seed',         type=int,   default=None, metavar='N',
+                    help='PRNG-seed för deterministisk brusgenerering (standard: slumpmässigt)')
     args = ap.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
 
     sample_rate = args.rate
     sym_rate    = args.sym_rate

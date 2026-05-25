@@ -29,7 +29,7 @@
 #define BD_CANDIDATE_DEFAULT   480u  /* bits to extract after sync (default) */
 #define BD_CANDIDATE_MIN       128u
 #define BD_CANDIDATE_MAX      2048u
-#define BD_SYNC_ERRORS_DEFAULT   2u  /* max bit errors in sync word */
+#define BD_SYNC_ERRORS_DEFAULT   4u  /* max bit errors in sync word */
 #define BD_SYNC_MAX_LEN         64u
 #define BD_DIAG_INTERVAL        50u
 #define BD_DUMP_PATH_MAX       256u
@@ -428,7 +428,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                                     source_type, "user",
                                     i, err, inv,
                                     i + (uint32_t)ctx->user_sync_len);
-                i += ctx->candidate_bits;
+                i += (uint32_t)ctx->user_sync_len + ctx->candidate_bits;
                 continue;
             }
             i++;
@@ -462,7 +462,9 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                                         source_type, kBuiltinPatterns[p].name,
                                         i, err, inv,
                                         i + (uint32_t)slen);
-                    i += ctx->candidate_bits;
+                    /* advance past the full candidate window to avoid
+                     * re-detecting the same burst at adjacent positions */
+                    i += (uint32_t)slen + ctx->candidate_bits;
                 }
             }
             if (!hit) i++;

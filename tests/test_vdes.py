@@ -30,10 +30,57 @@ REPLAY   = os.path.join(ROOT, 'build', 'tools', 'vdes_replay')
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from vdes_decode import decode_candidate, LINK_IDS
 
+# ── Hjälpfunktioner ───────────────────────────────────────────────────────
+
+# Hur många bitar ska decoder-fönstret extrahera? Måste rymma hela nyttolasten
+# (LID 32b + data) men vara kortare än burstens totala bitstorlek så att
+# nästa burst inte hoppas över i sökfönstret.
+_LID_DATA_BITS = {11: 400, 17: 1840, 5: 400}
+
+def _candidate_bits(lid: int) -> int:
+    data = _LID_DATA_BITS.get(lid, 500)
+    return 32 + data + 50   # LID + data + litet marginaltillägg
+
+# Fixerade nyttolastmönster: namn → bytevärde som repeteras
+# n_payload = n_data - 32 (CRC ingår i data_bits)
+_N_PAYLOAD_BITS = {11: 368, 17: 1808}   # = data_bits - 32
+_PAYLOAD_BITS = {
+    'zeros':        '00000000',
+    'ones':         '11111111',
+    'rep01':        '01010101',
+    'rep10':        '10101010',
+    'rep00001111':  '00001111',
+    'rep11110000':  '11110000',
+    # 7-bit single-hot / single-cold patterns
+    '1000000':      '1000000',
+    '0100000':      '0100000',
+    '0010000':      '0010000',
+    '0001000':      '0001000',
+    '0000100':      '0000100',
+    '0000010':      '0000010',
+    '0111111':      '0111111',
+    '1011111':      '1011111',
+    '1101111':      '1101111',
+    '1110111':      '1110111',
+    '1111011':      '1111011',
+    '1111101':      '1111101',
+    '1111110':      '1111110',
+}
+PAYLOAD_PATTERNS = list(_PAYLOAD_BITS.keys())
+
+def _payload_hex(pattern: str, lid: int) -> str:
+    n_bits = _N_PAYLOAD_BITS[lid]
+    pat = _PAYLOAD_BITS[pattern]
+    tiled = (pat * (n_bits // len(pat) + 1))[:n_bits]
+    n_bytes = n_bits // 8  # n_bits is always a multiple of 8
+    return ''.join(format(int(tiled[i*8:(i+1)*8], 2), '02x') for i in range(n_bytes))
+
+
 # ── Loopback-funktion ─────────────────────────────────────────────────────
 
 def run_loopback(lid: int, snr_db: float, carrier_offset_hz: int = 0,
                  sym_rate: int = 76800, n_bursts: int = 3,
+                 payload_hex: str = None, seed: int = 42,
                  verbose: bool = False) -> dict:
     """
     Genererar syntetisk VDES-signal, kör pipeline och returnerar:
@@ -57,14 +104,16 @@ def run_loopback(lid: int, snr_db: float, carrier_offset_hz: int = 0,
 
     try:
         # Generera syntetisk signal
-        synth = subprocess.run(
-            [sys.executable, SYNTH, iq_path,
-             '--lid', str(lid),
-             '--snr-db', str(snr_db),
-             '--n-bursts', str(n_bursts),
-             '--offset', str(carrier_offset_hz),
-             '--sym-rate', str(sym_rate)],
-            cwd=ROOT, capture_output=True, text=True)
+        synth_cmd = [sys.executable, SYNTH, iq_path,
+                     '--lid', str(lid),
+                     '--snr-db', str(snr_db),
+                     '--n-bursts', str(n_bursts),
+                     '--offset', str(carrier_offset_hz),
+                     '--sym-rate', str(sym_rate),
+                     '--seed', str(seed)]
+        if payload_hex is not None:
+            synth_cmd += ['--payload', payload_hex]
+        synth = subprocess.run(synth_cmd, cwd=ROOT, capture_output=True, text=True)
         if synth.returncode != 0:
             result['errors'].append(f'vdes_synth misslyckades: {synth.stderr[:200]}')
             return result
@@ -79,7 +128,7 @@ def run_loopback(lid: int, snr_db: float, carrier_offset_hz: int = 0,
              '--demod', 'vdes_burst_demod',
              '--decoder', 'vdes_burst_decoder',
              '--param', f'symbol_rate_baud={sym_rate}',
-             '--param', 'candidate_bits=2000',
+             '--param', f'candidate_bits={_candidate_bits(lid)}',
              '--param', 'squelch_db=3',
              '--jsonl'],
             cwd=ROOT, capture_output=True, text=True)
@@ -139,7 +188,8 @@ class VdesTestCase:
     def __init__(self, name: str, lid: int, snr_db: float,
                  carrier_offset_hz: int = 0, sym_rate: int = 76800,
                  n_bursts: int = 3, min_crc_ok: int = None,
-                 expected_lid: int = None):
+                 expected_lid: int = None,
+                 payload_hex: str = None, seed: int = 42):
         self.name               = name
         self.lid                = lid
         self.snr_db             = snr_db
@@ -148,9 +198,13 @@ class VdesTestCase:
         self.n_bursts           = n_bursts
         self.min_crc_ok         = n_bursts if min_crc_ok is None else min_crc_ok
         self.expected_lid       = expected_lid if expected_lid is not None else lid
+        self.payload_hex        = payload_hex
+        self.seed               = seed
 
 
-ALL_TESTS = [
+# ── Bastestfall (expanderas med PAYLOAD_PATTERNS nedan) ──────────────────
+
+_BASE_ALL = [
     # ── Grundläggande SNR-sweep, LID 11 ──────────────────────────────────
     VdesTestCase('snr_25dB_lid11',    lid=11, snr_db=25),
     VdesTestCase('snr_20dB_lid11',    lid=11, snr_db=20),
@@ -172,10 +226,34 @@ ALL_TESTS = [
     VdesTestCase('multi_burst_5x',    lid=11, snr_db=20, n_bursts=5),
 ]
 
-QUICK_TESTS = [
+_BASE_QUICK = [
     VdesTestCase('quick_snr20',       lid=11, snr_db=20),
     VdesTestCase('quick_lid17',       lid=17, snr_db=20, n_bursts=2),
 ]
+
+
+def _expand_payloads(base: list) -> list:
+    """Expanderar varje bastestfall till sex varianter med fixerade nyttolaster."""
+    out = []
+    for tc in base:
+        for pat in PAYLOAD_PATTERNS:
+            out.append(VdesTestCase(
+                name               = f'{tc.name}__{pat}',
+                lid                = tc.lid,
+                snr_db             = tc.snr_db,
+                carrier_offset_hz  = tc.carrier_offset_hz,
+                sym_rate           = tc.sym_rate,
+                n_bursts           = tc.n_bursts,
+                min_crc_ok         = tc.min_crc_ok,
+                expected_lid       = tc.expected_lid,
+                payload_hex        = _payload_hex(pat, tc.lid),
+                seed               = 42,
+            ))
+    return out
+
+
+ALL_TESTS   = _expand_payloads(_BASE_ALL)
+QUICK_TESTS = _expand_payloads(_BASE_QUICK)
 
 
 # ── Testmotor ─────────────────────────────────────────────────────────────
@@ -199,6 +277,8 @@ def run_tests(tests: list, verbose: bool = False) -> tuple:
             carrier_offset_hz=tc.carrier_offset_hz,
             sym_rate=tc.sym_rate,
             n_bursts=tc.n_bursts,
+            payload_hex=tc.payload_hex,
+            seed=tc.seed,
             verbose=verbose)
 
         if r['errors']:
@@ -239,7 +319,8 @@ def _make_pytest_test(tc: VdesTestCase):
             pytest.skip(f'vdes_replay saknas: {REPLAY}')
         r = run_loopback(lid=tc.lid, snr_db=tc.snr_db,
                          carrier_offset_hz=tc.carrier_offset_hz,
-                         sym_rate=tc.sym_rate, n_bursts=tc.n_bursts)
+                         sym_rate=tc.sym_rate, n_bursts=tc.n_bursts,
+                         payload_hex=tc.payload_hex, seed=tc.seed)
         assert not r['errors'], f"Pipeline-fel: {r['errors']}"
         assert r['crc_ok'] >= tc.min_crc_ok, (
             f"CRC OK {r['crc_ok']}/{r['candidates']}, krävde {tc.min_crc_ok}")

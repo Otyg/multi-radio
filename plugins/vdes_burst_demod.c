@@ -52,9 +52,9 @@
 #define VR_MAX_BITS          8192u
 #define VR_MIN_BITS          64u
 #define VR_PLL_BW            0.05f    /* PLL-bandbredd under sökning          */
-#define VR_PLL_BW_BURST      0.01f    /* PLL-bandbredd under burst (lägre)    */
-#define VR_SYNC_BW_SEARCH    0.05f
-#define VR_SYNC_BW_LOCKED    0.001f
+#define VR_PLL_BW_BURST      0.05f    /* PLL-bandbredd under burst             */
+#define VR_SYNC_BW_SEARCH    0.05f   /* AGC locked at gain=1 (amplitude≈0.65); BW scaled up to maintain TED loop gain */
+#define VR_SYNC_BW_LOCKED    0.005f  /* slow tracking during burst */
 #define VR_LOCKOUT_SYMS      300u
 
 /* ── Träningssekvens (ITU-R M.2092-2, Tabell 1) ─────────────────────────── */
@@ -75,7 +75,7 @@ typedef struct {
     firfilt_cccf    uw_mf;        /* matchat filter, 27 komplexa tappar */
     modemcf         modem;        /* QPSK-demodulator (hårda/mjuka bitar) */
     MrIirPrefilter  prefilter;
-    MrSignalGate    gate;         /* energigrind — används bara för burst-SLUT */
+    MrSignalGate    gate;         /* energigrind för burst-SLUT-detektion */
 
     /* Buffertar */
     liquid_float_complex* in_buf;
@@ -97,6 +97,7 @@ typedef struct {
     VdesRxState state;
     uint32_t    lockout_syms;
     float       last_freq_err_hz;
+    float       freq_ema;           /* EMA av δω-estimat över burstar */
 
     /* Bitbuffert */
     uint8_t  bit_buf[VR_MAX_BITS / 8u + 4u];
@@ -177,9 +178,11 @@ static int configure(VdesRxCtx* ctx, uint32_t sr) {
 
     ctx->agc = agc_crcf_create();
     agc_crcf_set_bandwidth(ctx->agc, 2e-3f);
+    agc_crcf_lock(ctx->agc);   /* lock immediately — keeps gain=1 during initial silence */
 
-    ctx->symsync = symsync_crcf_create_kaiser(VR_K, VR_SYMSYNC_M, VR_SYMSYNC_BETA, 32u);
+    ctx->symsync = symsync_crcf_create_rnyquist(LIQUID_FIRFILT_RRC, VR_K, VR_SYMSYNC_M, VR_SYMSYNC_BETA, 32u);
     if (!ctx->symsync) return 0;
+    symsync_crcf_set_output_rate(ctx->symsync, 1.0f);
     symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_SEARCH);
 
     ctx->pll = nco_crcf_create(LIQUID_NCO);
@@ -224,15 +227,22 @@ static int configure(VdesRxCtx* ctx, uint32_t sr) {
 
 /* ── Tillståndshjälpare ──────────────────────────────────────────────────── */
 static void reset_to_search(VdesRxCtx* ctx) {
-    ctx->state       = VR_SEARCH;
-    ctx->have_prev   = 0;
-    ctx->diff_head   = 0;
-    ctx->diff_count  = 0;
-    ctx->bit_count   = 0;
+    ctx->state         = VR_SEARCH;
+    ctx->have_prev     = 0;
+    ctx->diff_head     = 0;
+    ctx->diff_count    = 0;
+    ctx->bit_count     = 0;
     memset(ctx->bit_buf, 0, sizeof(ctx->bit_buf));
     if (ctx->uw_mf)   firfilt_cccf_reset(ctx->uw_mf);
     if (ctx->modem)   modemcf_reset(ctx->modem);
-    if (ctx->symsync) symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_SEARCH);
+    if (ctx->symsync) {
+        symsync_crcf_reset(ctx->symsync);
+        symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_SEARCH);
+    }
+    if (ctx->agc) {
+        agc_crcf_reset(ctx->agc);  /* gain=1, unlocked */
+        agc_crcf_lock(ctx->agc);   /* lock immediately — prevents gain from growing toward 1e6 during silence */
+    }
     if (ctx->pll) {
         nco_crcf_pll_set_bandwidth(ctx->pll, VR_PLL_BW);
         nco_crcf_set_frequency(ctx->pll, 0.0f);
@@ -258,30 +268,14 @@ static void emit_bits(VdesRxCtx* ctx, double freq_hz, uint64_t unix_ms,
                  "VDES_BURST_DATA", kv, freq_hz, unix_ms, emit_fn, user_data);
 }
 
-/*
- * Tömmer ringbufferten och emitterar 27×2=54 träningsbitar via modemcf.
- * delta_omega (rad/symbol) korrigerar den uppmätta bärvågsavvikelsen.
- */
-static void emit_training_from_ring(VdesRxCtx* ctx, float delta_omega) {
-    float cos_dw = cosf(-delta_omega);
-    float sin_dw = sinf(-delta_omega);
+/* Emit the known training sequence directly (avoids ring-buffer timing issues). */
+static void emit_training_bits(VdesRxCtx* ctx) {
     unsigned k;
     for (k = 0; k < VR_UW_LEN; ++k) {
-        uint32_t idx = (ctx->diff_head + k) % VR_UW_LEN;
-        liquid_float_complex d = ctx->diff_ring[idx];
-        /* Bärvågskorrigering: d_corr = d × exp(-j·δω) */
-        liquid_float_complex dc;
-        __real__ dc = crealf(d) * cos_dw - cimagf(d) * sin_dw;
-        __imag__ dc = crealf(d) * sin_dw + cimagf(d) * cos_dw;
-        /* Hårdbeslutsdemodulering via modemcf (dataväg A) */
-        unsigned int sym;
-        modemcf_demodulate(ctx->modem, dc, &sym);
-        uint8_t b0 = (sym >> 1) & 1u;
-        uint8_t b1 =  sym       & 1u;
-        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b0);
-        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b1);
+        uint8_t b = kTrainBits[k];
+        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b);
+        mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b);
     }
-    /* Återställ modem-tillståndet efter träningsbitar (undviker fasminne) */
     modemcf_reset(ctx->modem);
 }
 
@@ -298,7 +292,7 @@ static void process_sym(VdesRxCtx* ctx,
     nco_crcf_mix_down(ctx->pll, sym, &corrected);
     nco_crcf_step(ctx->pll);
 
-    /* Energigrind — används ENBART för burst-SLUT */
+    /* Energigrind — burst-SLUT-detektion */
     {
         int falling = mr_signal_gate_update(&ctx->gate, pre_agc_energy, 48u);
         if (falling && ctx->state == VR_BURST && ctx->bit_count >= VR_MIN_BITS) {
@@ -352,68 +346,73 @@ static void process_sym(VdesRxCtx* ctx,
     mf_mag = cabsf(mf_out);
 
     if (ctx->state == VR_SEARCH) {
-        /* VR_SEARCH: ingen PLL-uppdatering — NCO körs på 0 Hz (efter reset).
-         * Bärvågskorrigering sker enbart via MF-toppens fas vid UW-detektion. */
-
+        /* Rising-edge UW detection: trigger at the exact symbol where
+         * diff_count first reaches VR_UW_LEN and |C| exceeds threshold.
+         * At that moment the ring holds all 27 training symbols in order.
+         * Triggering here (not on the falling edge) avoids a ~25% miss-rate
+         * caused by the first data symbol having the same differential phase
+         * as training[0], which would delay the falling edge by one symbol
+         * and shift the emitted training sequence by 2 bits. */
         if (ctx->diff_count >= VR_UW_LEN && mf_mag > ctx->corr_threshold) {
-            /* UW detekterat.
-             * |C| ≈ N (amplitudsoberoende), arg(C) = δω (rad/symbol).  */
+            /* |C| ≈ N (amplitude-independent), arg(C) = δω (rad/symbol). */
             float delta_omega = cargf(mf_out);
             ctx->last_freq_err_hz = delta_omega
                                     * (float)ctx->symbol_rate_baud
                                     / (2.0f * (float)M_PI);
             ctx->bursts_detected++;
 
-            VLOG("UW detekterat |C|=%.2f/%.0f δω=%.4f freq_err=%.1fHz\n",
+            VLOG("UW detekterat |C|=%.2f/%.0f δω=%.4f freq_err=%.1fHz agc_gain=%.2f\n",
                  (double)mf_mag, (double)VR_UW_LEN,
-                 (double)delta_omega, (double)ctx->last_freq_err_hz);
+                 (double)delta_omega, (double)ctx->last_freq_err_hz,
+                 (double)agc_crcf_get_gain(ctx->agc));
 
-            /* Frekvensjustering + fasförskjutning (eliminerar transient i
-             * första Link ID-differentialen, se dokumentation i commit). */
-            nco_crcf_adjust_frequency(ctx->pll, delta_omega);
-            nco_crcf_set_phase(ctx->pll, delta_omega);
-
-            /* Sänk PLL-bandbredden för burst (lägre brusföljning) */
+            /* EMA av δω-estimat: reducerar brus från payload-beroende SNR-bias.
+             * Burst 1: initialisera EMA direkt. Burst 2+: hälften old, hälften new. */
+            if (ctx->bursts_detected == 1) {
+                ctx->freq_ema = delta_omega;
+            } else {
+                ctx->freq_ema = 0.75f * ctx->freq_ema + 0.25f * delta_omega;
+            }
+            VLOG("freq_ema=%.4f (%.1fHz)\n",
+                 (double)ctx->freq_ema,
+                 (double)(ctx->freq_ema * (float)ctx->symbol_rate_baud / (2.0f * (float)M_PI)));
+            nco_crcf_set_frequency(ctx->pll, ctx->freq_ema);
+            nco_crcf_set_phase(ctx->pll,    ctx->freq_ema);
             nco_crcf_pll_set_bandwidth(ctx->pll, VR_PLL_BW_BURST);
 
-            /* Frys symsync */
             symsync_crcf_set_lf_bw(ctx->symsync, VR_SYNC_BW_LOCKED);
+            /* AGC stays locked at gain=1 — no unlock; see reset_to_search for rationale */
 
-            /* Emittera 54 träningsbitar från ringbufferten (dataväg A) */
-            emit_training_from_ring(ctx, delta_omega);
+            /* Emit the known training bits directly — no ring-buffer needed. */
+            emit_training_bits(ctx);
 
             ctx->state = VR_BURST;
+            /* Do NOT fall through: current symbol IS training[26] (already
+             * emitted above). The next call to process_sym receives LID[0]. */
+            return;
         }
+    }
 
-    } else {
-        /*
-         * VR_BURST — Dataväg A: hård demodulering via modemcf_demodulate()
-         *
-         * modemcf kvantiserar differentialsymbolen till närmaste QPSK-punkt
-         * och returnerar symbolindex.  Bitextraktionen följer VDES-konvention
-         * (ITU-R M.2092-2 §A2-1.2.3.1): b0 = MSB, b1 = LSB i sym-indexet.
-         *
-         * modemcf_get_demodulator_phase_error() ger fasavvikelsen relativt
-         * närmaste konstellationspunkt.  Denna matas direkt till PLL via
-         * nco_crcf_pll_step() för att spåra kvarstående δω.
-         *
-         * Dataväg B (mjuka bitar / LLR för Aff3ct-FEC):
-         *   float llr[2];
-         *   modemcf_demodulate_soft(ctx->modem, diff, &sym, llr);
-         *   → llr[0] = LLR för b0,  llr[1] = LLR för b1
-         * Aktiveras vid integration av Aff3ct (fas 2 per vdes.md).
-         */
+    if (ctx->state == VR_BURST) {
+        /* Dataväg A: hård demodulering via modemcf_demodulate().
+         * Bitextraktion: b0 = MSB, b1 = LSB (VDES-konvention ITU-R M.2092-2). */
         unsigned int sym;
         modemcf_demodulate(ctx->modem, diff, &sym);
 
-        /* Decision-directed PLL: modemcf ger fasavvikelsen direkt */
-        nco_crcf_pll_step(ctx->pll,
-                          modemcf_get_demodulator_phase_error(ctx->modem));
+        /* PLL-feedback under burst: korrigerar kvarstående frekvensavvikelse
+         * som den initiala δω-uppskattningen från MF kan ha missat. */
+        nco_crcf_pll_step(ctx->pll, modemcf_get_demodulator_phase_error(ctx->modem));
 
-        uint8_t b0 = (sym >> 1) & 1u;   /* MSB: b0 per VDES-konventionen */
-        uint8_t b1 =  sym       & 1u;   /* LSB: b1 */
+        uint8_t b0 = (sym >> 1) & 1u;
+        uint8_t b1 =  sym       & 1u;
+
         mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b0);
         mr_push_bit(ctx->bit_buf, &ctx->bit_count, VR_MAX_BITS, b1);
+
+        if (vdbg() && ctx->bit_count > 54u && (ctx->bit_count % 100u) == 0u)
+            VLOG("tau bit=%u sym=%u: %.4f\n",
+                 ctx->bit_count, (ctx->bit_count - 54u) / 2u,
+                 (double)symsync_crcf_get_tau(ctx->symsync));
 
         if (ctx->bit_count >= VR_MAX_BITS) {
             VLOG("burst slut (buffert full) bits=%u\n", ctx->bit_count);
