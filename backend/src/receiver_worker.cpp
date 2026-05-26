@@ -620,6 +620,10 @@ void ReceiverWorker::PushPluginConfig() {
       plugin_host_->SetParam("mark_hz", "1300");
       plugin_host_->SetParam("space_hz", "2100");
       plugin_host_->SetParam("bit1_is_mark", "1");
+      plugin_host_->SetParam("dsc_require_eos", "1");
+      plugin_host_->SetParam("dsc_require_format_repeat", "1");
+      plugin_host_->SetParam("dsc_min_eos_repeats", "2");
+      plugin_host_->SetParam("dsc_min_emit_interval_ms", "400");
     } else {
       plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
       plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
@@ -1287,6 +1291,10 @@ void ReceiverWorker::ProcessLoop() {
           plugin_host_->SetParam("mark_hz", "1300");
           plugin_host_->SetParam("space_hz", "2100");
           plugin_host_->SetParam("bit1_is_mark", "1");
+          plugin_host_->SetParam("dsc_require_eos", "1");
+          plugin_host_->SetParam("dsc_require_format_repeat", "1");
+          plugin_host_->SetParam("dsc_min_eos_repeats", "2");
+          plugin_host_->SetParam("dsc_min_emit_interval_ms", "400");
         } else if (use_iq_recorder) {
           plugin_host_->SetActiveDecoder("");
           plugin_host_->SetActivePostprocessor("");

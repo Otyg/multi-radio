@@ -1316,11 +1316,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   gmsk_row->addWidget(new QLabel("Avkodare:", gmsk_params_widget_));
   gmsk_decoder_combo_ = new QComboBox(gmsk_params_widget_);
   gmsk_decoder_combo_->addItem("Ingen",              QVariant(QString("")));
+  gmsk_decoder_combo_->addItem("DSC (NFM/AFSK)",     QVariant(QString("dsc_decoder:0")));
   gmsk_decoder_combo_->addItem("NRZI",               QVariant(QString("nrzi_decoder:0")));
   gmsk_decoder_combo_->addItem("NRZ-S (AIS/HDLC)",  QVariant(QString("nrzi_decoder:1")));
   gmsk_decoder_combo_->addItem("VDES ASM (skiss)",  QVariant(QString("vdes_asm_decoder:0")));
   gmsk_decoder_combo_->setToolTip(
-      "Avkodare att kedja efter GMSK.\n"
+      "Avkodare att kedja efter demodulatorn.\n"
+      "DSC (NFM/AFSK): anvand for VHF DSC (kanal 70) med NFM + dsc_afsk_demod.\n"
       "NRZI: transition=1 (NRZ-Mark).\n"
       "NRZ-S (AIS/HDLC): transition=0, no-transition=1 (ITU-R M.1371).\n"
       "VDES ASM (skiss): scaffold for separat VDES ASM-kedja.");
@@ -1396,7 +1398,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   auto* fixed_plugin_settings_button = new QPushButton("Plugin settings...", fixed_tab);
   fixed_plugin_settings_button->setToolTip(
-      "Öppna plugin-parametrar för GMSK/VDES/PPM utan att visa alla fält i huvudvyn.");
+      "Öppna plugin-parametrar för DSC/GMSK/VDES/PPM utan att visa alla fält i huvudvyn.");
 
   fixed_layout->addRow("Fixed MHz", fixed_frequency_edit_);
   fixed_layout->addRow("Demod", fixed_modulation_combo_);

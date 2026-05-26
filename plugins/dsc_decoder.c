@@ -23,16 +23,22 @@
 #define DSC_DEC_MAX_WORDS             256u
 #define DSC_DEC_MIN_WORDS             6u
 #define DSC_DEC_DEFAULT_VALID_RATIO_PCT 60u
+#define DSC_DEC_DEFAULT_MIN_EMIT_INTERVAL_MS 400u
 
 typedef struct {
   int reverse_data_bits;   /* 1: transmitted bit order is reversed in 7-bit symbol */
   uint32_t min_words;
   uint32_t min_valid_ratio_pct;
   int drop_duplicates;
+  int require_eos;
+  int require_format_repeat_for_alerting;
+  uint32_t min_eos_tail_repeats;
+  uint32_t min_emit_interval_ms;
 
   uint64_t metric_blocks;
   uint64_t metric_candidates;
   uint64_t metric_duplicates;
+  uint64_t metric_filtered;
   uint64_t metric_emitted;
   uint64_t metric_frames_parsed;
   uint64_t metric_ecc_ok;
@@ -200,6 +206,10 @@ MrPluginCtx* mr_plugin_create(void) {
   ctx->min_words = DSC_DEC_MIN_WORDS;
   ctx->min_valid_ratio_pct = DSC_DEC_DEFAULT_VALID_RATIO_PCT;
   ctx->drop_duplicates = 1;
+  ctx->require_eos = 1;
+  ctx->require_format_repeat_for_alerting = 1;
+  ctx->min_eos_tail_repeats = 2u;
+  ctx->min_emit_interval_ms = DSC_DEC_DEFAULT_MIN_EMIT_INTERVAL_MS;
   return (MrPluginCtx*)ctx;
 }
 
@@ -226,6 +236,24 @@ int mr_plugin_set_param(MrPluginCtx* raw, const char* key, const char* value) {
   }
   if (strcmp(key, "dsc_drop_duplicates") == 0) {
     ctx->drop_duplicates = atoi(value) ? 1 : 0;
+    return 1;
+  }
+  if (strcmp(key, "dsc_require_eos") == 0) {
+    ctx->require_eos = atoi(value) ? 1 : 0;
+    return 1;
+  }
+  if (strcmp(key, "dsc_require_format_repeat") == 0) {
+    ctx->require_format_repeat_for_alerting = atoi(value) ? 1 : 0;
+    return 1;
+  }
+  if (strcmp(key, "dsc_min_eos_repeats") == 0) {
+    const int v = atoi(value);
+    if (v >= 0) ctx->min_eos_tail_repeats = (uint32_t)v;
+    return 1;
+  }
+  if (strcmp(key, "dsc_min_emit_interval_ms") == 0) {
+    const int v = atoi(value);
+    if (v >= 0) ctx->min_emit_interval_ms = (uint32_t)v;
     return 1;
   }
   return 0;
@@ -300,10 +328,6 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
     ctx->metric_duplicates++;
     return;
   }
-
-  strncpy(ctx->last_payload_hex, payload_hex, sizeof(ctx->last_payload_hex) - 1u);
-  ctx->last_payload_hex[sizeof(ctx->last_payload_hex) - 1u] = '\0';
-  ctx->last_unix_ms = unix_ms;
 
   {
     char symbol_csv[DSC_DEC_MAX_WORDS * 5u + 1u];
@@ -428,6 +452,27 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
       }
     }
 
+    if (ctx->require_eos && eos_idx < 0) {
+      ctx->metric_filtered++;
+      return;
+    }
+    if ((uint32_t)eos_tail_repeats < ctx->min_eos_tail_repeats) {
+      ctx->metric_filtered++;
+      return;
+    }
+    if (ctx->require_format_repeat_for_alerting &&
+        (is_distress || is_all_ships) &&
+        !has_format_repeat) {
+      ctx->metric_filtered++;
+      return;
+    }
+    if (ctx->min_emit_interval_ms > 0u &&
+        unix_ms >= ctx->last_unix_ms &&
+        (unix_ms - ctx->last_unix_ms) < ctx->min_emit_interval_ms) {
+      ctx->metric_filtered++;
+      return;
+    }
+
     char kv[8192];
     snprintf(
         kv, sizeof(kv),
@@ -469,6 +514,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
         "\"metric_blocks\":\"%llu\","
         "\"metric_candidates\":\"%llu\","
         "\"metric_duplicates\":\"%llu\","
+        "\"metric_filtered\":\"%llu\","
         "\"metric_emitted\":\"%llu\","
         "\"metric_frames_parsed\":\"%llu\","
         "\"metric_ecc_ok\":\"%llu\","
@@ -511,6 +557,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
         (unsigned long long)ctx->metric_blocks,
         (unsigned long long)ctx->metric_candidates,
         (unsigned long long)ctx->metric_duplicates,
+        (unsigned long long)ctx->metric_filtered,
         (unsigned long long)(ctx->metric_emitted + 1u),
         (unsigned long long)(ctx->metric_frames_parsed + 1u),
         (unsigned long long)ctx->metric_ecc_ok,
@@ -518,6 +565,9 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
 
     ctx->metric_emitted++;
     ctx->metric_frames_parsed++;
+    strncpy(ctx->last_payload_hex, payload_hex, sizeof(ctx->last_payload_hex) - 1u);
+    ctx->last_payload_hex[sizeof(ctx->last_payload_hex) - 1u] = '\0';
+    ctx->last_unix_ms = unix_ms;
     if (emit_fn) emit_fn("DSC", payload_hex, freq_hz, unix_ms, kv, user_data);
   }
 }
