@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <string>
 #include <iomanip>
+#include <numeric>
 #include <cstdint>
 // FFTW3-biblioteket
 #include <fftw3.h>
@@ -42,9 +43,9 @@ RGB get_rainbow_color(float value) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 7) {
-        std::cerr << "Användning: " << argv[0] << " <input_iq16_fil> <output_png> <fft_storlek> <center_freq_hz> <sample_rate_hz> <kanal_bredd_hz>\n";
-        std::cerr << "Exempel: " << argv[0] << " gqrx_capture.iq16 sdr_waterfall.png 2048 433920000 2048000 25000\n";
+    if (argc < 8) {
+        std::cerr << "Användning: " << argv[0] << " <input_iq16_fil> <output_png> <fft_storlek> <center_freq_hz> <sample_rate_hz> <kanal_bredd_hz> <squelch_db>\n";
+        std::cerr << "Exempel: " << argv[0] << " gqrx_capture.iq16 sdr_waterfall.png 2048 433920000 2048000 25000 12.0\n";
         return 1;
     }
 
@@ -54,10 +55,11 @@ int main(int argc, char* argv[]) {
     double center_freq = std::stod(argv[4]);
     double sample_rate = std::stod(argv[5]);
     double channel_width = std::stod(argv[6]);
+    float squelch_threshold_db = std::stof(argv[7]); // Hur många dB över bruset krävs?
 
     // Kontrollera FFT-storleken
     if ((fft_size & (fft_size - 1)) != 0 || fft_size == 0) {
-        std::cerr << "Fel: FFT-storleken måste vara en potens av 2 (t.ex. 1024, 2048, 4096).\n";
+        std::cerr << "Fel: FFT-storleken måste vara en potens av 2.\n";
         return 1;
     }
 
@@ -70,7 +72,6 @@ int main(int argc, char* argv[]) {
     std::streamsize file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    // IQ16 = 2 bytes I + 2 bytes Q = 4 bytes per prov
     size_t total_samples = file_size / sizeof(int16_t) / 2;
     size_t num_rows = total_samples / fft_size;
 
@@ -87,33 +88,29 @@ int main(int argc, char* argv[]) {
         window[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / (fft_size - 1)));
     }
 
-    // Allokera minne för FFTW3 (använder float-versionen: fftwf)
+    // Allokera minne för FFTW3
     fftwf_complex* fftw_in = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * fft_size);
     fftwf_complex* fftw_out = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * fft_size);
-    
-    // Skapa FFTW-plan
     fftwf_plan plan = fftwf_plan_dft_1d(fft_size, fftw_in, fftw_out, FFTW_FORWARD, FFTW_MEASURE);
 
     // Grid för att spara alla dB-värden
     std::vector<std::vector<float>> magnitude_grid(num_rows, std::vector<float>(fft_size));
-    float max_mag = -100.0f;
-    float min_mag = 100.0f;
+    
+    double total_db_sum = 0.0;
+    size_t total_bins = num_rows * fft_size;
 
     std::vector<int16_t> iq_buffer(fft_size * 2);
 
     for (size_t r = 0; r < num_rows; ++r) {
         file.read(reinterpret_cast<char*>(iq_buffer.data()), fft_size * 2 * sizeof(int16_t));
 
-        // Läs in data och applicera fönsterfunktion
         for (size_t i = 0; i < fft_size; ++i) {
-            fftw_in[i][0] = static_cast<float>(iq_buffer[2 * i]) * window[i];     // I (Real)
-            fftw_in[i][1] = static_cast<float>(iq_buffer[2 * i + 1]) * window[i]; // Q (Imag)
+            fftw_in[i][0] = static_cast<float>(iq_buffer[2 * i]) * window[i];     
+            fftw_in[i][1] = static_cast<float>(iq_buffer[2 * i + 1]) * window[i]; 
         }
 
-        // Exekvera FFT
         fftwf_execute(plan);
 
-        // Beräkna magnitud i dB samt gör FFT-shift
         for (size_t i = 0; i < fft_size; ++i) {
             size_t shifted_index = (i + fft_size / 2) % fft_size;
             
@@ -124,33 +121,55 @@ int main(int argc, char* argv[]) {
             float db = 10.0f * std::log10(mag_sq + 1e-10f);
 
             magnitude_grid[r][shifted_index] = db;
-            if (db > max_mag) max_mag = db;
-            if (db < min_mag) min_mag = db;
+            total_db_sum += db; // Samla ihop för att räkna ut genomsnittligt brus
         }
     }
 
-    // Städa upp FFTW-objekt
     fftwf_destroy_plan(plan);
     fftwf_free(fftw_in);
     fftwf_free(fftw_out);
     file.close();
 
-    // Dynamiskt omfång för färgsättning
-    float range = max_mag - min_mag;
-    if (range == 0) range = 1;
+    // Beräkna den genomsnittliga brusmattan (noise floor)
+    float avg_noise_floor = static_cast<float>(total_db_sum / total_bins);
+    float dynamic_squelch_level = avg_noise_floor + squelch_threshold_db;
 
-    // Generera PNG-bilden (RGB = 3 bytes per pixel) och lägg till en header för skalan
+    std::cout << "Genomsnittlig brusmatta: " << avg_noise_floor << " dB\n";
+    std::cout << "Squelch-tröskel satt till: " << dynamic_squelch_level << " dB\n";
+
+    // Hitta maxvärdet över tröskeln för att skala färgerna snyggt
+    float max_mag = dynamic_squelch_level;
+    for (size_t r = 0; r < num_rows; ++r) {
+        for (size_t c = 0; c < fft_size; ++c) {
+            if (magnitude_grid[r][c] > max_mag) {
+                max_mag = magnitude_grid[r][c];
+            }
+        }
+    }
+    
+    float range = max_mag - dynamic_squelch_level;
+    if (range <= 0) range = 1.0f;
+
+    // Generera PNG-bilden
     int scale_height = 40;
     int img_width = static_cast<int>(fft_size);
     int img_height = static_cast<int>(num_rows) + scale_height;
     std::vector<uint8_t> image_data(img_width * img_height * 3, 0);
 
-    // 1. Rita själva vattenfallet
+    // 1. Rita vattenfallet med brusreducering (Squelch)
     for (size_t r = 0; r < num_rows; ++r) {
         for (size_t c = 0; c < fft_size; ++c) {
-            // Normalisera och skär bort de lägsta 10% av bruset för bättre kontrast
-            float norm = (magnitude_grid[r][c] - (min_mag + range * 0.1f)) / (range * 0.9f);
-            RGB color = get_rainbow_color(norm);
+            float current_db = magnitude_grid[r][c];
+            RGB color;
+
+            if (current_db < dynamic_squelch_level) {
+                // Allt under tröskeln blir "tyst" mörkblå bakgrund (bruset dämpas helt)
+                color = { 5, 5, 25 }; 
+            } else {
+                // Signaler över tröskeln mappas till Rainbow-skalan
+                float norm = (current_db - dynamic_squelch_level) / range;
+                color = get_rainbow_color(norm);
+            }
 
             size_t pixel_idx = ((r + scale_height) * img_width + c) * 3;
             image_data[pixel_idx]     = color.r;
@@ -166,28 +185,24 @@ int main(int argc, char* argv[]) {
     for (size_t c = 0; c < fft_size; ++c) {
         double current_freq = start_freq + (c * hz_per_pixel);
         
-        // Räkna ut avstånd till närmsta kanalgräns
         double dist_to_channel = std::fmod(std::abs(current_freq - center_freq), channel_width);
         if (dist_to_channel > channel_width / 2.0) {
             dist_to_channel = channel_width - dist_to_channel;
         }
 
-        // Om vi är på en kanalgräns, rita markeringar
         if (dist_to_channel < (hz_per_pixel * 0.5)) {
-            // Vita streck i skalan i överkanten
             for (int y = 15; y < scale_height; ++y) {
                 size_t idx = (y * img_width + c) * 3;
                 image_data[idx] = 255; image_data[idx+1] = 255; image_data[idx+2] = 255;
             }
 
-            // Gråa streckade linjer ner genom vattenfallet för rutnät
             for (size_t r = 0; r < num_rows; r += 6) { 
                 size_t idx = ((r + scale_height) * img_width + c) * 3;
-                image_data[idx] = 100; image_data[idx+1] = 100; image_data[idx+2] = 100;
+                // Gör rutnätet lite subtilt så det inte krockar med signalerna
+                image_data[idx] = 80; image_data[idx+1] = 80; image_data[idx+2] = 80;
             }
         }
 
-        // Markera Centerfrekvensen extra tydligt med rött
         if (std::abs(current_freq - center_freq) < (hz_per_pixel * 0.5)) {
             for (int y = 0; y < scale_height; ++y) {
                 size_t idx = (y * img_width + c) * 3;
@@ -196,7 +211,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Spara bild
     std::cout << "Sparar PNG-fil till: " << output_path << "...\n";
     if (stbi_write_png(output_path.c_str(), img_width, img_height, 3, image_data.data(), img_width * 3)) {
         std::cout << "Klart! Bildstorlek: " << img_width << "x" << img_height << " pixlar.\n";
