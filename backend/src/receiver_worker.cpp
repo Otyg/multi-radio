@@ -1143,6 +1143,46 @@ void ReceiverWorker::ProcessLoop() {
   int last_processed_channel_idx = -1;
   Modulation last_demod_modulation = static_cast<Modulation>(-1);  // sentinel: no demod set yet
   int last_plugin_config_gen = -1;
+  uint64_t dsc_rate_window_start_ms = 0;
+  uint32_t dsc_rate_window_count = 0;
+  uint64_t dsc_dropped_total = 0;
+  uint64_t dsc_last_drop_log_ms = 0;
+
+  auto allow_dsc_message = [&](const multi_radio::PluginMessage& msg) -> bool {
+    if (msg.signal_type != SignalType::kDsc) return true;
+    const auto& nf = msg.normalized_fields;
+    const auto parse_it = nf.find("parse_status");
+    if (parse_it != nf.end() && parse_it->second == "weak") {
+      ++dsc_dropped_total;
+      return false;
+    }
+    const auto seq_it = nf.find("sequence_status");
+    if (seq_it != nf.end() && seq_it->second != "ok") {
+      ++dsc_dropped_total;
+      return false;
+    }
+
+    const uint64_t now_ms = msg.unix_ms;
+    if (dsc_rate_window_start_ms == 0 || now_ms < dsc_rate_window_start_ms ||
+        (now_ms - dsc_rate_window_start_ms) >= 1000u) {
+      dsc_rate_window_start_ms = now_ms;
+      dsc_rate_window_count = 0u;
+    }
+    constexpr uint32_t kMaxDscMsgsPerSec = 3u;
+    if (dsc_rate_window_count >= kMaxDscMsgsPerSec) {
+      ++dsc_dropped_total;
+      if (now_ms > dsc_last_drop_log_ms + 5000u) {
+        dsc_last_drop_log_ms = now_ms;
+        PublishEvent(EventKind::kInfo,
+                     "DSC rate limiter active: dropping excess decode messages",
+                     msg.frequency_hz,
+                     false);
+      }
+      return false;
+    }
+    ++dsc_rate_window_count;
+    return true;
+  };
 
   while (running_.load()) {
     IqQueueEntry entry;
@@ -1335,6 +1375,7 @@ void ReceiverWorker::ProcessLoop() {
       plugin_host_->ProcessIq(
           plugin_block,
           [this, &entry](const multi_radio::PluginMessage& msg) {
+            if (!allow_dsc_message(msg)) return;
             const auto& nf = msg.normalized_fields;
 
             // --- Name learning (runs for all messages, including filtered ones) ---
@@ -1583,6 +1624,7 @@ void ReceiverWorker::ProcessLoop() {
               plugin_host_->ProcessIq(
                   dsc_audio_block,
                   [this, &entry](const multi_radio::PluginMessage& msg) {
+                    if (!allow_dsc_message(msg)) return;
                     DecodedMessage dm;
                     dm.unix_ms = msg.unix_ms;
                     dm.receiver_id = receiver_id_;
