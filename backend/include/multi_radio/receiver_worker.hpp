@@ -59,6 +59,7 @@ class ReceiverWorker {
   std::thread process_thread_;
   std::atomic<bool> running_{false};
   std::atomic<int> plugin_config_generation_{0};  // incremented by PushPluginConfig
+  std::atomic<bool> nfm_dsc_audio_chain_enabled_{false};
 
   RadioMode mode_ = RadioMode::kFixed;
   ModeConfig mode_config_;

@@ -73,6 +73,8 @@ mr_add_plugin(vdes_asm_decoder vdes_asm_decoder.c)
 mr_add_plugin(vdes_asm_postproc vdes_asm_postproc.c)
 mr_add_plugin(vdes_burst_decoder vdes_burst_decoder.c)
 mr_add_plugin(vdes_burst_demod   vdes_burst_demod.c)
+mr_add_plugin(dsc_afsk_demod     dsc_afsk_demod.c)
+mr_add_plugin(dsc_decoder        dsc_decoder.c)
 
 # ---------------------------------------------------------------------------
 # adsb_demod: ADS-B demodulator backed by libmodes (dump1090)

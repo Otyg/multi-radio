@@ -5236,7 +5236,7 @@ void MainWindow::LoadScanListConfigFromSettingsGroup(const QString& group) {
       ScanListChannelConfig dsc;
       dsc.label = "DSC Ch 70";
       dsc.frequency_mhz = 156.525;
-      dsc.modulation = v1::MODULATION_FSK;
+      dsc.modulation = v1::MODULATION_NFM;
       dsc.bandwidth_hz = DefaultBandwidthHzForModulation(dsc.modulation);
       dsc.use_default_squelch = true;
       dsc.squelch_threshold_db = default_squelch_db;
@@ -5359,7 +5359,7 @@ void MainWindow::LoadRadarScanListConfigFromSettings() {
     ScanListChannelConfig dsc;
     dsc.label = "DSC Ch 70";
     dsc.frequency_mhz = 156.525;
-    dsc.modulation = v1::MODULATION_FSK;
+    dsc.modulation = v1::MODULATION_NFM;
     dsc.bandwidth_hz = DefaultBandwidthHzForModulation(dsc.modulation);
     dsc.use_default_squelch = true;
     dsc.squelch_threshold_db = default_squelch_db;

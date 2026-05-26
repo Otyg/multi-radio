@@ -576,6 +576,11 @@ void ReceiverWorker::PushPluginConfig() {
       !use_iq_recorder &&
       ((cfg.gmsk_decoder == "vdes_asm_decoder") ||
        (cfg.gmsk_postprocessor == "vdes_asm_postproc"));
+  const bool use_nfm_dsc_audio =
+      !use_iq_recorder &&
+      !use_vdes_asm_sketch &&
+      (effective_modulation == Modulation::kNfm) &&
+      (cfg.gmsk_decoder == "dsc_decoder");
   const bool use_ais_msg8_handoff =
       (effective_modulation != Modulation::kAisDual) &&
       (cfg.gmsk_postprocessor == "ais_decoder");
@@ -607,6 +612,14 @@ void ReceiverWorker::PushPluginConfig() {
                              std::to_string(std::max<uint32_t>(96u, cfg.vdes_asm_candidate_bits)));
       plugin_host_->SetParam("sync_errors_max",
                              std::to_string(std::min<uint32_t>(8u, cfg.vdes_asm_sync_errors_max)));
+    } else if (use_nfm_dsc_audio) {
+      plugin_host_->SetActiveDecoder("dsc_decoder");
+      plugin_host_->SetActivePostprocessor("");
+      plugin_host_->SetActiveAsmPostprocessor("");
+      plugin_host_->SetParam("baud_rate", "1200");
+      plugin_host_->SetParam("mark_hz", "1300");
+      plugin_host_->SetParam("space_hz", "2100");
+      plugin_host_->SetParam("bit1_is_mark", "1");
     } else {
       plugin_host_->SetActiveDecoder(cfg.gmsk_decoder);
       plugin_host_->SetActivePostprocessor(cfg.gmsk_postprocessor);
@@ -617,9 +630,12 @@ void ReceiverWorker::PushPluginConfig() {
   }
 
   std::string demod_name = DemodNameForModulation(effective_modulation);
+  if (use_nfm_dsc_audio)
+    demod_name = "dsc_afsk_demod";
   if (use_vdes_asm_sketch && effective_modulation != Modulation::kAisDual)
     demod_name = "vdes_asm_demod";
   plugin_host_->SetActiveDemodulator(demod_name);
+  nfm_dsc_audio_chain_enabled_.store(use_nfm_dsc_audio);
   ++plugin_config_generation_;
 
   std::string decoder_label = cfg.gmsk_decoder;
@@ -639,6 +655,11 @@ void ReceiverWorker::PushPluginConfig() {
   } else if (use_vdes_asm_sketch) {
     decoder_label = "vdes_asm_decoder";
     postproc_label = "vdes_asm_postproc";
+    invert_label = "0";
+  } else if (use_nfm_dsc_audio) {
+    decoder_label = "dsc_decoder";
+    postproc_label = "(none)";
+    asm_postproc_label = "(none)";
     invert_label = "0";
   }
 
@@ -1239,14 +1260,64 @@ void ReceiverWorker::ProcessLoop() {
     if (plugin_host_ != nullptr) {
       const int cur_gen = plugin_config_generation_.load();
       if (entry.modulation != last_demod_modulation || cur_gen != last_plugin_config_gen) {
-        plugin_host_->SetActiveDemodulator(DemodNameForModulation(entry.modulation));
+        ModeConfig cfg_snapshot;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          cfg_snapshot = mode_config_;
+        }
+        const bool use_iq_recorder = (entry.modulation == Modulation::kVdesAsm);
+        const bool use_vdes_asm_sketch =
+            !use_iq_recorder &&
+            ((cfg_snapshot.gmsk_decoder == "vdes_asm_decoder") ||
+             (cfg_snapshot.gmsk_postprocessor == "vdes_asm_postproc"));
+        const bool use_ais_msg8_handoff =
+            (entry.modulation != Modulation::kAisDual) &&
+            (cfg_snapshot.gmsk_postprocessor == "ais_decoder");
+
+        if (entry.modulation == Modulation::kAisDual) {
+          plugin_host_->SetActiveDecoder("nrzi_decoder");
+          plugin_host_->SetParam("invert", "1");
+          plugin_host_->SetActivePostprocessor("ais_decoder");
+          plugin_host_->SetActiveAsmPostprocessor("asm_decoder");
+        } else if (nfm_dsc_audio_chain_enabled_.load() && entry.modulation == Modulation::kNfm) {
+          plugin_host_->SetActiveDecoder("dsc_decoder");
+          plugin_host_->SetActivePostprocessor("");
+          plugin_host_->SetActiveAsmPostprocessor("");
+          plugin_host_->SetParam("baud_rate", "1200");
+          plugin_host_->SetParam("mark_hz", "1300");
+          plugin_host_->SetParam("space_hz", "2100");
+          plugin_host_->SetParam("bit1_is_mark", "1");
+        } else if (use_iq_recorder) {
+          plugin_host_->SetActiveDecoder("");
+          plugin_host_->SetActivePostprocessor("");
+          plugin_host_->SetActiveAsmPostprocessor("");
+        } else if (use_vdes_asm_sketch) {
+          plugin_host_->SetActiveDecoder("vdes_asm_decoder");
+          plugin_host_->SetActivePostprocessor("vdes_asm_postproc");
+          plugin_host_->SetActiveAsmPostprocessor("");
+          plugin_host_->SetParam("invert", "0");
+        } else {
+          plugin_host_->SetActiveDecoder(cfg_snapshot.gmsk_decoder);
+          plugin_host_->SetActivePostprocessor(cfg_snapshot.gmsk_postprocessor);
+          plugin_host_->SetActiveAsmPostprocessor(use_ais_msg8_handoff ? "asm_decoder" : "");
+          plugin_host_->SetParam("invert", cfg_snapshot.gmsk_nrzi_invert ? "1" : "0");
+        }
+
+        const bool use_nfm_dsc_audio =
+            nfm_dsc_audio_chain_enabled_.load() && entry.modulation == Modulation::kNfm;
+        const std::string demod_name =
+            use_nfm_dsc_audio ? "dsc_afsk_demod" : DemodNameForModulation(entry.modulation);
+        plugin_host_->SetActiveDemodulator(demod_name);
         last_demod_modulation = entry.modulation;
         last_plugin_config_gen = cur_gen;
       }
     }
 
+    const bool defer_plugin_to_nfm_audio =
+        nfm_dsc_audio_chain_enabled_.load() && entry.modulation == Modulation::kNfm;
+
     // Plugin IQ processing — runs on every block regardless of mode.
-    if (plugin_host_ != nullptr && !entry.block.interleaved_iq.empty()) {
+    if (plugin_host_ != nullptr && !entry.block.interleaved_iq.empty() && !defer_plugin_to_nfm_audio) {
       // Stamp the block with center frequency so plugins can use it.
       IQSampleBlock plugin_block = entry.block;
       if (plugin_block.center_frequency_hz == 0) {
@@ -1487,6 +1558,33 @@ void ReceiverWorker::ProcessLoop() {
             {
               std::lock_guard<std::mutex> lock(mu_);
               iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
+            }
+            if (plugin_host_ != nullptr &&
+                nfm_dsc_audio_chain_enabled_.load() &&
+                entry.modulation == Modulation::kNfm &&
+                !demod_pcm.empty()) {
+              IQSampleBlock dsc_audio_block;
+              dsc_audio_block.sample_rate_hz = entry.audio_sample_rate_hz;
+              dsc_audio_block.center_frequency_hz =
+                  static_cast<uint32_t>(entry.tuned_frequency_hz);
+              dsc_audio_block.interleaved_iq.resize(demod_pcm.size() * 2u);
+              for (size_t i = 0; i < demod_pcm.size(); ++i) {
+                dsc_audio_block.interleaved_iq[i * 2u] = demod_pcm[i];
+                dsc_audio_block.interleaved_iq[i * 2u + 1u] = 0;
+              }
+              plugin_host_->ProcessIq(
+                  dsc_audio_block,
+                  [this, &entry](const multi_radio::PluginMessage& msg) {
+                    DecodedMessage dm;
+                    dm.unix_ms = msg.unix_ms;
+                    dm.receiver_id = receiver_id_;
+                    dm.signal_type = msg.signal_type;
+                    dm.frequency_hz = msg.frequency_hz != 0.0 ? msg.frequency_hz
+                                                               : entry.tuned_frequency_hz;
+                    dm.payload = msg.payload;
+                    dm.normalized_fields = msg.normalized_fields;
+                    event_bus_->PublishDecodedMessage(dm);
+                  });
             }
             apply_audio_filters(&demod_pcm);
             apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
