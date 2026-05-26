@@ -756,6 +756,14 @@ class ServerApp::Impl {
       grpc::ServerBuilder pos_builder;
       pos_builder.AddListeningPort(position_bind_address_, grpc::InsecureServerCredentials());
       pos_builder.RegisterService(position_service_.get());
+      // Keepalive: håll HTTP/2-anslutningen vid liv genom NAT/proxies.
+      // Skicka PING var 30:e s; klienten måste svara inom 10 s.
+      pos_builder.AddChannelArgument(GRPC_ARG_KEEPALIVE_TIME_MS,                        30'000);
+      pos_builder.AddChannelArgument(GRPC_ARG_KEEPALIVE_TIMEOUT_MS,                     10'000);
+      pos_builder.AddChannelArgument(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS,                1);
+      pos_builder.AddChannelArgument(GRPC_ARG_HTTP2_MAX_PINGS_WITHOUT_DATA,                  0);
+      pos_builder.AddChannelArgument(GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS,
+                                     10'000);
       position_server_ = pos_builder.BuildAndStart();
       if (position_server_) {
         std::cout << "Position-only gRPC endpoint on " << position_bind_address_
