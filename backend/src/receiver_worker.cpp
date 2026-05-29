@@ -1374,7 +1374,7 @@ void ReceiverWorker::ProcessLoop() {
       }
       plugin_host_->ProcessIq(
           plugin_block,
-          [this, &entry](const multi_radio::PluginMessage& msg) {
+          [this, &entry, &allow_dsc_message](const multi_radio::PluginMessage& msg) {
             if (!allow_dsc_message(msg)) return;
             const auto& nf = msg.normalized_fields;
 
@@ -1623,7 +1623,7 @@ void ReceiverWorker::ProcessLoop() {
               }
               plugin_host_->ProcessIq(
                   dsc_audio_block,
-                  [this, &entry](const multi_radio::PluginMessage& msg) {
+                  [this, &entry, &allow_dsc_message](const multi_radio::PluginMessage& msg) {
                     if (!allow_dsc_message(msg)) return;
                     DecodedMessage dm;
                     dm.unix_ms = msg.unix_ms;
