@@ -133,16 +133,18 @@ WaterfallWorker::WaterfallWorker(QString path,
                                   double channel_bw_hz,
                                   double freq_lo_hz, double freq_hi_hz,
                                   double t_start_s,  double t_end_s,
+                                  int    fft_size,
                                   QObject* parent)
     : QObject(parent),
       path_(std::move(path)),
       center_hz_(center_hz), sample_rate_hz_(sample_rate_hz), channel_bw_hz_(channel_bw_hz),
       freq_lo_hz_(freq_lo_hz), freq_hi_hz_(freq_hi_hz),
-      t_start_s_(t_start_s), t_end_s_(t_end_s) {}
+      t_start_s_(t_start_s), t_end_s_(t_end_s),
+      fft_size_(fft_size) {}
 
 void WaterfallWorker::run() {
     auto fail = [&]() {
-        emit rendered(QImage{}, freq_lo_hz_, freq_hi_hz_, t_start_s_, t_end_s_);
+        emit dataReady({}, 0, 0, freq_lo_hz_, freq_hi_hz_, t_start_s_, t_end_s_);
     };
 
     QFile file(path_);
@@ -158,18 +160,16 @@ void WaterfallWorker::run() {
     const qint64 samp0  = static_cast<qint64>(t0 * sample_rate_hz_);
     const qint64 samp1  = static_cast<qint64>(t1 * sample_rate_hz_);
     const qint64 n_samp = samp1 - samp0;
-    if (n_samp < kFftSize) { fail(); return; }
+    if (n_samp < fft_size_) { fail(); return; }
 
     file.seek(samp0 * 4);
     const QByteArray raw = file.read(n_samp * 4);
     file.close();
 
-    const size_t N    = static_cast<size_t>(kFftSize);
+    const size_t N    = static_cast<size_t>(fft_size_);
     const size_t half = N / 2U;
     const double bin_hz = sample_rate_hz_ / static_cast<double>(N);
 
-    // Fftshifted bin s → freq: center_hz + (s - half)*bin_hz
-    // s = (freq - center_hz)/bin_hz + half
     const int lo_s = static_cast<int>(
         std::floor((freq_lo_hz_ - center_hz_) / bin_hz + static_cast<double>(half)));
     const int hi_s = static_cast<int>(
@@ -185,10 +185,8 @@ void WaterfallWorker::run() {
 
     const auto* raw_i16 = reinterpret_cast<const int16_t*>(raw.constData());
 
-    // power_db[frame][bin] in dBFS
-    std::vector<std::vector<float>> power_db(
-        num_frames, std::vector<float>(static_cast<size_t>(n_bins), -200.f));
-
+    // Compute flat power matrix [frame * n_bins + bin] in dBFS.
+    QVector<float> power_flat(static_cast<int>(num_frames) * n_bins, -200.f);
     std::vector<std::complex<double>> fft_buf(N);
 
     for (size_t frame = 0; frame < num_frames; ++frame) {
@@ -200,44 +198,24 @@ void WaterfallWorker::run() {
         }
         FftRadix2InPlace(fft_buf);
 
+        // Use same formula as frontend: 20·log10(|FFT[k]| / N)
+        const int row_off = static_cast<int>(frame) * n_bins;
         for (int bi = 0; bi < n_bins; ++bi) {
             const int s = clo + bi;
             const int k = (s - static_cast<int>(half) + static_cast<int>(N)) % static_cast<int>(N);
-            const double mag2 = std::norm(fft_buf[static_cast<size_t>(k)]) /
-                                static_cast<double>(N * N);
-            power_db[frame][static_cast<size_t>(bi)] =
-                static_cast<float>(10.0 * std::log10(std::max(mag2, 1.0e-30)));
+            const double magnitude = std::abs(fft_buf[static_cast<size_t>(k)]) /
+                                     static_cast<double>(N);
+            power_flat[row_off + bi] =
+                static_cast<float>(20.0 * std::log10(std::max(magnitude, 1.0e-12)));
         }
 
         if ((frame % 100) == 0)
-            emit progress(static_cast<int>(frame * 90 / num_frames));
-    }
-
-    emit progress(92);
-
-    // Auto-scale to 5th–95th percentile
-    std::vector<float> flat;
-    flat.reserve(num_frames * static_cast<size_t>(n_bins));
-    for (const auto& row : power_db)
-        for (float v : row)
-            flat.push_back(v);
-    std::sort(flat.begin(), flat.end());
-    const float p5  = flat[flat.size() *  5 / 100];
-    const float p95 = flat[flat.size() * 95 / 100];
-    const float span = (p95 > p5) ? (p95 - p5) : 1.0f;
-
-    // Build QImage (width = n_bins, height = num_frames)
-    QImage img(n_bins, static_cast<int>(num_frames), QImage::Format_RGB32);
-    for (size_t frame = 0; frame < num_frames; ++frame) {
-        auto* line = reinterpret_cast<QRgb*>(img.scanLine(static_cast<int>(frame)));
-        for (int bi = 0; bi < n_bins; ++bi) {
-            const double v = (power_db[frame][static_cast<size_t>(bi)] - p5) / span;
-            line[bi] = WaterfallColor(v);
-        }
+            emit progress(static_cast<int>(frame * 95 / num_frames));
     }
 
     emit progress(100);
-    emit rendered(img, freq_lo_hz_, freq_hi_hz_, t0, t1);
+    emit dataReady(power_flat, n_bins, static_cast<int>(num_frames),
+                   freq_lo_hz_, freq_hi_hz_, t0, t1);
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +251,7 @@ WaterfallDialog::WaterfallDialog(QString file_path, DetectedSignal signal,
     root->setSpacing(6);
     root->setContentsMargins(8, 8, 8, 8);
 
-    // Control row
+    // Time range row
     auto* ctrl = new QHBoxLayout();
     pre_spin_  = new QDoubleSpinBox(this);
     pre_spin_->setRange(0.0, 600.0); pre_spin_->setDecimals(2);
@@ -287,14 +265,44 @@ WaterfallDialog::WaterfallDialog(QString file_path, DetectedSignal signal,
     prog_bar_->setVisible(false);
     status_lbl_ = new QLabel(this);
 
+    neighbors_spin_ = new QSpinBox(this);
+    neighbors_spin_->setRange(-1, 100);
+    neighbors_spin_->setValue(2);
+    neighbors_spin_->setSpecialValueText("Hela bredden");
+    neighbors_spin_->setToolTip("-1 = hela samplingsbredden, 0 = enbart vald kanal");
+
     ctrl->addWidget(new QLabel("Tid före:", this));
     ctrl->addWidget(pre_spin_);
     ctrl->addWidget(new QLabel("Tid efter:", this));
     ctrl->addWidget(post_spin_);
+    ctrl->addWidget(new QLabel("Grannkanaler:", this));
+    ctrl->addWidget(neighbors_spin_);
     ctrl->addWidget(load_btn_);
     ctrl->addWidget(prog_bar_);
     ctrl->addWidget(status_lbl_, 1);
     root->addLayout(ctrl);
+
+    // FFT size + threshold row
+    auto* thr_row = new QHBoxLayout();
+    fft_size_combo_ = new QComboBox(this);
+    for (int s : {256, 512, 1024, 2048, 4096, 8192, 16384})
+        fft_size_combo_->addItem(QString::number(s), s);
+    fft_size_combo_->setCurrentIndex(fft_size_combo_->findData(kDefaultFftSize));
+    thr_row->addWidget(new QLabel("FFT-storlek:", this));
+    thr_row->addWidget(fft_size_combo_);
+    thr_row->addSpacing(16);
+    // Floor ("blå under")
+    floor_spin_ = new QDoubleSpinBox(this);
+    floor_spin_->setRange(-200.0, 0.0);
+    floor_spin_->setDecimals(1);
+    floor_spin_->setSingleStep(1.0);
+    floor_spin_->setSuffix(" dBFS");
+    floor_spin_->setValue(signal_.noise_floor_dbfs);
+    floor_spin_->setToolTip("Pixlar under denna nivå visas i svart; nollpunkt för färgskalan");
+    thr_row->addWidget(new QLabel("Golv:", this));
+    thr_row->addWidget(floor_spin_);
+    thr_row->addStretch(1);
+    root->addLayout(thr_row);
 
     wf_widget_ = new WaterfallWidget(this);
     root->addWidget(wf_widget_, 1);
@@ -311,7 +319,12 @@ WaterfallDialog::WaterfallDialog(QString file_path, DetectedSignal signal,
         resize(820, 640);
     }
 
-    connect(load_btn_, &QPushButton::clicked, this, &WaterfallDialog::onLoad);
+    qRegisterMetaType<QVector<float>>();
+
+    connect(load_btn_,        &QPushButton::clicked,          this, &WaterfallDialog::onLoad);
+    connect(floor_spin_,     &QDoubleSpinBox::valueChanged,  this, [this](double) { buildAndShowImage(); });
+    connect(fft_size_combo_, &QComboBox::currentIndexChanged,this, [this](int) { onLoad(); });
+    connect(neighbors_spin_, &QSpinBox::valueChanged,        this, [this](int)  { onLoad(); });
 
     // Trigger initial load after the event loop starts.
     QMetaObject::invokeMethod(this, &WaterfallDialog::onLoad, Qt::QueuedConnection);
@@ -324,11 +337,17 @@ void WaterfallDialog::onLoad() {
     const double post = post_spin_->value();
     const int ch_n    = static_cast<int>(
         std::round((signal_.center_freq_hz - center_hz_) / channel_bw_hz_));
+    const int neighbors = neighbors_spin_->value();
 
-    const double freq_lo = center_hz_ +
-        (static_cast<double>(ch_n - kNeighborChannels) - 0.5) * channel_bw_hz_;
-    const double freq_hi = center_hz_ +
-        (static_cast<double>(ch_n + kNeighborChannels) + 0.5) * channel_bw_hz_;
+    double freq_lo, freq_hi;
+    if (neighbors < 0) {
+        // Show the full sampling bandwidth.
+        freq_lo = center_hz_ - sample_rate_hz_ / 2.0;
+        freq_hi = center_hz_ + sample_rate_hz_ / 2.0;
+    } else {
+        freq_lo = center_hz_ + (static_cast<double>(ch_n - neighbors) - 0.5) * channel_bw_hz_;
+        freq_hi = center_hz_ + (static_cast<double>(ch_n + neighbors) + 0.5) * channel_bw_hz_;
+    }
     const double t_start = signal_.time_offset_s - pre;
     const double t_end   = signal_.time_offset_s + signal_.duration_s + post;
 
@@ -338,18 +357,19 @@ void WaterfallDialog::onLoad() {
     prog_bar_->setVisible(true);
     status_lbl_->setText("Laddar…");
 
+    const int fft_size = fft_size_combo_->currentData().toInt();
     auto* worker = new WaterfallWorker(file_path_, center_hz_, sample_rate_hz_,
                                         channel_bw_hz_, freq_lo, freq_hi,
-                                        t_start, t_end);
+                                        t_start, t_end, fft_size);
     auto* thread = new QThread();
     worker->moveToThread(thread);
 
-    connect(thread, &QThread::started,          worker, &WaterfallWorker::run);
-    connect(worker, &WaterfallWorker::progress, this,   &WaterfallDialog::onProgress);
-    connect(worker, &WaterfallWorker::rendered, this,   &WaterfallDialog::onRendered);
-    connect(worker, &WaterfallWorker::rendered, worker, &QObject::deleteLater);
-    connect(worker, &WaterfallWorker::rendered, thread, &QThread::quit);
-    connect(thread, &QThread::finished,         thread, &QObject::deleteLater);
+    connect(thread, &QThread::started,            worker, &WaterfallWorker::run);
+    connect(worker, &WaterfallWorker::progress,   this,   &WaterfallDialog::onProgress);
+    connect(worker, &WaterfallWorker::dataReady,  this,   &WaterfallDialog::onDataReady);
+    connect(worker, &WaterfallWorker::dataReady,  worker, &QObject::deleteLater);
+    connect(worker, &WaterfallWorker::dataReady,  thread, &QThread::quit);
+    connect(thread, &QThread::finished,           thread, &QObject::deleteLater);
 
     thread->start();
 }
@@ -358,33 +378,65 @@ void WaterfallDialog::onProgress(int pct) {
     prog_bar_->setValue(pct);
 }
 
-void WaterfallDialog::onRendered(QImage image,
-                                  double freq_lo_hz, double freq_hi_hz,
-                                  double t_start_s,  double t_end_s) {
+void WaterfallDialog::onDataReady(QVector<float> power_flat, int n_bins, int n_frames,
+                                   double freq_lo_hz, double freq_hi_hz,
+                                   double t_start_s,  double t_end_s) {
     is_loading_ = false;
     prog_bar_->setVisible(false);
     load_btn_->setEnabled(true);
 
-    if (image.isNull()) {
+    if (power_flat.isEmpty() || n_bins <= 0 || n_frames <= 0) {
         status_lbl_->setText("Kunde inte läsa data.");
         return;
     }
 
-    const int ch_n = static_cast<int>(
-        std::round((signal_.center_freq_hz - center_hz_) / channel_bw_hz_));
+    power_flat_    = std::move(power_flat);
+    power_n_bins_  = n_bins;
+    power_n_frames_= n_frames;
+    power_freq_lo_ = freq_lo_hz;
+    power_freq_hi_ = freq_hi_hz;
+    power_t_start_ = t_start_s;
+    power_t_end_   = t_end_s;
 
-    wf_widget_->setWaterfall(image, freq_lo_hz, freq_hi_hz, t_start_s, t_end_s,
+    status_lbl_->setText(
+        QString("%1 bildramar | %2 – %3")
+            .arg(n_frames)
+            .arg(FmtFreq(freq_lo_hz))
+            .arg(FmtFreq(freq_hi_hz)));
+
+    buildAndShowImage();
+}
+
+void WaterfallDialog::buildAndShowImage() {
+    if (power_flat_.isEmpty()) return;
+
+    // Absolute dBFS scale: floor set by user, ceiling fixed at 0 dBFS
+    // (the theoretical max for normalized IQ data). v > 1 → white via LUT.
+    const float floor_db   = static_cast<float>(floor_spin_->value());
+    constexpr float ceiling_db = 0.0f;
+    const float span = std::max(ceiling_db - floor_db, 0.1f);
+
+    QImage img(power_n_bins_, power_n_frames_, QImage::Format_RGB32);
+    for (int frame = 0; frame < power_n_frames_; ++frame) {
+        auto* line = reinterpret_cast<QRgb*>(img.scanLine(frame));
+        const int row_off = frame * power_n_bins_;
+        for (int bi = 0; bi < power_n_bins_; ++bi) {
+            const float pw = power_flat_[row_off + bi];
+            if (pw < floor_db) {
+                line[bi] = qRgb(0, 0, 0);
+            } else {
+                // v=0 at floor (dark blue LUT[0]), v=1 at ceiling (white),
+                // v>1 for overload (clamped to white by LUT).
+                line[bi] = WaterfallColor((pw - floor_db) / span);
+            }
+        }
+    }
+
+    wf_widget_->setWaterfall(img, power_freq_lo_, power_freq_hi_,
+                              power_t_start_, power_t_end_,
                               center_hz_, channel_bw_hz_,
                               signal_.time_offset_s,
                               signal_.time_offset_s + signal_.duration_s);
-
-    status_lbl_->setText(
-        QString("Kanal %1 ± %2 grannkanaler | %3 bildramar | %4 – %5")
-            .arg(ch_n)
-            .arg(kNeighborChannels)
-            .arg(image.height())
-            .arg(FmtFreq(freq_lo_hz))
-            .arg(FmtFreq(freq_hi_hz)));
 }
 
 }  // namespace iq_analyzer

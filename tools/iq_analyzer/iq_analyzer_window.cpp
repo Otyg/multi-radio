@@ -45,12 +45,13 @@ double UnitMultiplier(const QString& unit) {
 
 AnalysisWorker::AnalysisWorker(QString path, double center_hz,
                                double sample_rate_hz, double channel_bw_hz,
-                               QObject* parent)
+                               int fft_size, QObject* parent)
     : QObject(parent),
       path_(std::move(path)),
       center_hz_(center_hz),
       sample_rate_hz_(sample_rate_hz),
-      channel_bw_hz_(channel_bw_hz) {}
+      channel_bw_hz_(channel_bw_hz),
+      fft_size_(fft_size) {}
 
 void AnalysisWorker::run() {
     // --- Read file --------------------------------------------------------
@@ -60,7 +61,7 @@ void AnalysisWorker::run() {
         return;
     }
     const qint64 sample_pairs = file.size() / 4;  // each IQ pair = 2 × int16 = 4 bytes
-    if (sample_pairs < kFftSize) {
+    if (sample_pairs < fft_size_) {
         emit finished(DetectedSignalList{}, 0.0, "Filen är för liten för analys.");
         return;
     }
@@ -76,7 +77,7 @@ void AnalysisWorker::run() {
     // FFT bin k (0-based) → fftshifted index s = (k + N/2) % N
     // s maps to frequency offset: (s - N/2) * bin_hz
     // → channel index: n = round(freq_offset / bw)
-    const size_t N          = static_cast<size_t>(kFftSize);
+    const size_t N          = static_cast<size_t>(fft_size_);
     const size_t half       = N / 2U;
     const double bin_hz     = sample_rate_hz_ / static_cast<double>(N);
     const double bins_per_ch = channel_bw_hz_ / bin_hz;
@@ -284,12 +285,18 @@ IqAnalyzerWindow::IqAnalyzerWindow(QWidget* parent) : QMainWindow(parent) {
     auto* sr_row = make_freq_row(sr_spin_, sr_unit_combo_, param_group, "MSps");
     auto* bw_row = make_freq_row(bw_spin_, bw_unit_combo_, param_group, "kHz");
 
+    fft_size_combo_ = new QComboBox(param_group);
+    for (int s : {256, 512, 1024, 2048, 4096, 8192, 16384})
+        fft_size_combo_->addItem(QString::number(s), s);
+    fft_size_combo_->setCurrentIndex(fft_size_combo_->findData(kDefaultFftSize));
+
     noise_floor_label_ = new QLabel(param_group);
     noise_floor_label_->setText("–");
 
     param_layout->addRow("Centerfrekvens:", cf_row);
     param_layout->addRow("Samplingsfrekvens:", sr_row);
     param_layout->addRow("Kanalbredd:", bw_row);
+    param_layout->addRow("FFT-storlek:", fft_size_combo_);
     param_layout->addRow("Brusgolv:", noise_floor_label_);
     root->addWidget(param_group);
 
@@ -443,7 +450,8 @@ void IqAnalyzerWindow::onAnalyze() {
     progress_bar_->setValue(0);
     progress_bar_->setVisible(true);
 
-    auto* worker = new AnalysisWorker(path, cf, sr, bw);
+    const int fft_size = fft_size_combo_->currentData().toInt();
+    auto* worker = new AnalysisWorker(path, cf, sr, bw, fft_size);
     worker_thread_ = new QThread(this);
     worker->moveToThread(worker_thread_);
 

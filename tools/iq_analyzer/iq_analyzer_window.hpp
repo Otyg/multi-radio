@@ -32,7 +32,8 @@ class AnalysisWorker : public QObject {
     Q_OBJECT
 public:
     explicit AnalysisWorker(QString path, double center_hz, double sample_rate_hz,
-                            double channel_bw_hz, QObject* parent = nullptr);
+                            double channel_bw_hz, int fft_size,
+                            QObject* parent = nullptr);
 
 public slots:
     void run();
@@ -46,6 +47,7 @@ private:
     double center_hz_;
     double sample_rate_hz_;
     double channel_bw_hz_;
+    int    fft_size_;
 };
 
 class IqAnalyzerWindow : public QMainWindow {
@@ -77,6 +79,7 @@ private:
     QComboBox*      sr_unit_combo_   = nullptr;
     QDoubleSpinBox* bw_spin_         = nullptr;
     QComboBox*      bw_unit_combo_   = nullptr;
+    QComboBox*      fft_size_combo_    = nullptr;
     QLabel*         noise_floor_label_ = nullptr;
 
     QPushButton*    analyze_btn_       = nullptr;
