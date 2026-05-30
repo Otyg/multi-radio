@@ -22,6 +22,8 @@ if(MR_BUILD_FRONTEND)
   add_subdirectory(frontend)
 endif()
 
+add_subdirectory(tools/iq_analyzer)
+
 if(MR_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
