@@ -61,6 +61,7 @@ private slots:
     void onProgress(int percent);
     void onFinished(DetectedSignalList detections, double noise_floor_db, QString error);
     void onRowDoubleClicked(int row, int col);
+    void onOpenWaterfall();
 
 private:
     void applyFilenameParams(const QString& path);
@@ -79,13 +80,17 @@ private:
     QComboBox*      sr_unit_combo_   = nullptr;
     QDoubleSpinBox* bw_spin_         = nullptr;
     QComboBox*      bw_unit_combo_   = nullptr;
-    QComboBox*      fft_size_combo_    = nullptr;
-    QLabel*         noise_floor_label_ = nullptr;
+    QComboBox*      fft_size_combo_      = nullptr;
+    QLabel*         noise_floor_label_   = nullptr;
+    QLabel*         top_freq_labels_[5]  = {};
+    QLabel*         top_str_labels_[5]   = {};
 
-    QPushButton*    analyze_btn_       = nullptr;
-    QProgressBar*   progress_bar_      = nullptr;
+    QPushButton*    analyze_btn_          = nullptr;
+    QPushButton*    waterfall_btn_        = nullptr;
+    QProgressBar*   progress_bar_         = nullptr;
     QDoubleSpinBox* strength_filter_spin_ = nullptr;
-    QLabel*         status_label_      = nullptr;
+    QDoubleSpinBox* length_filter_spin_   = nullptr;
+    QLabel*         status_label_         = nullptr;
     QTableWidget*   results_table_     = nullptr;
 
     QThread*      worker_thread_     = nullptr;

@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QFile>
 #include <QFileDialog>
+#include <QMap>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -298,18 +299,42 @@ IqAnalyzerWindow::IqAnalyzerWindow(QWidget* parent) : QMainWindow(parent) {
     param_layout->addRow("Kanalbredd:", bw_row);
     param_layout->addRow("FFT-storlek:", fft_size_combo_);
     param_layout->addRow("Brusgolv:", noise_floor_label_);
-    root->addWidget(param_group);
+
+    // --- Top-5 panels (next to parameters) --------------------------------
+    auto* top_active_group  = new QGroupBox("Mest aktiva", central);
+    auto* top_active_layout = new QFormLayout(top_active_group);
+    for (int i = 0; i < 5; ++i) {
+        top_freq_labels_[i] = new QLabel("–", top_active_group);
+        top_active_layout->addRow(QString("%1.").arg(i + 1), top_freq_labels_[i]);
+    }
+
+    auto* top_str_group  = new QGroupBox("Starkast", central);
+    auto* top_str_layout = new QFormLayout(top_str_group);
+    for (int i = 0; i < 5; ++i) {
+        top_str_labels_[i] = new QLabel("–", top_str_group);
+        top_str_layout->addRow(QString("%1.").arg(i + 1), top_str_labels_[i]);
+    }
+
+    auto* params_row = new QHBoxLayout();
+    params_row->addWidget(param_group,      3);
+    params_row->addWidget(top_active_group, 2);
+    params_row->addWidget(top_str_group,    2);
+    root->addLayout(params_row);
 
     // --- Analyze button + progress ---------------------------------------
     auto* action_row = new QHBoxLayout();
-    analyze_btn_  = new QPushButton("Analysera", central);
+    analyze_btn_   = new QPushButton("Analysera", central);
     analyze_btn_->setEnabled(false);
+    waterfall_btn_ = new QPushButton("Vattenfall", central);
+    waterfall_btn_->setEnabled(false);
+    waterfall_btn_->setToolTip("Öppna vattenfallsdialog för hela inspelningen");
     progress_bar_ = new QProgressBar(central);
     progress_bar_->setRange(0, 100);
     progress_bar_->setValue(0);
     progress_bar_->setVisible(false);
     status_label_ = new QLabel(central);
     action_row->addWidget(analyze_btn_);
+    action_row->addWidget(waterfall_btn_);
     action_row->addWidget(progress_bar_, 1);
     action_row->addWidget(status_label_, 1);
     root->addLayout(action_row);
@@ -323,8 +348,21 @@ IqAnalyzerWindow::IqAnalyzerWindow(QWidget* parent) : QMainWindow(parent) {
     strength_filter_spin_->setValue(-200.0);
     strength_filter_spin_->setSuffix(" dBFS");
     strength_filter_spin_->setToolTip("Dölj signaler vars styrka är under detta värde");
+
+    length_filter_spin_ = new QDoubleSpinBox(central);
+    length_filter_spin_->setRange(0.0, 3600.0);
+    length_filter_spin_->setDecimals(3);
+    length_filter_spin_->setSingleStep(0.1);
+    length_filter_spin_->setValue(0.0);
+    length_filter_spin_->setSuffix(" s");
+    length_filter_spin_->setSpecialValueText("Alla längder");
+    length_filter_spin_->setToolTip("Dölj signaler kortare än detta värde");
+
     filter_row->addWidget(new QLabel("Dölj signaler under:", central));
     filter_row->addWidget(strength_filter_spin_);
+    filter_row->addSpacing(16);
+    filter_row->addWidget(new QLabel("Kortare än:", central));
+    filter_row->addWidget(length_filter_spin_);
     filter_row->addStretch(1);
     root->addLayout(filter_row);
 
@@ -353,11 +391,14 @@ IqAnalyzerWindow::IqAnalyzerWindow(QWidget* parent) : QMainWindow(parent) {
     }
 
     // --- Connections -----------------------------------------------------
-    connect(open_btn_,    &QPushButton::clicked, this, &IqAnalyzerWindow::onOpenFile);
-    connect(analyze_btn_, &QPushButton::clicked, this, &IqAnalyzerWindow::onAnalyze);
+    connect(open_btn_,       &QPushButton::clicked, this, &IqAnalyzerWindow::onOpenFile);
+    connect(analyze_btn_,   &QPushButton::clicked, this, &IqAnalyzerWindow::onAnalyze);
+    connect(waterfall_btn_, &QPushButton::clicked, this, &IqAnalyzerWindow::onOpenWaterfall);
     connect(results_table_, &QTableWidget::cellDoubleClicked,
             this, &IqAnalyzerWindow::onRowDoubleClicked);
     connect(strength_filter_spin_, &QDoubleSpinBox::valueChanged,
+            this, [this](double) { populateTable(); });
+    connect(length_filter_spin_,   &QDoubleSpinBox::valueChanged,
             this, [this](double) { populateTable(); });
 
     qRegisterMetaType<DetectedSignalList>();
@@ -411,7 +452,9 @@ double IqAnalyzerWindow::channelBwHz() const {
 
 void IqAnalyzerWindow::setControlsEnabled(bool enabled) {
     open_btn_->setEnabled(enabled);
-    analyze_btn_->setEnabled(enabled && !file_path_edit_->text().isEmpty());
+    const bool has_file = !file_path_edit_->text().isEmpty();
+    analyze_btn_->setEnabled(enabled && has_file);
+    waterfall_btn_->setEnabled(enabled && has_file);
     cf_spin_->setEnabled(enabled);
     cf_unit_combo_->setEnabled(enabled);
     sr_spin_->setEnabled(enabled);
@@ -427,6 +470,7 @@ void IqAnalyzerWindow::onOpenFile() {
     file_path_edit_->setText(path);
     applyFilenameParams(path);
     analyze_btn_->setEnabled(true);
+    waterfall_btn_->setEnabled(true);
     results_table_->setRowCount(0);
     status_label_->clear();
 }
@@ -446,6 +490,8 @@ void IqAnalyzerWindow::onAnalyze() {
 
     setControlsEnabled(false);
     results_table_->setRowCount(0);
+    for (auto* lbl : top_freq_labels_) lbl->setText("–");
+    for (auto* lbl : top_str_labels_)  lbl->setText("–");
     status_label_->setText("Analyserar…");
     progress_bar_->setValue(0);
     progress_bar_->setVisible(true);
@@ -484,6 +530,75 @@ void IqAnalyzerWindow::onFinished(DetectedSignalList detections, double noise_fl
 
     noise_floor_label_->setText(QString("%1 dBFS").arg(noise_floor_db, 0, 'f', 1));
 
+    // --- Top-5 most active frequencies (by total signal duration) ----------
+    {
+        QMap<double, double> freq_total_duration;
+        for (const auto& s : detections)
+            freq_total_duration[s.center_freq_hz] += s.duration_s;
+
+        QList<QPair<double, double>> ranked;
+        ranked.reserve(freq_total_duration.size());
+        for (auto it = freq_total_duration.cbegin(); it != freq_total_duration.cend(); ++it)
+            ranked.append({it.key(), it.value()});
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const QPair<double,double>& a, const QPair<double,double>& b) {
+                      return a.second > b.second;
+                  });
+
+        auto fmt_freq = [](double hz) -> QString {
+            if (std::abs(hz) >= 1.0e6) return QString::number(hz / 1.0e6, 'f', 4) + " MHz";
+            if (std::abs(hz) >= 1.0e3) return QString::number(hz / 1.0e3, 'f', 3) + " kHz";
+            return QString::number(hz, 'f', 1) + " Hz";
+        };
+        for (int i = 0; i < 5; ++i) {
+            if (i < ranked.size())
+                top_freq_labels_[i]->setText(
+                    QString("%1  (%2 s)")
+                        .arg(fmt_freq(ranked[i].first))
+                        .arg(ranked[i].second, 0, 'f', 1));
+            else
+                top_freq_labels_[i]->setText("–");
+        }
+    }
+
+    // --- Top-5 strongest signals (by peak strength_dbfs) -------------------
+    {
+        auto fmt_freq = [](double hz) -> QString {
+            if (std::abs(hz) >= 1.0e6) return QString::number(hz / 1.0e6, 'f', 4) + " MHz";
+            if (std::abs(hz) >= 1.0e3) return QString::number(hz / 1.0e3, 'f', 3) + " kHz";
+            return QString::number(hz, 'f', 1) + " Hz";
+        };
+
+        // Find peak strength per frequency (max over all detections on that channel).
+        QMap<double, double> freq_peak_strength;
+        for (const auto& s : detections) {
+            auto it = freq_peak_strength.find(s.center_freq_hz);
+            if (it == freq_peak_strength.end())
+                freq_peak_strength.insert(s.center_freq_hz, s.strength_dbfs);
+            else if (s.strength_dbfs > it.value())
+                it.value() = s.strength_dbfs;
+        }
+
+        QList<QPair<double, double>> ranked;
+        ranked.reserve(freq_peak_strength.size());
+        for (auto it = freq_peak_strength.cbegin(); it != freq_peak_strength.cend(); ++it)
+            ranked.append({it.key(), it.value()});
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const QPair<double,double>& a, const QPair<double,double>& b) {
+                      return a.second > b.second;
+                  });
+
+        for (int i = 0; i < 5; ++i) {
+            if (i < ranked.size())
+                top_str_labels_[i]->setText(
+                    QString("%1  (%2 dBFS)")
+                        .arg(fmt_freq(ranked[i].first))
+                        .arg(ranked[i].second, 0, 'f', 1));
+            else
+                top_str_labels_[i]->setText("–");
+        }
+    }
+
     // Default filter threshold = noise floor of this analysis run.
     strength_filter_spin_->setValue(noise_floor_db);
 
@@ -493,11 +608,12 @@ void IqAnalyzerWindow::onFinished(DetectedSignalList detections, double noise_fl
 }
 
 void IqAnalyzerWindow::populateTable() {
-    const double threshold = strength_filter_spin_->value();
+    const double strength_threshold = strength_filter_spin_->value();
+    const double length_threshold   = length_filter_spin_->value();
 
     current_visible_detections_.clear();
     for (const auto& s : current_detections_) {
-        if (s.strength_dbfs >= threshold)
+        if (s.strength_dbfs >= strength_threshold && s.duration_s >= length_threshold)
             current_visible_detections_.append(s);
     }
 
@@ -548,6 +664,26 @@ void IqAnalyzerWindow::onRowDoubleClicked(int row, int /*col*/) {
     const DetectedSignal& sig = current_visible_detections_[row];
     auto* dlg = new WaterfallDialog(file_path_edit_->text(), sig,
                                      current_cf_hz_, current_sr_hz_, current_bw_hz_,
+                                     this);
+    dlg->show();
+}
+
+void IqAnalyzerWindow::onOpenWaterfall() {
+    const QString path = file_path_edit_->text();
+    if (path.isEmpty()) return;
+
+    // Synthetic signal spanning the full file (duration_s <= 0 → dialog sets end = -1).
+    DetectedSignal full_file{};
+    full_file.center_freq_hz   = centerFreqHz();
+    full_file.noise_floor_dbfs = noise_floor_label_->text().isEmpty()
+        ? -120.0
+        : noise_floor_label_->text().replace(" dBFS", "").toDouble();
+    full_file.time_offset_s    = 0.0;
+    full_file.strength_dbfs    = 0.0;
+    full_file.duration_s       = -1.0;  // sentinel: whole file
+
+    auto* dlg = new WaterfallDialog(path, full_file,
+                                     centerFreqHz(), sampleRateHz(), channelBwHz(),
                                      this);
     dlg->show();
 }
