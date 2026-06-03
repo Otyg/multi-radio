@@ -1723,7 +1723,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   auto* radio_group = new QGroupBox("Radio", air_marine_controls);
   auto* radio_layout = new QVBoxLayout(radio_group);
   radio_layout->setContentsMargins(8, 8, 8, 8);
-  controls_outer->addWidget(radio_group, 1);
 
   // Radar-view radio scanner (separate from SCAN_LIST).
   {
@@ -1810,6 +1809,17 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     });
   }
 
+  {
+    auto* radio_signal_splitter = new QSplitter(Qt::Vertical, air_marine_controls);
+    radio_signal_splitter->addWidget(radio_group);
+    radar_signal_viz_ = new SignalVisualizationWidget(radio_signal_splitter);
+    radar_signal_viz_->SetSpectrumSource(SignalVisualizationWidget::SpectrumSource::kReceiverInput);
+    radio_signal_splitter->addWidget(radar_signal_viz_);
+    radio_signal_splitter->setStretchFactor(0, 1);
+    radio_signal_splitter->setStretchFactor(1, 1);
+    controls_outer->addWidget(radio_signal_splitter, 1);
+  }
+
   signal_filter_combo_ = new QComboBox(radar_group);
   signal_filter_combo_->addItem("ALL");
   signal_filter_combo_->addItem("SIGNAL_TYPE_AIS");
@@ -1820,8 +1830,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   minutes_filter_spin_ = new QSpinBox(radar_group);
   minutes_filter_spin_->setRange(1, 240);
   minutes_filter_spin_->setValue(30);
-  radar_layout->addRow(new QLabel("Radar updates come from the active scan-list channels.", radar_group));
-  radar_layout->addRow(new QLabel("Tip: add an AIS Dual channel (around 162 MHz) to feed the map.", radar_group));
   auto* signal_minutes_row = new QWidget(radar_group);
   auto* signal_minutes_layout = new QHBoxLayout(signal_minutes_row);
   signal_minutes_layout->setContentsMargins(0, 0, 0, 0);
@@ -2856,6 +2864,10 @@ void MainWindow::RefreshReceivers() {
 
   signal_visualization_->SetKnownReceivers(receiver_ids);
   signal_visualization_->SetReceiverFilter(receiver_filter_id_to_apply);
+  if (radar_signal_viz_ != nullptr) {
+    radar_signal_viz_->SetKnownReceivers(receiver_ids);
+    radar_signal_viz_->SetReceiverFilter(receiver_filter_id_to_apply);
+  }
 
   AppendLog(QString("Refreshed %1 receivers").arg(receivers.size()));
 }
@@ -3255,6 +3267,13 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
         receiver_id, psd_peak_db_ok ? psd_peak_db : -120.0, psd_floor_db_ok ? psd_floor_db : -120.0,
         snr_ok ? snr_db : 0.0, psd_peak_hz_ok ? psd_peak_offset_hz : 0.0, quality_ok,
         quality_ok ? quality_score : 0.0, signal_ok_ok, signal_ok_ok && signal_ok_flag != 0);
+    if (radar_signal_viz_ != nullptr) {
+      radar_signal_viz_->SetReceiverSignalLevelDb(receiver_id, level_ok ? level_dbfs : -120.0);
+      radar_signal_viz_->SetReceiverIqHealth(
+          receiver_id, psd_peak_db_ok ? psd_peak_db : -120.0, psd_floor_db_ok ? psd_floor_db : -120.0,
+          snr_ok ? snr_db : 0.0, psd_peak_hz_ok ? psd_peak_offset_hz : 0.0, quality_ok,
+          quality_ok ? quality_score : 0.0, signal_ok_ok, signal_ok_ok && signal_ok_flag != 0);
+    }
 
     return;
   }
@@ -3339,6 +3358,12 @@ void MainWindow::OnReceiverEvent(uint32_t receiver_id, int event_kind, double tu
     signal_visualization_->PushVisualizationFrame(receiver_id, waveform, spectrum, peak_hz, peak_strength,
                                                   source, frame_frequency_start_hz,
                                                   frame_frequency_end_hz);
+    if (radar_signal_viz_ != nullptr &&
+        source == SignalVisualizationWidget::SpectrumSource::kReceiverInput) {
+      radar_signal_viz_->PushVisualizationFrame(receiver_id, waveform, spectrum, peak_hz, peak_strength,
+                                                source, frame_frequency_start_hz,
+                                                frame_frequency_end_hz);
+    }
     return;
   }
 
@@ -3365,9 +3390,9 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
   }
   if (!IsSelectedReceiver(receiver_id)) return;
 
-  // Radar view has no spectrogram or waterfall — skip FFT entirely.
-  if (mode_tabs_ != nullptr &&
-      mode_tabs_->currentIndex() == kAirMarineModeTabIndex) return;
+  const bool is_radar_view = (mode_tabs_ != nullptr &&
+                              mode_tabs_->currentIndex() == kAirMarineModeTabIndex);
+  if (is_radar_view && radar_signal_viz_ == nullptr) return;
 
   const bool is_scan_range = (mode_tabs_ != nullptr &&
                                mode_tabs_->currentIndex() == kScanRangeModeTabIndex);
@@ -3423,9 +3448,9 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
     return;
   }
 
-  bool fft_ok = false;
-  const int fft_val = 0;
-  const int spectrum_bins = signal_visualization_->FftSize() / 2;
+  SignalVisualizationWidget* target_viz =
+      is_radar_view ? radar_signal_viz_ : signal_visualization_;
+  const int spectrum_bins = target_viz->FftSize() / 2;
 
   std::vector<double> waveform;
   std::vector<double> spectrum;
@@ -3437,8 +3462,8 @@ void MainWindow::OnIqFrame(uint32_t receiver_id, int sample_rate_hz, const QByte
     return;
   }
 
-  signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_level_db);
-  signal_visualization_->PushVisualizationFrame(
+  target_viz->SetReceiverSignalLevelDb(receiver_id, signal_level_db);
+  target_viz->PushVisualizationFrame(
       receiver_id, waveform, spectrum, 0.0, 0.0,
       SignalVisualizationWidget::SpectrumSource::kReceiverInput, frame_frequency_start_hz,
       frame_frequency_end_hz);
@@ -4668,15 +4693,20 @@ void MainWindow::ApplyScanListStatusEvent(uint32_t receiver_id, const QString& m
   const double signal_db = TokenValue(message, "signal_db").toDouble(&signal_ok);
   const QString state_early = TokenValue(message, "state").trimmed().toLower();
   if (state_early == "open") {
-    if (signal_ok) signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_db);
+    if (signal_ok) {
+      signal_visualization_->SetReceiverSignalLevelDb(receiver_id, signal_db);
+      if (radar_signal_viz_ != nullptr) radar_signal_viz_->SetReceiverSignalLevelDb(receiver_id, signal_db);
+    }
   } else {
     signal_visualization_->ClearReceiverSignalLevelDb(receiver_id);
+    if (radar_signal_viz_ != nullptr) radar_signal_viz_->ClearReceiverSignalLevelDb(receiver_id);
   }
 
   bool threshold_ok = false;
   const double threshold_db = TokenValue(message, "threshold_db").toDouble(&threshold_ok);
   if (threshold_ok) {
     signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id, threshold_db);
+    if (radar_signal_viz_ != nullptr) radar_signal_viz_->SetReceiverSquelchThresholdDb(receiver_id, threshold_db);
   }
   if (!IsSelectedReceiver(receiver_id)) {
     return;
