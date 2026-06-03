@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include <QDateTime>
@@ -75,20 +76,25 @@ void VisibleObjectsWidget::SetSelectedTarget(const QString& id) {
 }
 
 void VisibleObjectsWidget::RefreshTable() {
-  struct Row { RadarTargetUpdate t; };
+  struct Row { RadarTargetUpdate t; double dist_km; };
   std::vector<Row> items;
   items.reserve(rows_.size());
+  const bool have_center = (center_lat_ != 0.0 || center_lon_ != 0.0);
   for (const auto& [_, st] : rows_) {
     if (hide_low_speed_ && st.last.kind == RadarTargetKind::kVessel && st.last.sog < 1.0) continue;
-    items.push_back(Row{st.last});
+    double dist = std::numeric_limits<double>::infinity();
+    if (have_center && std::isfinite(st.last.lat) && std::isfinite(st.last.lon))
+      dist = HaversineKm(center_lat_, center_lon_, st.last.lat, st.last.lon);
+    items.push_back(Row{st.last, dist});
   }
   std::sort(items.begin(), items.end(), [](const Row& a, const Row& b) {
-    return a.t.unix_ms > b.t.unix_ms;
+    return a.dist_km < b.dist_km;
   });
 
   table_->setRowCount(static_cast<int>(items.size()));
   for (int i = 0; i < static_cast<int>(items.size()); ++i) {
-    const auto& t = items[static_cast<size_t>(i)].t;
+    const auto& row = items[static_cast<size_t>(i)];
+    const auto& t = row.t;
 
     table_->setItem(i, 0, new QTableWidgetItem(KindLabel(t.kind)));
 
@@ -97,10 +103,9 @@ void VisibleObjectsWidget::RefreshTable() {
     table_->setItem(i, 1, label_item);
 
     QString dist_str;
-    if (std::isfinite(t.lat) && std::isfinite(t.lon) && (center_lat_ != 0.0 || center_lon_ != 0.0)) {
-      const double km = HaversineKm(center_lat_, center_lon_, t.lat, t.lon);
-      dist_str = km < 10.0 ? QString::number(km, 'f', 2) + " km"
-                           : QString::number(km, 'f', 1) + " km";
+    if (std::isfinite(row.dist_km)) {
+      dist_str = row.dist_km < 10.0 ? QString::number(row.dist_km, 'f', 2) + " km"
+                                    : QString::number(row.dist_km, 'f', 1) + " km";
     }
     table_->setItem(i, 2, new QTableWidgetItem(dist_str));
     table_->setItem(i, 3, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.sog, 'f', 1) : QString()));
