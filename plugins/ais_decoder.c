@@ -10,6 +10,7 @@
  *   1, 2, 3  — Class A Position Report (168 bits)
  *   4        — Base Station Report (168 bits)
  *   5        — Static and Voyage Related Data (426 bits)
+ *   9        — Standard SAR Aircraft Position Report (168 bits)
  *   18       — Standard Class B CS Position Report (168 bits)
  *   19       — Class B CS Extended Position Report (312 bits, includes name)
  *   21       — Aid-to-Navigation Report (272+ bits, includes name)
@@ -20,6 +21,7 @@
  *   AIS_POS     payload: "MMSI:N Lat:D Lon:D SOG:N COG:N"
  *   AIS_STAT    payload: "MMSI:N Name:X CS:X Dest:X"
  *   AIS_STAT24  payload: "MMSI:N Name:X / CS:X"
+ *   AIR-SAR     payload: "MMSI:N Lat:D Lon:D Alt:Nft SOG:N COG:N"
  *   AIS_OTHER   payload: hex bytes
  */
 
@@ -230,6 +232,49 @@ static void decode_static24(const uint8_t* d, uint32_t bytes,
     }
 }
 
+/* Type 9 (Standard SAR Aircraft Position Report) — 168 bits = 21 bytes */
+static void decode_sar_position(const uint8_t* d, uint32_t bytes,
+                                 char* kv, size_t kv_sz,
+                                 char* payload, size_t pay_sz) {
+    uint32_t mmsi    = (uint32_t)ais_bits(d, bytes, 8, 30);
+    int      alt_m   = (int)ais_bits(d, bytes, 38, 12);  /* meters; 4095 = N/A */
+    double   sog     = (double)ais_bits(d, bytes, 50, 10) / 10.0;
+    int64_t  raw_lon = ais_signed(d, bytes, 61, 28);
+    int64_t  raw_lat = ais_signed(d, bytes, 89, 27);
+    double   cog     = (double)ais_bits(d, bytes, 116, 12) / 10.0;
+
+    int lon_na = (raw_lon == 108600000LL);
+    int lat_na = (raw_lat ==  54600000LL);
+    char slat[20], slon[20];
+    if (lat_na) snprintf(slat, sizeof(slat), "N/A");
+    else        snprintf(slat, sizeof(slat), "%.6f", raw_lat / 600000.0);
+    if (lon_na) snprintf(slon, sizeof(slon), "N/A");
+    else        snprintf(slon, sizeof(slon), "%.6f", raw_lon / 600000.0);
+
+    /* 4095 = not available → 0 ft; otherwise convert meters → feet */
+    double alt_ft = (alt_m == 4095) ? 0.0 : alt_m * 3.28084;
+
+    snprintf(kv, kv_sz,
+        "{\"signal_type\":\"AIR-SAR\","
+        "\"msg_type\":\"9\","
+        "\"mmsi\":\"%u\","
+        "\"lat\":\"%s\","
+        "\"lon\":\"%s\","
+        "\"sog\":\"%.1f\","
+        "\"cog\":\"%.1f\","
+        "\"alt_baro\":\"%.0f\"}",
+        mmsi, slat, slon, sog, cog, alt_ft);
+
+    if (lat_na || lon_na)
+        snprintf(payload, pay_sz,
+                 "MMSI:%u Alt:%.0fft SOG:%.1fkn Pos:N/A",
+                 mmsi, alt_ft, sog);
+    else
+        snprintf(payload, pay_sz,
+                 "MMSI:%u Lat:%s Lon:%s Alt:%.0fft SOG:%.1fkn COG:%.1f\xc2\xb0",
+                 mmsi, slat, slon, alt_ft, sog, cog);
+}
+
 /* Type 4 (Base Station Report) — 168 bits */
 static void decode_base_station(const uint8_t* d, uint32_t bytes,
                                   char* kv, size_t kv_sz,
@@ -392,6 +437,11 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         decode_position(frame_buf, data_bytes, msg_type,
                         kv, sizeof(kv), payload, sizeof(payload));
         break;
+    case 9:
+        if (data_bytes < 21) return;  /* 168 bits = 21 bytes */
+        decode_sar_position(frame_buf, data_bytes,
+                            kv, sizeof(kv), payload, sizeof(payload));
+        break;
     case 4:
         if (data_bytes < 21) return;  /* 168 bits = 21 bytes */
         decode_base_station(frame_buf, data_bytes,
@@ -443,6 +493,7 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
 
     const char* sig = (msg_type == 4)  ? "AIS_BSR"
                     : (msg_type == 5)  ? "AIS_STAT"
+                    : (msg_type == 9)  ? "AIR-SAR"
                     : (msg_type == 21) ? "AIS_ATON"
                     : (msg_type == 24) ? "AIS_STAT24"
                     : "AIS_POS";  /* covers 1,2,3,18,19 */

@@ -16,10 +16,11 @@ static std::string ToKey(const QString& id) { return id.toStdString(); }
 
 static QString KindLabel(RadarTargetKind kind) {
   switch (kind) {
-    case RadarTargetKind::kAircraft: return "AIR";
-    case RadarTargetKind::kVessel:   return "SEA";
-    case RadarTargetKind::kFixed:    return "FIX";
-    default:                         return "?";
+    case RadarTargetKind::kAircraft:    return "AIR";
+    case RadarTargetKind::kVessel:      return "SEA";
+    case RadarTargetKind::kFixed:       return "FIX";
+    case RadarTargetKind::kSarAircraft: return "SAR";
+    default:                            return "?";
   }
 }
 

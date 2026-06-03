@@ -99,6 +99,7 @@ class RadarMapWidget : public QWidget {
   QColor label_color_    = QColor("#9be89b");
   QColor vessel_color_   = QColor("#7fffa0");
   QColor aircraft_color_ = QColor("#a0d8ff");
+  QColor sar_color_      = QColor("#ffaa00");
   QColor selected_color_ = QColor("#ff4d4d");
 
   std::uint64_t trail_window_ms_        = 120000;   // aircraft: 2 min

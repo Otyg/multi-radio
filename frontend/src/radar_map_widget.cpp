@@ -361,7 +361,9 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   for (const auto& [_, state] : targets_) {
     const auto& t = state.last;
     if (hide_low_speed_ && t.kind == RadarTargetKind::kVessel && t.sog < 1.0) continue;
-    QColor color = (t.kind == RadarTargetKind::kAircraft) ? aircraft_color_ : vessel_color_;
+    QColor color = (t.kind == RadarTargetKind::kAircraft)    ? aircraft_color_
+                 : (t.kind == RadarTargetKind::kSarAircraft) ? sar_color_
+                 :                                             vessel_color_;
     if (!selected_target_id_.isEmpty() && t.id == selected_target_id_) color = selected_color_;
 
     // Draw recent trail points with fading alpha.
@@ -389,7 +391,9 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
     if (hide_low_speed_ && t.kind == RadarTargetKind::kVessel && t.sog < 1.0) continue;
     const QPointF p = LatLonToXY(t.lat, t.lon, cx, cy, px_per_km);
 
-    QColor color = (t.kind == RadarTargetKind::kAircraft) ? aircraft_color_ : vessel_color_;
+    QColor color = (t.kind == RadarTargetKind::kAircraft)    ? aircraft_color_
+                 : (t.kind == RadarTargetKind::kSarAircraft) ? sar_color_
+                 :                                             vessel_color_;
     if (!selected_target_id_.isEmpty() && t.id == selected_target_id_) color = selected_color_;
 
     painter.setPen(QPen(color, 1));
@@ -401,6 +405,14 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
       poly << QPointF(p.x(), p.y() - 4) << QPointF(p.x() + 4, p.y()) << QPointF(p.x(), p.y() + 4)
            << QPointF(p.x() - 4, p.y());
       painter.drawPolygon(poly);
+    } else if (t.kind == RadarTargetKind::kSarAircraft) {
+      constexpr double kArm = 4.5;
+      painter.setPen(QPen(color, 2.0));
+      painter.setBrush(Qt::NoBrush);
+      painter.drawLine(QPointF(p.x() - kArm, p.y()), QPointF(p.x() + kArm, p.y()));
+      painter.drawLine(QPointF(p.x(), p.y() - kArm), QPointF(p.x(), p.y() + kArm));
+      painter.setPen(QPen(color, 1));
+      painter.setBrush(color);
     } else {
       painter.drawEllipse(p, 3.2, 3.2);
     }
@@ -410,7 +422,8 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
     // vec_km * px_per_km = (sog / ref_sog) * radius / kRingCount
     // (range_km_ cancels: the length is zoom-invariant relative to the rings).
     if (t.sog >= kMinSogForVector) {
-      const double ref_sog = (t.kind == RadarTargetKind::kAircraft) ? 600.0 : 40.0;
+      const double ref_sog = (t.kind == RadarTargetKind::kAircraft ||
+                               t.kind == RadarTargetKind::kSarAircraft) ? 600.0 : 40.0;
       const double vec_km  = (t.sog / ref_sog) * (range_km_ / kRingCount) * 0.5;
       const double cog_rad = t.cog * (M_PI / 180.0);
       const double ex = p.x() + std::sin(cog_rad) * vec_km * px_per_km;

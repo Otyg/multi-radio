@@ -14,6 +14,7 @@ enum class RadarTargetKind {
   kAircraft,
   kVessel,
   kFixed,
+  kSarAircraft,
 };
 
 struct RadarTargetUpdate {

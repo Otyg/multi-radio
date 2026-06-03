@@ -46,9 +46,15 @@ void TargetTracker::Update(const DecodedMessage& msg) {
   // Determine key and kind from signal type / fields.
   std::string key;
   std::string kind;
+  const auto sig_it = msg.normalized_fields.find("signal_type");
+  const bool is_air_sar = (sig_it != msg.normalized_fields.end() &&
+                            sig_it->second == "AIR-SAR");
   if (msg.signal_type == SignalType::kAdsb) {
     key  = FieldStr(msg, "icao");
     kind = "AIR";
+  } else if (is_air_sar) {
+    key  = FieldStr(msg, "mmsi");
+    kind = "AIR-SAR";
   } else if (msg.signal_type == SignalType::kAis) {
     key  = FieldStr(msg, "mmsi");
     kind = "SEA";

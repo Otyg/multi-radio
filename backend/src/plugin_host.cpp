@@ -64,6 +64,7 @@ SignalType SignalTypeFromPluginString(const char* s) {
   /* All AIS sub-types from ais_decoder.c → kAis */
   if (std::strncmp(s, "AIS_", 4)  == 0) return SignalType::kAis;
   if (std::strncmp(s, "ASM_", 4)  == 0) return SignalType::kAis;
+  if (std::strcmp(s, "AIR-SAR")   == 0) return SignalType::kAis;
   if (std::strcmp(s, "ADSB")      == 0) return SignalType::kAdsb;
   if (std::strncmp(s, "ADSB_", 5) == 0) return SignalType::kAdsb;
   if (std::strcmp(s, "DSC")       == 0) return SignalType::kDsc;

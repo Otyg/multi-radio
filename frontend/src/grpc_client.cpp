@@ -349,9 +349,10 @@ void GrpcClient::RadarSnapshotLoop() {
         RadarTargetUpdate u;
         u.id    = QString::fromStdString(t.id());
         u.label = QString::fromStdString(t.label());
-        u.kind  = (t.kind() == "AIR") ? RadarTargetKind::kAircraft
-                : (t.kind() == "SEA") ? RadarTargetKind::kVessel
-                                      : RadarTargetKind::kUnknown;
+        u.kind  = (t.kind() == "AIR")     ? RadarTargetKind::kAircraft
+                : (t.kind() == "SEA")     ? RadarTargetKind::kVessel
+                : (t.kind() == "AIR-SAR") ? RadarTargetKind::kSarAircraft
+                                          : RadarTargetKind::kUnknown;
         u.lat       = t.lat();
         u.lon       = t.lon();
         u.sog       = t.sog_knots();
