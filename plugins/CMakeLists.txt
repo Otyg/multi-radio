@@ -79,20 +79,45 @@ mr_add_plugin(dsc_decoder        dsc_decoder.c)
 # ---------------------------------------------------------------------------
 # adsb_demod: ADS-B demodulator backed by libmodes (dump1090)
 # ---------------------------------------------------------------------------
-# Prefer the system-installed archive; fall back to a locally-built one.
-set(_LIBMODES_CANDIDATES
-    /usr/local/lib/libmodes.a
-    /usr/lib/libmodes.a
-    "$ENV{HOME}/projects/dump1090/libmodes_full.a"
-)
 set(LIBMODES_LIB "")
-foreach(_c IN LISTS _LIBMODES_CANDIDATES)
-  if(EXISTS "${_c}")
-    set(LIBMODES_LIB "${_c}")
-    break()
+set(LIBMODES_INC "")
+
+if(DEFINED MR_LIBMODES_ARCHIVE AND NOT "${MR_LIBMODES_ARCHIVE}" STREQUAL "")
+  set(LIBMODES_LIB "${MR_LIBMODES_ARCHIVE}")
+endif()
+
+if(DEFINED MR_LIBMODES_INCLUDE_DIR AND NOT "${MR_LIBMODES_INCLUDE_DIR}" STREQUAL "")
+  set(LIBMODES_INC "${MR_LIBMODES_INCLUDE_DIR}")
+endif()
+
+if((NOT LIBMODES_LIB OR NOT LIBMODES_INC) AND PkgConfig_FOUND)
+  pkg_check_modules(LIBMODES QUIET IMPORTED_TARGET libmodes)
+  if(LIBMODES_FOUND)
+    if(NOT LIBMODES_LIB AND DEFINED LIBMODES_LINK_LIBRARIES AND NOT "${LIBMODES_LINK_LIBRARIES}" STREQUAL "")
+      list(GET LIBMODES_LINK_LIBRARIES 0 LIBMODES_LIB)
+    endif()
+    if(NOT LIBMODES_INC AND DEFINED LIBMODES_INCLUDE_DIRS AND NOT "${LIBMODES_INCLUDE_DIRS}" STREQUAL "")
+      list(GET LIBMODES_INCLUDE_DIRS 0 LIBMODES_INC)
+    endif()
   endif()
-endforeach()
-find_path(LIBMODES_INC libmodes/libmodes.h PATHS /usr/local/include /usr/include NO_DEFAULT_PATH)
+endif()
+
+if(NOT LIBMODES_LIB)
+  find_library(LIBMODES_LIB NAMES modes libmodes
+    PATHS
+      /usr/local/lib
+      /usr/lib
+      "$ENV{HOME}/projects/dump1090"
+  )
+endif()
+
+if(NOT LIBMODES_INC)
+  find_path(LIBMODES_INC libmodes/libmodes.h
+    PATHS
+      /usr/local/include
+      /usr/include
+  )
+endif()
 
 if(LIBMODES_LIB AND LIBMODES_INC)
   mr_add_plugin(adsb_demod adsb_demod.c)

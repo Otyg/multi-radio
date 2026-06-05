@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(MR_BUILD_SERVER "Build gRPC backend server" ON)
 option(MR_BUILD_FRONTEND "Build Qt frontend" ON)
+option(MR_BUILD_TUI "Build ncurses frontend" ON)
 option(MR_BUILD_TESTS "Build tests" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -18,7 +19,7 @@ if(MR_BUILD_SERVER)
   add_subdirectory(tools)
 endif()
 
-if(MR_BUILD_FRONTEND)
+if(MR_BUILD_FRONTEND OR MR_BUILD_TUI)
   add_subdirectory(frontend)
 endif()
 

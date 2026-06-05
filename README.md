@@ -54,7 +54,7 @@ MR_LOG_DIR=./logs \
 ./build/backend/multi_radio_server
 ```
 
-## Run client
+## Run Qt client
 
 Create `client.ini`:
 
@@ -73,6 +73,35 @@ Optional config path:
 
 ```bash
 MR_CLIENT_CONFIG=/path/to/client.ini ./build/frontend/multi_radio_client
+```
+
+## Run TUI client
+
+The ncurses MVP reuses the same `client.ini` and consumes radar snapshots over gRPC.
+It renders the radar pane through `gnuplot` in terminal text mode, so `gnuplot`
+must be installed on the machine where you run it.
+
+Build with TUI enabled:
+
+```bash
+cmake -S . -B build \
+  -DMR_BUILD_SERVER=ON \
+  -DMR_BUILD_FRONTEND=OFF \
+  -DMR_BUILD_TUI=ON \
+  -DMR_BUILD_TESTS=OFF
+cmake --build build --target multi_radio_tui -j
+```
+
+Run:
+
+```bash
+./build/frontend/multi_radio_tui
+```
+
+Optional center override:
+
+```bash
+./build/frontend/multi_radio_tui --center-lat 57.7 --center-lon 11.9
 ```
 
 ## VDES/ASM IQ Recording
@@ -113,6 +142,40 @@ VCPKG_ROOT=~/vcpkg ./scripts/build_windows_frontend.sh
 
 Artifact:
 - `build-win-frontend/frontend/multi_radio_client.exe`
+
+## Raspberry Pi 2 cross-build with Docker
+
+The repository now includes `docker/raspberry_pi2_armhf/Dockerfile` for an
+armhf cross-build environment targeting Raspberry Pi 2.
+
+Build the image:
+
+```bash
+docker build -t multi-radio-rpi2 -f docker/raspberry_pi2_armhf/Dockerfile .
+```
+
+Run the cross-build:
+
+```bash
+docker run --rm \
+  -v "$PWD":/src \
+  -v "$PWD/out/rpi2":/out \
+  -v /home/maves/projects/dump1090:/deps/dump1090 \
+  multi-radio-rpi2
+```
+
+The container:
+
+- configures and builds in an isolated container-only build directory
+- installs armhf protobuf/gRPC/liquid/FFTW/RTL-SDR dependencies through Debian multiarch
+- cross-builds `rnnoise` into `/opt/rpi2-prefix`
+- builds `dump1090`/`libmodes` from `/deps/dump1090` with `make library` and `make library-install`
+- installs `libmodes` into the armhf prefix under `/opt/rpi2-prefix/usr/local`
+
+Artifacts are copied to:
+
+- `out/rpi2/build`
+- `out/rpi2/prefix`
 
 ## Tests
 

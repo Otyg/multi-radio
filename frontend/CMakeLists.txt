@@ -1,23 +1,80 @@
 if(NOT MR_PROTO_AVAILABLE)
-  message(WARNING "Skipping frontend: proto/gRPC unavailable.")
+  message(WARNING "Skipping frontend targets: proto/gRPC unavailable.")
   return()
 endif()
 
-find_package(Qt6 COMPONENTS Widgets Core Network Concurrent QUIET)
+find_package(Qt6 COMPONENTS Core QUIET)
 if(NOT Qt6_FOUND)
-  message(WARNING "Skipping frontend: Qt6 not found.")
+  message(WARNING "Skipping frontend targets: Qt6 Core not found.")
   return()
 endif()
-find_package(Qt6 COMPONENTS Multimedia QUIET)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)
 set(CMAKE_AUTORCC OFF)
 
+add_library(multi_radio_frontend_common
+  src/grpc_client.cpp
+  include/grpc_client.hpp
+  include/radar_types.hpp
+)
+
+target_include_directories(multi_radio_frontend_common
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(multi_radio_frontend_common
+  PUBLIC
+    Qt6::Core
+    multi_radio::proto
+)
+
+set_target_properties(multi_radio_frontend_common PROPERTIES AUTOMOC ON)
+
+if(MR_BUILD_TUI)
+  find_package(Curses QUIET)
+  if(CURSES_FOUND)
+    add_executable(multi_radio_tui
+      src/tui_main.cpp
+      src/tui_radar_renderer.cpp
+      include/tui_radar_renderer.hpp
+      include/tui_radar_types.hpp
+    )
+
+    target_include_directories(multi_radio_tui
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CURSES_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(multi_radio_tui
+      PRIVATE
+        multi_radio_frontend_common
+        ${CURSES_LIBRARIES}
+        sqlite3
+    )
+
+    set_target_properties(multi_radio_tui PROPERTIES AUTOMOC ON)
+  else()
+    message(WARNING "Skipping ncurses frontend: Curses not found.")
+  endif()
+endif()
+
+if(NOT MR_BUILD_FRONTEND)
+  return()
+endif()
+
+find_package(Qt6 COMPONENTS Widgets Network Concurrent QUIET)
+if(NOT Qt6_Widgets_FOUND OR NOT Qt6_Network_FOUND OR NOT Qt6_Concurrent_FOUND)
+  message(WARNING "Skipping Qt frontend: Qt6 Widgets/Network/Concurrent not found.")
+  return()
+endif()
+find_package(Qt6 COMPONENTS Multimedia QUIET)
+
 add_executable(multi_radio_client
   src/main.cpp
   src/main_window.cpp
-  src/grpc_client.cpp
   src/signal_visualization_widget.cpp
   src/scan_range_visualization_widget.cpp
   src/radar_map_widget.cpp
@@ -25,10 +82,8 @@ add_executable(multi_radio_client
   src/coastline_cache.cpp
   src/coastline_loader.cpp
   include/main_window.hpp
-  include/grpc_client.hpp
   include/signal_visualization_widget.hpp
   include/scan_range_visualization_widget.hpp
-  include/radar_types.hpp
   include/radar_map_widget.hpp
   include/visible_objects_widget.hpp
   include/coastline_cache.hpp
@@ -43,10 +98,9 @@ target_include_directories(multi_radio_client
 target_link_libraries(multi_radio_client
   PRIVATE
     Qt6::Widgets
-    Qt6::Core
     Qt6::Network
     Qt6::Concurrent
-    multi_radio::proto
+    multi_radio_frontend_common
     sqlite3
 )
 
