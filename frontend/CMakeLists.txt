@@ -66,7 +66,7 @@ if(NOT MR_BUILD_FRONTEND)
 endif()
 
 find_package(Qt6 COMPONENTS Widgets Network Concurrent QUIET)
-if(NOT Qt6_Widgets_FOUND OR NOT Qt6_Network_FOUND OR NOT Qt6_Concurrent_FOUND)
+if(NOT Qt6Widgets_FOUND OR NOT Qt6Network_FOUND OR NOT Qt6Concurrent_FOUND)
   message(WARNING "Skipping Qt frontend: Qt6 Widgets/Network/Concurrent not found.")
   return()
 endif()
