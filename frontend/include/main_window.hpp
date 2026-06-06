@@ -265,7 +265,6 @@ class MainWindow : public QMainWindow {
   QStringList     log_buffer_;
   QTimer*         log_flush_timer_ = nullptr;
   SignalVisualizationWidget* signal_visualization_ = nullptr;
-  SignalVisualizationWidget* radar_signal_viz_ = nullptr;
   ScanRangeVisualizationWidget* scan_range_viz_ = nullptr;
 #if MR_HAS_QT_MULTIMEDIA
   QAudioSink* audio_sink_ = nullptr;
