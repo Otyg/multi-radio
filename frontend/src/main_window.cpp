@@ -25,6 +25,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QIODevice>
 #include <QPushButton>
@@ -1240,7 +1241,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   fixed_audio_hpf300_checkbox_    = new QCheckBox("HP 300 Hz",    fixed_tab);
   fixed_audio_lpf3k5_checkbox_   = new QCheckBox("LP 3.5 kHz",  fixed_tab);
   fixed_audio_lpf4k5_checkbox_   = new QCheckBox("LP 4.5 kHz",  fixed_tab);
-  fixed_audio_bpf_voice_checkbox_ = new QCheckBox("BP 300\xe2\x80\x933k Hz", fixed_tab);
+  fixed_audio_bpf_voice_checkbox_ = new QCheckBox("BP 300 \xe2\x80\x93 3k Hz", fixed_tab);
   fixed_audio_hpf300_checkbox_->setToolTip("High-pass filter at 300 Hz \xe2\x80\x94 removes low-frequency hum and rumble");
   fixed_audio_lpf3k5_checkbox_->setToolTip("Low-pass filter at 3.5 kHz \xe2\x80\x94 aggressive double-pass, very steep rolloff (~96 dB/octave)");
   fixed_audio_lpf4k5_checkbox_->setToolTip("Low-pass filter at 4.5 kHz \xe2\x80\x94 order-8 Butterworth, cuts noise above wider speech band");
@@ -1720,94 +1721,14 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   radar_layout->setContentsMargins(8, 8, 8, 8);
   controls_outer->addWidget(radar_group, 0);
 
-  auto* radio_group = new QGroupBox("Radio", air_marine_controls);
-  auto* radio_layout = new QVBoxLayout(radio_group);
-  radio_layout->setContentsMargins(8, 8, 8, 8);
-  controls_outer->addWidget(radio_group, 1);
-
   // Radar-view radio scanner (separate from SCAN_LIST).
   {
-    auto* radar_controls_row = new QHBoxLayout();
-    radar_scan_list_monitor_checkbox_ = new QCheckBox("Monitor mode", radio_group);
-    auto* radar_default_squelch_label = new QLabel("Default squelch", radio_group);
-    radar_scan_list_default_squelch_spin_ = new QDoubleSpinBox(radio_group);
-    radar_scan_list_default_squelch_spin_->setDecimals(1);
-    radar_scan_list_default_squelch_spin_->setRange(-120.0, 0.0);
-    radar_scan_list_default_squelch_spin_->setSingleStep(1.0);
-    radar_scan_list_default_squelch_spin_->setSuffix(" dB");
-    radar_scan_list_default_squelch_spin_->setValue(kDefaultScanListSquelchDb);
-    radar_controls_row->addWidget(radar_scan_list_monitor_checkbox_);
-    radar_controls_row->addSpacing(12);
-    radar_controls_row->addWidget(radar_default_squelch_label);
-    radar_controls_row->addWidget(radar_scan_list_default_squelch_spin_);
-    radar_controls_row->addStretch(1);
-    radio_layout->addLayout(radar_controls_row);
-
-    auto* radar_actions = new QHBoxLayout();
-    auto* radar_add_button = new QPushButton("Add", radio_group);
-    auto* radar_import_button = new QPushButton("Import CSV", radio_group);
-    auto* radar_clear_button = new QPushButton("Clear", radio_group);
-    radar_actions->addWidget(radar_add_button);
-    radar_actions->addWidget(radar_import_button);
-    radar_actions->addWidget(radar_clear_button);
-    radar_actions->addStretch(1);
-    radio_layout->addLayout(radar_actions);
-
-    radar_scan_list_grid_widget_ = new QWidget(radio_group);
-    radar_scan_list_grid_layout_ = new QGridLayout(radar_scan_list_grid_widget_);
-    radar_scan_list_grid_layout_->setHorizontalSpacing(4);
-    radar_scan_list_grid_layout_->setVerticalSpacing(4);
-    radar_scan_list_scroll_area_ = new QScrollArea(radio_group);
-    radar_scan_list_scroll_area_->setWidgetResizable(true);
-    radar_scan_list_scroll_area_->setWidget(radar_scan_list_grid_widget_);
-    radio_layout->addWidget(radar_scan_list_scroll_area_, 1);
+    auto* radar_hint = new QLabel("Use Radar settings... to add, import, or edit channels.", radar_group);
+    radar_hint->setWordWrap(true);
+    radar_hint->setStyleSheet("color: #B7C4D6;");
+    radar_layout->addRow(radar_hint);
 
     LoadRadarScanListConfigFromSettings();
-    RefreshRadarScanListChannelCards();
-
-    connect(radar_add_button, &QPushButton::clicked, this, &MainWindow::AddRadarScanListChannel);
-    connect(radar_import_button, &QPushButton::clicked, this, &MainWindow::ImportRadarScanListCsv);
-    connect(radar_scan_list_monitor_checkbox_, &QCheckBox::toggled, this, [this](bool /*enabled*/) {
-      SaveRadarScanListConfigToSettings();
-      if (receiver_combo_->currentIndex() >= 0) {
-        ApplyModeAndConfig();
-      }
-    });
-    connect(radar_scan_list_default_squelch_spin_,
-            static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged), this,
-            [this](double value) {
-              SaveRadarScanListConfigToSettings();
-              RefreshRadarScanListChannelCards();
-              if (receiver_combo_->currentIndex() >= 0) {
-                const uint32_t receiver_id =
-                    static_cast<uint32_t>(receiver_combo_->currentData().toUInt());
-                bool use_default_for_visual = true;
-                if (radar_active_scan_list_channel_index_ >= 0 &&
-                    static_cast<size_t>(radar_active_scan_list_channel_index_) <
-                        radar_scan_list_channels_.size()) {
-                  use_default_for_visual = radar_scan_list_channels_[static_cast<size_t>(
-                                                radar_active_scan_list_channel_index_)]
-                                               .use_default_squelch;
-                }
-                if (use_default_for_visual) {
-                  signal_visualization_->SetReceiverSquelchThresholdDb(receiver_id, value);
-                }
-              }
-            });
-    connect(radar_scan_list_default_squelch_spin_, &QDoubleSpinBox::editingFinished, this, [this]() {
-      if (receiver_combo_->currentIndex() >= 0) {
-        ApplyModeAndConfig();
-      }
-    });
-    connect(radar_clear_button, &QPushButton::clicked, this, [this]() {
-      radar_scan_list_channels_.clear();
-      radar_active_scan_list_channel_index_ = -1;
-      radar_active_scan_list_channel_state_ = ScanListChannelState::kIdle;
-      radar_scan_channel_heat_.clear();
-      SaveRadarScanListConfigToSettings();
-      RefreshRadarScanListChannelCards();
-      if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
-    });
   }
 
   signal_filter_combo_ = new QComboBox(radar_group);
@@ -1817,17 +1738,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   signal_filter_combo_->addItem("SIGNAL_TYPE_DSC");
   receiver_filter_combo_ = new QComboBox(radar_group);
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
-  minutes_filter_spin_ = new QSpinBox(radar_group);
-  minutes_filter_spin_->setRange(1, 240);
-  minutes_filter_spin_->setValue(30);
-  radar_layout->addRow(new QLabel("Radar updates come from the active scan-list channels.", radar_group));
-  radar_layout->addRow(new QLabel("Tip: add an AIS Dual channel (around 162 MHz) to feed the map.", radar_group));
-  auto* signal_minutes_row = new QWidget(radar_group);
-  auto* signal_minutes_layout = new QHBoxLayout(signal_minutes_row);
-  signal_minutes_layout->setContentsMargins(0, 0, 0, 0);
-  signal_minutes_layout->addWidget(signal_filter_combo_);
-  signal_minutes_layout->addWidget(minutes_filter_spin_);
-  radar_layout->addRow("Signal / Last minutes", signal_minutes_row);
+  radar_layout->addRow("Signal type", signal_filter_combo_);
   // Single-receiver assumption: keep receiver filter internal but don't expose it in UI.
   receiver_filter_combo_->setVisible(false);
 
@@ -1988,6 +1899,65 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       outer->addLayout(layout);
       outer->addWidget(new QLabel("Fixed objects (JSON):", &dialog));
       outer->addWidget(fixed_editor, 1);
+
+      auto* channel_box = new QGroupBox("Radar channels", &dialog);
+      auto* channel_box_layout = new QVBoxLayout(channel_box);
+      auto* channel_actions = new QHBoxLayout();
+      auto* channel_add_button = new QPushButton("Add", channel_box);
+      auto* channel_import_button = new QPushButton("Import CSV", channel_box);
+      auto* channel_clear_button = new QPushButton("Clear", channel_box);
+      channel_actions->addWidget(channel_add_button);
+      channel_actions->addWidget(channel_import_button);
+      channel_actions->addWidget(channel_clear_button);
+      channel_actions->addStretch(1);
+      channel_box_layout->addLayout(channel_actions);
+
+      auto* channel_list = new QListWidget(channel_box);
+      channel_list->setAlternatingRowColors(true);
+      channel_list->setMinimumHeight(180);
+      channel_box_layout->addWidget(channel_list, 1);
+
+      auto refresh_channel_list = [this, channel_list]() {
+        channel_list->clear();
+        for (size_t idx = 0; idx < radar_scan_list_channels_.size(); ++idx) {
+          const auto& ch = radar_scan_list_channels_[idx];
+          const QString label = ch.label.trimmed().isEmpty() ? QString("Kanal %1").arg(idx + 1)
+                                                             : ch.label.trimmed();
+          const QString freq = ch.frequency_mhz > 0.0 ? QString("%1 MHz").arg(ch.frequency_mhz, 0, 'f', 3)
+                                                     : "Frekvens ej satt";
+          auto* item = new QListWidgetItem(QString("%1 — %2").arg(label).arg(freq));
+          item->setData(Qt::UserRole, static_cast<int>(idx));
+          channel_list->addItem(item);
+        }
+      };
+      refresh_channel_list();
+      connect(channel_list, &QListWidget::itemDoubleClicked, this,
+              [this, &dialog, refresh_channel_list](QListWidgetItem* item) {
+                const int index = item->data(Qt::UserRole).toInt();
+                ConfigureRadarScanListChannel(index);
+                refresh_channel_list();
+              });
+      connect(channel_add_button, &QPushButton::clicked, this,
+              [this, refresh_channel_list]() {
+                AddRadarScanListChannel();
+                refresh_channel_list();
+              });
+      connect(channel_import_button, &QPushButton::clicked, this,
+              [this, refresh_channel_list]() {
+                ImportRadarScanListCsv();
+                refresh_channel_list();
+              });
+      connect(channel_clear_button, &QPushButton::clicked, this,
+              [this, refresh_channel_list]() {
+                radar_scan_list_channels_.clear();
+                radar_active_scan_list_channel_index_ = -1;
+                radar_active_scan_list_channel_state_ = ScanListChannelState::kIdle;
+                radar_scan_channel_heat_.clear();
+                SaveRadarScanListConfigToSettings();
+                refresh_channel_list();
+                if (receiver_combo_->currentIndex() >= 0) ApplyModeAndConfig();
+              });
+      outer->addWidget(channel_box, 1);
 
       auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
       outer->addWidget(buttons);
@@ -2195,12 +2165,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
                   .arg(source == SignalVisualizationWidget::SpectrumSource::kReceiverInput
                            ? "receiver"
                            : "demodulated"));
-  });
-  connect(minutes_filter_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
-    decoded_table_->setRowCount(0);
-    for (const auto& row : all_rows_) {
-      AddMessageRow(row);
-    }
   });
   connect(dwell_ms_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
     if (scan_range_viz_) scan_range_viz_->SetDwellMs(value);
@@ -3015,10 +2979,10 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_center_notch_width_hz(static_cast<uint32_t>(center_notch_width_spin_->value()));
   config.set_lo_offset_enabled(lo_offset_checkbox_->isChecked());
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
-  const QCheckBox* active_monitor_checkbox =
-      radar_scan_list_active ? radar_scan_list_monitor_checkbox_ : scan_list_monitor_checkbox_;
-  config.set_scan_list_monitor_mode(
-      active_monitor_checkbox != nullptr && active_monitor_checkbox->isChecked());
+  const bool monitor_mode = !radar_scan_list_active
+      ? (scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked())
+      : false;
+  config.set_scan_list_monitor_mode(monitor_mode);
   const int locked_index = radar_scan_list_active ? radar_frozen_scan_channel_index_ : frozen_scan_channel_index_;
   config.set_scan_list_channel_locked(locked_index >= 0);
   config.set_gmsk_baud_rate(gmsk_baud_rate_spin_ ? static_cast<uint32_t>(gmsk_baud_rate_spin_->value()) : 9600u);
@@ -4112,67 +4076,29 @@ void MainWindow::RefreshRadarScanListChannelCards() {
     if (button == nullptr) continue;
     const int index = static_cast<int>(idx);
     const auto& ch = radar_scan_list_channels_[static_cast<size_t>(index)];
-    const QString label = ch.label.trimmed().isEmpty() ? QString("Kanal %1").arg(index + 1) : ch.label.trimmed();
-    const QString freq = ch.frequency_mhz > 0.0 ? QString("%1 MHz").arg(ch.frequency_mhz, 0, 'f', 3) : "Frekvens ej satt";
-    button->setText(QString("%1\n%2").arg(label).arg(freq));
-    constexpr auto kBase =
-        "QPushButton { text-align: left; padding: 6px 10px; border-radius: 6px; ";
-    if (radar_frozen_scan_channel_index_ == index) {
-      button->setStyleSheet(QString(kBase) +
-                            "border: 2px solid #00BCD4; background: #0B1018; color: #80DEEA; }");
-      continue;
-    }
-    if (radar_active_scan_list_channel_index_ == index &&
-        radar_active_scan_list_channel_state_ == ScanListChannelState::kSquelchOpen) {
-      button->setStyleSheet(QString(kBase) +
-                            "border: 2px solid #2E7D32; background: #0B1018; color: #5CDB95; }");
-      continue;
-    }
-    double heat = 0.0;
-    if (index >= 0 && static_cast<size_t>(index) < radar_scan_channel_heat_.size()) {
-      heat = radar_scan_channel_heat_[static_cast<size_t>(index)].value;
-    }
-    const double t = std::sqrt(std::clamp(heat, 0.0, 1.0));
-    const auto lerp = [](int a, int b, double f) {
-      return static_cast<int>(a + f * (b - a));
-    };
-    const auto toHex = [](int r, int g, int b) {
-      return QString("#%1%2%3").arg(r, 2, 16, QChar('0'))
-                               .arg(g, 2, 16, QChar('0'))
-                               .arg(b, 2, 16, QChar('0'));
-    };
-    const QString text_color = toHex(lerp(22,92,t), lerp(56,219,t), lerp(3,149,t));
-    const QString bg_color = toHex(lerp(11,13,t), lerp(16,32,t), lerp(24,18,t));
-    const QString border_color = toHex(lerp(30,46,t), lerp(42,125,t), lerp(56,50,t));
-    const int border_px = t > 0.01 ? 2 : 1;
-    if (radar_active_scan_list_channel_index_ == index &&
-        radar_active_scan_list_channel_state_ == ScanListChannelState::kSquelchClosed) {
-      button->setStyleSheet(QString(kBase) +
-                            QString("border: 2px solid #EF6C00; background: %1; color: %2; }")
-                                .arg(bg_color)
-                                .arg(text_color));
-      continue;
-    }
-    button->setStyleSheet(QString(kBase) +
-                          QString("border: %1px solid %2; background: %3; color: %4; }")
-                              .arg(border_px)
-                              .arg(border_color)
-                              .arg(bg_color)
-                              .arg(text_color));
+    const QString label = ch.label.trimmed().isEmpty() ? QString("Kanal %1").arg(index + 1)
+                                                     : ch.label.trimmed();
+    const QString freq = ch.frequency_mhz > 0.0 ? QString("%1 MHz").arg(ch.frequency_mhz, 0, 'f', 3)
+                                                : "Frekvens ej satt";
+    button->setText(QString("%1 — %2").arg(label).arg(freq));
+    button->setStyleSheet(
+        "QPushButton { text-align: left; padding: 6px 10px; border-radius: 6px; "
+        "border: 1px solid #3A475B; background: #0F1725; color: #E5EEF9; }"
+        "QPushButton:hover { background: #182334; }"
+        "QPushButton:pressed { background: #111827; }");
+    button->setFixedHeight(40);
   }
 
-  // Two-column layout.
+  // Single-column list for a simpler row-based appearance.
   for (int i = radar_scan_list_grid_layout_->count() - 1; i >= 0; --i) {
     auto* item = radar_scan_list_grid_layout_->itemAt(i);
     if (item && item->widget()) {
       radar_scan_list_grid_layout_->removeWidget(item->widget());
     }
   }
-  constexpr int kColumns = 2;
   for (size_t idx = 0; idx < radar_scan_list_channel_buttons_.size(); ++idx) {
-    const int row = static_cast<int>(idx) / kColumns;
-    const int col = static_cast<int>(idx) % kColumns;
-    radar_scan_list_grid_layout_->addWidget(radar_scan_list_channel_buttons_[idx], row, col, 1, 1);
+    radar_scan_list_grid_layout_->addWidget(radar_scan_list_channel_buttons_[idx],
+                                            static_cast<int>(idx), 0, 1, 1);
   }
 }
 
@@ -4332,10 +4258,14 @@ void MainWindow::ConfigureRadarScanListChannel(int index) {
   squelch_spin->setSingleStep(1.0);
   squelch_spin->setSuffix(" dB");
   squelch_spin->setValue(channel.squelch_threshold_db);
+  const double radar_default_squelch_db =
+      (radar_scan_list_default_squelch_spin_ != nullptr)
+          ? radar_scan_list_default_squelch_spin_->value()
+          : kDefaultScanListSquelchDb;
   auto* use_default_squelch_checkbox = new QCheckBox("Use default squelch", &dialog);
   use_default_squelch_checkbox->setChecked(channel.use_default_squelch);
-  if (channel.use_default_squelch && radar_scan_list_default_squelch_spin_ != nullptr) {
-    squelch_spin->setValue(radar_scan_list_default_squelch_spin_->value());
+  if (channel.use_default_squelch) {
+    squelch_spin->setValue(radar_default_squelch_db);
   }
   squelch_spin->setEnabled(!channel.use_default_squelch);
 
@@ -4357,12 +4287,13 @@ void MainWindow::ConfigureRadarScanListChannel(int index) {
   connect(modulation_combo, &QComboBox::currentTextChanged, this, [bandwidth_spin](const QString& text) {
     bandwidth_spin->setValue(DefaultBandwidthHzForModulation(ModulationFromText(text)));
   });
-  connect(use_default_squelch_checkbox, &QCheckBox::toggled, this, [this, squelch_spin](bool checked) {
-    squelch_spin->setEnabled(!checked);
-    if (checked && radar_scan_list_default_squelch_spin_ != nullptr) {
-      squelch_spin->setValue(radar_scan_list_default_squelch_spin_->value());
-    }
-  });
+  connect(use_default_squelch_checkbox, &QCheckBox::toggled, this,
+          [this, squelch_spin, radar_default_squelch_db](bool checked) {
+            squelch_spin->setEnabled(!checked);
+            if (checked) {
+              squelch_spin->setValue(radar_default_squelch_db);
+            }
+          });
 
   layout->addRow("Label", label_edit);
   layout->addRow("Frequency", freq_spin);
@@ -4392,8 +4323,8 @@ void MainWindow::ConfigureRadarScanListChannel(int index) {
   channel.modulation = ModulationFromText(modulation_combo->currentText());
   channel.bandwidth_hz = bandwidth_spin->value();
   channel.use_default_squelch = use_default_squelch_checkbox->isChecked();
-  if (channel.use_default_squelch && radar_scan_list_default_squelch_spin_ != nullptr) {
-    channel.squelch_threshold_db = radar_scan_list_default_squelch_spin_->value();
+  if (channel.use_default_squelch) {
+    channel.squelch_threshold_db = radar_default_squelch_db;
   } else {
     channel.squelch_threshold_db = squelch_spin->value();
   }
@@ -4426,9 +4357,7 @@ void MainWindow::AddRadarScanListChannel() {
   channel.modulation = v1::MODULATION_NFM;
   channel.bandwidth_hz = DefaultBandwidthHzForModulation(channel.modulation);
   channel.use_default_squelch = true;
-  if (radar_scan_list_default_squelch_spin_ != nullptr) {
-    channel.squelch_threshold_db = radar_scan_list_default_squelch_spin_->value();
-  }
+  channel.squelch_threshold_db = kDefaultScanListSquelchDb;
   radar_scan_list_channels_.push_back(channel);
   SaveRadarScanListConfigToSettings();
   RefreshRadarScanListChannelCards();
@@ -5563,8 +5492,8 @@ bool MainWindow::PassesFilter(const MessageRow& row) const {
     }
   }
 
-  const int minutes = minutes_filter_spin_->value();
-  const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-minutes * 60);
+  constexpr int kDefaultMessageAgeMinutes = 30;
+  const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-kDefaultMessageAgeMinutes * 60);
   return row.timestamp >= cutoff;
 }
 

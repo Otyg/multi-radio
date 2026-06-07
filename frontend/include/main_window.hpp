@@ -213,7 +213,6 @@ class MainWindow : public QMainWindow {
   QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* spectrum_source_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;
-  QSpinBox* minutes_filter_spin_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
   std::unordered_map<std::string, RadarFixedObject> bsr_fixed_objects_;
