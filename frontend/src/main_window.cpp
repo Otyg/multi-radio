@@ -1824,7 +1824,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     }
     if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(hide_low_speed);
 
-    auto* radar_settings_button = new QPushButton("📡", radar_group);
+    auto* radar_settings_button = new QPushButton("Settings", radar_group);
     auto* show_labels_checkbox = new QCheckBox("✆", radar_group);
     auto* show_fixed_names_checkbox = new QCheckBox("⌘", radar_group);
     auto* hide_low_speed_checkbox = new QCheckBox("⚓", radar_group);
@@ -1869,6 +1869,18 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
                                           show_fixed_names_checkbox->isChecked(),
                                           checked);
             });
+
+    const QString kCardStyle =
+        "QPushButton, QCheckBox { text-align: left; padding: 6px 10px; border-radius: 6px; "
+        "border: 1px solid #2E7D32; background: #0B1018; color: #8FA7BE; }"
+        "QPushButton:hover { background: #121E2E; }"
+        "QPushButton:pressed { background: #0A111B; }"
+        "QCheckBox:checked { color: #5CDB95; }"
+        "QCheckBox:unchecked { color: #8FA7BE; }";
+    radar_settings_button->setStyleSheet(kCardStyle);
+    show_labels_checkbox->setStyleSheet(kCardStyle);
+    show_fixed_names_checkbox->setStyleSheet(kCardStyle);
+    hide_low_speed_checkbox->setStyleSheet(kCardStyle);
 
     auto* visibility_row = new QWidget(radar_group);
     auto* visibility_layout = new QHBoxLayout(visibility_row);
