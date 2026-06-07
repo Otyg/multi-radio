@@ -1723,22 +1723,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   // Radar-view radio scanner (separate from SCAN_LIST).
   {
-    auto* radar_hint = new QLabel("Use Radar settings... to add, import, or edit channels.", radar_group);
-    radar_hint->setWordWrap(true);
-    radar_hint->setStyleSheet("color: #B7C4D6;");
-    radar_layout->addRow(radar_hint);
-
     LoadRadarScanListConfigFromSettings();
   }
 
-  signal_filter_combo_ = new QComboBox(radar_group);
-  signal_filter_combo_->addItem("ALL");
-  signal_filter_combo_->addItem("SIGNAL_TYPE_AIS");
-  signal_filter_combo_->addItem("SIGNAL_TYPE_ADSB");
-  signal_filter_combo_->addItem("SIGNAL_TYPE_DSC");
   receiver_filter_combo_ = new QComboBox(radar_group);
   receiver_filter_combo_->addItem("ALL", QVariant::fromValue(-1));
-  radar_layout->addRow("Signal type", signal_filter_combo_);
   // Single-receiver assumption: keep receiver filter internal but don't expose it in UI.
   receiver_filter_combo_->setVisible(false);
 
@@ -1835,8 +1824,61 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     }
     if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(hide_low_speed);
 
-    auto* radar_settings_button = new QPushButton("Radar settings...", radar_group);
+    auto* radar_settings_button = new QPushButton("📡", radar_group);
+    auto* show_labels_checkbox = new QCheckBox("✆", radar_group);
+    auto* show_fixed_names_checkbox = new QCheckBox("⌘", radar_group);
+    auto* hide_low_speed_checkbox = new QCheckBox("⚓", radar_group);
+    show_labels_checkbox->setChecked(show_labels);
+    show_fixed_names_checkbox->setChecked(show_fixed_names);
+    hide_low_speed_checkbox->setChecked(hide_low_speed);
+
+    auto apply_radar_view_visibility = [this](bool labels, bool fixed_names, bool hide_low_speed) {
+      if (radar_widget_ != nullptr) {
+        radar_widget_->SetShowLabels(labels);
+        radar_widget_->SetShowFixedNames(fixed_names);
+        radar_widget_->SetHideLowSpeed(hide_low_speed);
+      }
+      if (visible_objects_widget_ != nullptr) {
+        visible_objects_widget_->SetHideLowSpeed(hide_low_speed);
+      }
+      QSettings out("multi-radio", "multi-radio-client");
+      out.beginGroup("radar_view");
+      out.setValue("show_labels", labels);
+      out.setValue("show_fixed_names", fixed_names);
+      out.setValue("hide_low_speed", hide_low_speed);
+      out.endGroup();
+    };
+    connect(show_labels_checkbox, &QCheckBox::toggled, this,
+            [this, apply_radar_view_visibility, show_labels_checkbox,
+             show_fixed_names_checkbox, hide_low_speed_checkbox](bool checked) {
+              apply_radar_view_visibility(checked,
+                                          show_fixed_names_checkbox->isChecked(),
+                                          hide_low_speed_checkbox->isChecked());
+            });
+    connect(show_fixed_names_checkbox, &QCheckBox::toggled, this,
+            [this, apply_radar_view_visibility, show_labels_checkbox,
+             show_fixed_names_checkbox, hide_low_speed_checkbox](bool checked) {
+              apply_radar_view_visibility(show_labels_checkbox->isChecked(),
+                                          checked,
+                                          hide_low_speed_checkbox->isChecked());
+            });
+    connect(hide_low_speed_checkbox, &QCheckBox::toggled, this,
+            [this, apply_radar_view_visibility, show_labels_checkbox,
+             show_fixed_names_checkbox, hide_low_speed_checkbox](bool checked) {
+              apply_radar_view_visibility(show_labels_checkbox->isChecked(),
+                                          show_fixed_names_checkbox->isChecked(),
+                                          checked);
+            });
+
+    auto* visibility_row = new QWidget(radar_group);
+    auto* visibility_layout = new QHBoxLayout(visibility_row);
+    visibility_layout->setContentsMargins(0, 0, 0, 0);
+    visibility_layout->addWidget(show_labels_checkbox);
+    visibility_layout->addWidget(show_fixed_names_checkbox);
+    visibility_layout->addWidget(hide_low_speed_checkbox);
+    visibility_layout->addStretch(1);
     radar_layout->addRow(radar_settings_button);
+    radar_layout->addRow(visibility_row);
     connect(radar_settings_button, &QPushButton::clicked, this, [this]() {
       if (radar_widget_ == nullptr) return;
 
@@ -1844,9 +1886,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       s.beginGroup("radar_view");
       const double cur_lat = s.value("center_lat", 0.0).toDouble();
       const double cur_lon = s.value("center_lon", 0.0).toDouble();
-      const bool show_labels = s.value("show_labels", false).toBool();
-      const bool show_fixed_names = s.value("show_fixed_names", true).toBool();
-      const bool hide_low_speed = s.value("hide_low_speed", false).toBool();
       const double range_km = std::clamp(s.value("range_km", 10.0).toDouble(), 0.2, 500.0);
       const double trail_s = std::clamp(s.value("trail_seconds", 120.0).toDouble(), 5.0, 3600.0);
       const QString fixed_json = s.value("fixed_objects_json", "[]").toString();
@@ -1878,13 +1917,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       trail_spin->setValue(trail_s);
       trail_spin->setSuffix(" s");
 
-      auto* show_labels_cb = new QCheckBox("Show labels", &dialog);
-      show_labels_cb->setChecked(show_labels);
-      auto* show_fixed_names_cb = new QCheckBox("Show fixed names", &dialog);
-      show_fixed_names_cb->setChecked(show_fixed_names);
-      auto* hide_low_speed_cb = new QCheckBox("Hide low speed (<1 kn)", &dialog);
-      hide_low_speed_cb->setChecked(hide_low_speed);
-
       auto* fixed_editor = new QPlainTextEdit(&dialog);
       fixed_editor->setPlainText(fixed_json);
 
@@ -1892,9 +1924,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       layout->addRow("Center longitude", lon_spin);
       layout->addRow("Range", range_spin);
       layout->addRow("Trail window", trail_spin);
-      layout->addRow(show_labels_cb);
-      layout->addRow(show_fixed_names_cb);
-      layout->addRow(hide_low_speed_cb);
 
       outer->addLayout(layout);
       outer->addWidget(new QLabel("Fixed objects (JSON):", &dialog));
@@ -1969,9 +1998,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       const double lon = lon_spin->value();
       const double new_range_km = range_spin->value();
       const double new_trail_s = trail_spin->value();
-      const bool new_show_labels = show_labels_cb->isChecked();
-      const bool new_show_fixed_names = show_fixed_names_cb->isChecked();
-      const bool new_hide_low_speed = hide_low_speed_cb->isChecked();
       const QString json = fixed_editor->toPlainText().trimmed();
       const auto doc = QJsonDocument::fromJson(json.toUtf8());
       if (!doc.isArray()) {
@@ -1985,19 +2011,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       out.setValue("center_lon", lon);
       out.setValue("range_km", new_range_km);
       out.setValue("trail_seconds", new_trail_s);
-      out.setValue("show_labels", new_show_labels);
-      out.setValue("show_fixed_names", new_show_fixed_names);
-      out.setValue("hide_low_speed", new_hide_low_speed);
       out.setValue("fixed_objects_json", json);
       out.endGroup();
       radar_widget_->SetCenter(lat, lon);
       radar_widget_->SetRangeKm(new_range_km);
       radar_widget_->SetTrailWindowSeconds(new_trail_s);
-      radar_widget_->SetShowLabels(new_show_labels);
-      radar_widget_->SetShowFixedNames(new_show_fixed_names);
-      radar_widget_->SetHideLowSpeed(new_hide_low_speed);
       RebuildFixedObjects();
-      if (visible_objects_widget_ != nullptr) visible_objects_widget_->SetHideLowSpeed(new_hide_low_speed);
     });
   }
 
@@ -2139,12 +2158,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   connect(visualization_settings_button, &QPushButton::clicked, this,
           &MainWindow::OpenVisualizationSettingsDialog);
 
-  connect(signal_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-    if (decoded_table_ != nullptr) decoded_table_->setRowCount(0);
-    for (const auto& row : all_rows_) {
-      AddMessageRow(row);
-    }
-  });
   connect(receiver_filter_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
     if (decoded_table_ != nullptr) decoded_table_->setRowCount(0);
     for (const auto& row : all_rows_) {
@@ -5480,11 +5493,6 @@ void MainWindow::AddMessageRow(const MessageRow& row) {
 }
 
 bool MainWindow::PassesFilter(const MessageRow& row) const {
-  const QString signal_filter = signal_filter_combo_->currentText();
-  if (signal_filter != "ALL" && row.signal_type != signal_filter) {
-    return false;
-  }
-
   if (receiver_filter_combo_ != nullptr && receiver_filter_combo_->currentIndex() >= 0) {
     const int receiver_filter = receiver_filter_combo_->currentData().toInt();
     if (receiver_filter >= 0 && static_cast<int>(row.receiver_id) != receiver_filter) {

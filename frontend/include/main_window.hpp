@@ -210,7 +210,6 @@ class MainWindow : public QMainWindow {
   QSpinBox* lo_offset_spin_ = nullptr;
   QSpinBox* ppm_correction_spin_ = nullptr;
 
-  QComboBox* signal_filter_combo_ = nullptr;
   QComboBox* spectrum_source_combo_ = nullptr;
   QComboBox* receiver_filter_combo_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
