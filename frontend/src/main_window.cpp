@@ -3003,9 +3003,9 @@ bool MainWindow::ApplyModeAndConfigForReceiver(uint32_t receiver_id, QString* er
   config.set_center_notch_width_hz(static_cast<uint32_t>(center_notch_width_spin_->value()));
   config.set_lo_offset_enabled(lo_offset_checkbox_->isChecked());
   config.set_lo_offset_hz(static_cast<int32_t>(lo_offset_spin_->value()));
-  const bool monitor_mode = radar_scan_list_active
-      ? true
-      : (scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked());
+  const bool monitor_mode = !radar_scan_list_active
+      ? (scan_list_monitor_checkbox_ != nullptr && scan_list_monitor_checkbox_->isChecked())
+      : false;
   config.set_scan_list_monitor_mode(monitor_mode);
   const int locked_index = radar_scan_list_active ? radar_frozen_scan_channel_index_ : frozen_scan_channel_index_;
   config.set_scan_list_channel_locked(locked_index >= 0);
