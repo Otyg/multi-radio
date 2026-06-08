@@ -1,0 +1,34 @@
+# Example backend config for multi_radio_server / multi_radio_radio
+
+# Default (thick) backend runtime
+MR_BIND_ADDRESS=0.0.0.0:50051
+MR_AUTH_TOKEN=multi-radio-dev-token
+MR_PLUGIN_DIR=./backend/plugins
+MR_LOG_DIR=./logs
+MR_POSITION_BIND_ADDRESS=
+MR_POSITION_AUTH_TOKEN=
+
+# Thin/thick split settings
+MR_BACKEND_MODE=local
+MR_REMOTE_DSP_HOST=
+MR_IQ_TRANSPORT=grpc_stream
+
+# ------------------------------------------------------------------
+# Example: use the thin SDR-side backend instead of the thick one
+# ------------------------------------------------------------------
+# MR_BIND_ADDRESS=0.0.0.0:50051
+# MR_AUTH_TOKEN=multi-radio-dev-token
+# MR_PLUGIN_DIR=./backend/plugins
+# MR_LOG_DIR=./logs
+# MR_POSITION_BIND_ADDRESS=
+# MR_POSITION_AUTH_TOKEN=
+# MR_BACKEND_MODE=remote
+# MR_REMOTE_DSP_HOST=192.168.1.50:50051
+# MR_IQ_TRANSPORT=grpc_stream
+
+# To build only the thin backend target:
+#   cmake -S . -B build -DMR_BUILD_SERVER=OFF -DMR_BUILD_RADIO=ON -DMR_BUILD_FRONTEND=OFF -DMR_BUILD_TUI=OFF -DMR_BUILD_TESTS=OFF
+#   cmake --build build --target multi_radio_radio
+#
+# Then run it with this config file:
+#   MR_BACKEND_CONFIG=/path/to/backend.ini ./build/backend/multi_radio_radio
