@@ -64,7 +64,9 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
 
   scroll_area_ = new QScrollArea(this);
   scroll_area_->setFrameShape(QFrame::NoFrame);
+  scroll_area_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll_area_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   scroll_area_->setWidgetResizable(true);
 
   cards_container_ = new QWidget(scroll_area_);
@@ -72,7 +74,7 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
   cards_layout_->setContentsMargins(0, 0, 0, 0);
   cards_layout_->setHorizontalSpacing(4);
   cards_layout_->setVerticalSpacing(2);
-  cards_container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
+  cards_container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
 
   scroll_area_->setWidget(cards_container_);
   layout->addWidget(scroll_area_);
