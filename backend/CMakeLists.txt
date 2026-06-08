@@ -58,6 +58,8 @@ endif()
 
 add_library(multi_radio_core
   src/types.cpp
+  src/backend_config.cpp
+  src/backend_mode.cpp
   src/event_bus.cpp
   src/jsonl_logger.cpp
   src/name_database.cpp
@@ -130,7 +132,7 @@ endif()
 
 add_library(multi_radio::core ALIAS multi_radio_core)
 
-if(MR_BUILD_SERVER)
+if(MR_BUILD_SERVER OR MR_BUILD_RADIO)
   if(MR_PROTO_AVAILABLE)
     add_library(multi_radio_server_lib
       src/auth.cpp
@@ -148,9 +150,18 @@ if(MR_BUILD_SERVER)
         multi_radio::proto
     )
 
-    add_executable(multi_radio_server src/server_main.cpp)
-    target_compile_definitions(multi_radio_server PRIVATE MR_BUILD_GIT_COMMIT="${MR_BUILD_GIT_COMMIT}")
-    target_link_libraries(multi_radio_server PRIVATE multi_radio_server_lib)
+    if(MR_BUILD_SERVER)
+      add_executable(multi_radio_server src/server_main.cpp)
+      target_compile_definitions(multi_radio_server PRIVATE MR_BUILD_GIT_COMMIT="${MR_BUILD_GIT_COMMIT}")
+      target_link_libraries(multi_radio_server PRIVATE multi_radio_server_lib)
+    endif()
+
+    if(MR_BUILD_RADIO)
+      add_executable(multi_radio_radio src/server_main.cpp)
+      target_compile_definitions(multi_radio_radio PRIVATE MR_BUILD_GIT_COMMIT="${MR_BUILD_GIT_COMMIT}")
+      target_compile_definitions(multi_radio_radio PRIVATE MR_BUILD_THIN_BACKEND=1)
+      target_link_libraries(multi_radio_radio PRIVATE multi_radio_server_lib)
+    endif()
   else()
     message(WARNING "Skipping server build: proto/gRPC unavailable.")
   endif()

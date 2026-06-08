@@ -806,6 +806,11 @@ ServerApp::ServerApp(ServerConfig config)
 ServerApp::~ServerApp() { Shutdown(); }
 
 bool ServerApp::Init(std::string* error) {
+  if (IsRemoteBackendMode(config_.split.mode)) {
+    std::cout << "Remote DSP mode selected; the current server still uses the local SDR path "
+              << "until the remote worker is wired in.\n";
+  }
+
   std::string plugin_error;
   plugin_host_->LoadAll(&plugin_error);
 

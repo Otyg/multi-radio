@@ -48,11 +48,54 @@ cmake --build build -j
 
 ## Run server
 
+Create `backend.ini` (or use `backend.ini.example` as a template):
+
+```ini
+MR_BIND_ADDRESS=0.0.0.0:50051
+MR_AUTH_TOKEN=multi-radio-dev-token
+MR_PLUGIN_DIR=./backend/plugins
+MR_LOG_DIR=./logs
+MR_POSITION_BIND_ADDRESS=
+MR_POSITION_AUTH_TOKEN=
+MR_BACKEND_MODE=local
+MR_REMOTE_DSP_HOST=
+MR_IQ_TRANSPORT=grpc_stream
+```
+
+Run with the config file:
+
 ```bash
-MR_BIND_ADDRESS=0.0.0.0:50051 \
-MR_AUTH_TOKEN=multi-radio-dev-token \
-MR_LOG_DIR=./logs \
-./build/backend/multi_radio_server
+MR_BACKEND_CONFIG=/path/to/backend.ini ./build/backend/multi_radio_server
+```
+
+### Thin backend example
+
+To build only the thin SDR-side backend:
+
+```bash
+cmake -S . -B build \
+  -DMR_BUILD_SERVER=OFF \
+  -DMR_BUILD_RADIO=ON \
+  -DMR_BUILD_FRONTEND=OFF \
+  -DMR_BUILD_TUI=OFF \
+  -DMR_BUILD_TESTS=OFF
+cmake --build build --target multi_radio_radio -j
+```
+
+Then run it with the same config file, for example with a remote DSP host:
+
+```ini
+MR_BIND_ADDRESS=0.0.0.0:50051
+MR_AUTH_TOKEN=multi-radio-dev-token
+MR_PLUGIN_DIR=./backend/plugins
+MR_LOG_DIR=./logs
+MR_BACKEND_MODE=remote
+MR_REMOTE_DSP_HOST=192.168.1.50:50051
+MR_IQ_TRANSPORT=grpc_stream
+```
+
+```bash
+MR_BACKEND_CONFIG=/path/to/backend.ini ./build/backend/multi_radio_radio
 ```
 
 ## Run Qt client

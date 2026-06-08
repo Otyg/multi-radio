@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "multi_radio/backend_mode.hpp"
 #include "multi_radio/event_bus.hpp"
 #include "multi_radio/jsonl_logger.hpp"
 #include "multi_radio/track_database.hpp"
@@ -28,6 +29,9 @@ struct ServerConfig {
   // If position_auth_token is empty the endpoint requires no authentication.
   std::string position_bind_address;
   std::string position_auth_token;
+
+  // Thin/thick backend split settings. Default remains local for compatibility.
+  BackendSplitConfig split = {};
 };
 
 class ServerApp {
