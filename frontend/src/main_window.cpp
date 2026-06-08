@@ -1777,13 +1777,12 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);
-  visible_objects_widget_ = new VisibleObjectsWidget(air_marine_splitter);
+  visible_objects_widget_ = new VisibleObjectsWidget(air_marine_controls);
   visible_objects_widget_->setMinimumWidth(kRadarSidePanelWidth);
   visible_objects_widget_->setMaximumWidth(kRadarSidePanelWidth);
-  air_marine_splitter->addWidget(visible_objects_widget_);
+  controls_outer->addWidget(visible_objects_widget_, 1);
   air_marine_splitter->setStretchFactor(0, 1);
   air_marine_splitter->setStretchFactor(1, 3);
-  air_marine_splitter->setStretchFactor(2, 1);
 
   air_marine_layout->addWidget(air_marine_splitter);
 
@@ -1872,7 +1871,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
     const QString kCardStyle =
         "QPushButton, QCheckBox { text-align: left; padding: 6px 10px; border-radius: 6px; "
-        "border: 1px solid #2E7D32; background: #0B1018; color: #8FA7BE; }"
+        "border: 1px solid #2E7D32; background: #0B1018; color: #8FA7BE; font-size: 16px; }"
         "QPushButton:hover { background: #121E2E; }"
         "QPushButton:pressed { background: #0A111B; }"
         "QCheckBox:checked { color: #5CDB95; }"

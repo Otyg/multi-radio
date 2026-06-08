@@ -6,7 +6,12 @@
 #include <vector>
 
 #include <QDateTime>
-#include <QHeaderView>
+#include <QFrame>
+#include <QGridLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QSizePolicy>
 #include <QVBoxLayout>
 
 namespace multi_radio {
@@ -15,13 +20,27 @@ namespace {
 
 static std::string ToKey(const QString& id) { return id.toStdString(); }
 
+static QString KindIcon(RadarTargetKind kind) {
+  switch (kind) {
+    case RadarTargetKind::kAircraft:
+    case RadarTargetKind::kSarAircraft:
+      return "✈";
+    case RadarTargetKind::kVessel:
+      return "⛵";
+    case RadarTargetKind::kFixed:
+      return "📍";
+    default:
+      return "•";
+  }
+}
+
 static QString KindLabel(RadarTargetKind kind) {
   switch (kind) {
-    case RadarTargetKind::kAircraft:    return "AIR";
-    case RadarTargetKind::kVessel:      return "SEA";
-    case RadarTargetKind::kFixed:       return "FIX";
+    case RadarTargetKind::kAircraft:    return "Aircraft";
+    case RadarTargetKind::kVessel:      return "Vessel";
+    case RadarTargetKind::kFixed:       return "Fixed";
     case RadarTargetKind::kSarAircraft: return "SAR";
-    default:                            return "?";
+    default:                            return "Unknown";
   }
 }
 
@@ -41,22 +60,22 @@ static double HaversineKm(double lat1, double lon1, double lat2, double lon2) {
 VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
   auto* layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
+  layout->setSpacing(6);
 
-  table_ = new QTableWidget(0, 7, this);
-  table_->setHorizontalHeaderLabels({"Kind", "Label", "Dist", "SOG", "COG", "Alt", "Last"});
-  table_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-  table_->horizontalHeader()->setStretchLastSection(true);
-  table_->setSelectionBehavior(QAbstractItemView::SelectRows);
-  table_->setSelectionMode(QAbstractItemView::SingleSelection);
-  table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  scroll_area_ = new QScrollArea(this);
+  scroll_area_->setFrameShape(QFrame::NoFrame);
+  scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll_area_->setWidgetResizable(true);
 
-  layout->addWidget(table_);
+  cards_container_ = new QWidget(scroll_area_);
+  cards_layout_ = new QGridLayout(cards_container_);
+  cards_layout_->setContentsMargins(0, 0, 0, 0);
+  cards_layout_->setHorizontalSpacing(6);
+  cards_layout_->setVerticalSpacing(6);
+  cards_container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
 
-  connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int /*col*/) {
-    auto* item = table_->item(row, 1);
-    if (item == nullptr) return;
-    emit TargetActivated(item->data(Qt::UserRole).toString());
-  });
+  scroll_area_->setWidget(cards_container_);
+  layout->addWidget(scroll_area_);
 }
 
 void VisibleObjectsWidget::ApplySnapshot(const QVector<RadarTargetUpdate>& targets,
@@ -91,35 +110,64 @@ void VisibleObjectsWidget::RefreshTable() {
     return a.dist_km < b.dist_km;
   });
 
-  table_->setRowCount(static_cast<int>(items.size()));
+  while (cards_layout_ != nullptr && cards_layout_->count() > 0) {
+    QLayoutItem* item = cards_layout_->takeAt(0);
+    if (item != nullptr) {
+      if (item->widget() != nullptr) item->widget()->deleteLater();
+      delete item;
+    }
+  }
+
+  if (items.empty()) {
+    auto* empty = new QLabel("No active objects", cards_container_);
+    empty->setAlignment(Qt::AlignCenter);
+    empty->setStyleSheet("color: #8FA7BE; padding: 12px;");
+    cards_layout_->addWidget(empty, 0, 0);
+    return;
+  }
+
   for (int i = 0; i < static_cast<int>(items.size()); ++i) {
     const auto& row = items[static_cast<size_t>(i)];
     const auto& t = row.t;
 
-    table_->setItem(i, 0, new QTableWidgetItem(KindLabel(t.kind)));
+    auto* card = new QPushButton(cards_container_);
+    card->setCheckable(true);
+    card->setChecked(!selected_id_.isEmpty() && t.id == selected_id_);
+    card->setCursor(Qt::PointingHandCursor);
+    card->setMinimumHeight(92);
+    card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    card->setStyleSheet(
+        "QPushButton { text-align: left; padding: 8px; border-radius: 8px; "
+        "border: 1px solid #2E7D32; background: #0B1018; color: #8FA7BE; }"
+        "QPushButton:hover { background: #121E2E; border-color: #5CDB95; }"
+        "QPushButton:checked { background: #10231A; border-color: #5CDB95; color: #DDFBE6; }");
 
-    auto* label_item = new QTableWidgetItem(t.label);
-    label_item->setData(Qt::UserRole, t.id);
-    table_->setItem(i, 1, label_item);
+    const QString dist_text = std::isfinite(row.dist_km)
+        ? QString("%1 km away").arg(row.dist_km < 10.0
+                                         ? QString::number(row.dist_km, 'f', 2)
+                                         : QString::number(row.dist_km, 'f', 1))
+        : QString("Distance unknown");
+    const QString sog_text = t.sog > 0.0 ? QString("SOG %1 kn").arg(t.sog, 0, 'f', 1) : QString("SOG —");
+    const QString cog_text = t.sog > 0.0 ? QString("COG %1°").arg(t.cog, 0, 'f', 1) : QString("COG —");
+    const QString alt_text = std::isfinite(t.altitude) ? QString("Alt %1 ft").arg(static_cast<int>(t.altitude)) : QString("Alt —");
+    const QString last_text = t.unix_ms > 0
+        ? QString("Last %1").arg(QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(t.unix_ms)).toLocalTime().toString("HH:mm:ss"))
+        : QString("Last —");
 
-    QString dist_str;
-    if (std::isfinite(row.dist_km)) {
-      dist_str = row.dist_km < 10.0 ? QString::number(row.dist_km, 'f', 2) + " km"
-                                    : QString::number(row.dist_km, 'f', 1) + " km";
-    }
-    table_->setItem(i, 2, new QTableWidgetItem(dist_str));
-    table_->setItem(i, 3, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.sog, 'f', 1) : QString()));
-    table_->setItem(i, 4, new QTableWidgetItem(t.sog > 0.0 ? QString::number(t.cog, 'f', 1) : QString()));
-    table_->setItem(i, 5, new QTableWidgetItem(
-        std::isfinite(t.altitude) ? QString::number(static_cast<int>(t.altitude)) + " ft" : QString()));
+    card->setText(QString("%1 %2 — %3\n%4  %5  %6\n%7")
+                      .arg(KindIcon(t.kind))
+                      .arg(t.label.trimmed().isEmpty() ? QString("<unnamed>") : t.label.trimmed())
+                      .arg(dist_text)
+                      .arg(sog_text)
+                      .arg(cog_text)
+                      .arg(alt_text)
+                      .arg(last_text));
 
-    const QString last = t.unix_ms > 0
-        ? QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(t.unix_ms)).toLocalTime().toString("HH:mm:ss")
-        : QString();
-    table_->setItem(i, 6, new QTableWidgetItem(last));
+    connect(card, &QPushButton::clicked, this, [this, id = t.id]() {
+      emit TargetActivated(id);
+    });
 
-    if (!selected_id_.isEmpty() && t.id == selected_id_)
-      table_->selectRow(i);
+    cards_layout_->addWidget(card, i, 0);
   }
 }
 

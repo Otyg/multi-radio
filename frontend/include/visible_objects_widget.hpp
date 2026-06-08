@@ -4,7 +4,9 @@
 #include <unordered_map>
 
 #include <QString>
-#include <QTableWidget>
+#include <QGridLayout>
+#include <QPushButton>
+#include <QScrollArea>
 #include <QWidget>
 
 #include "radar_types.hpp"
@@ -33,7 +35,9 @@ class VisibleObjectsWidget : public QWidget {
 
   void RefreshTable();
 
-  QTableWidget* table_ = nullptr;
+  QScrollArea* scroll_area_ = nullptr;
+  QWidget* cards_container_ = nullptr;
+  QGridLayout* cards_layout_ = nullptr;
   std::unordered_map<std::string, RowState> rows_;
   QString selected_id_;
   bool hide_low_speed_ = false;
