@@ -70,8 +70,8 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
   cards_container_ = new QWidget(scroll_area_);
   cards_layout_ = new QGridLayout(cards_container_);
   cards_layout_->setContentsMargins(0, 0, 0, 0);
-  cards_layout_->setHorizontalSpacing(6);
-  cards_layout_->setVerticalSpacing(6);
+  cards_layout_->setHorizontalSpacing(4);
+  cards_layout_->setVerticalSpacing(2);
   cards_container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
 
   scroll_area_->setWidget(cards_container_);
@@ -134,10 +134,10 @@ void VisibleObjectsWidget::RefreshTable() {
     card->setCheckable(true);
     card->setChecked(!selected_id_.isEmpty() && t.id == selected_id_);
     card->setCursor(Qt::PointingHandCursor);
-    card->setMinimumHeight(92);
+    card->setMinimumHeight(88);
     card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     card->setStyleSheet(
-        "QPushButton { text-align: left; padding: 8px; border-radius: 8px; "
+        "QPushButton { text-align: left; padding: 6px 8px; border-radius: 8px; "
         "border: 1px solid #2E7D32; background: #0B1018; color: #8FA7BE; }"
         "QPushButton:hover { background: #121E2E; border-color: #5CDB95; }"
         "QPushButton:checked { background: #10231A; border-color: #5CDB95; color: #DDFBE6; }");

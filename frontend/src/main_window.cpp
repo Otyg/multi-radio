@@ -1829,7 +1829,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     auto* hide_low_speed_checkbox = new QCheckBox("⚓", radar_group);
     show_labels_checkbox->setChecked(show_labels);
     show_fixed_names_checkbox->setChecked(show_fixed_names);
-    hide_low_speed_checkbox->setChecked(hide_low_speed);
+    hide_low_speed_checkbox->setChecked(!hide_low_speed);
 
     auto apply_radar_view_visibility = [this](bool labels, bool fixed_names, bool hide_low_speed) {
       if (radar_widget_ != nullptr) {
@@ -1852,21 +1852,21 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
              show_fixed_names_checkbox, hide_low_speed_checkbox](bool checked) {
               apply_radar_view_visibility(checked,
                                           show_fixed_names_checkbox->isChecked(),
-                                          hide_low_speed_checkbox->isChecked());
+                                          !hide_low_speed_checkbox->isChecked());
             });
     connect(show_fixed_names_checkbox, &QCheckBox::toggled, this,
             [this, apply_radar_view_visibility, show_labels_checkbox,
              show_fixed_names_checkbox, hide_low_speed_checkbox](bool checked) {
               apply_radar_view_visibility(show_labels_checkbox->isChecked(),
                                           checked,
-                                          hide_low_speed_checkbox->isChecked());
+                                          !hide_low_speed_checkbox->isChecked());
             });
     connect(hide_low_speed_checkbox, &QCheckBox::toggled, this,
             [this, apply_radar_view_visibility, show_labels_checkbox,
              show_fixed_names_checkbox, hide_low_speed_checkbox](bool checked) {
               apply_radar_view_visibility(show_labels_checkbox->isChecked(),
                                           show_fixed_names_checkbox->isChecked(),
-                                          checked);
+                                          !checked);
             });
 
     const QString kCardStyle =
