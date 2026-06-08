@@ -20,6 +20,7 @@ It no longer depends on RTL-SDR, hardware tuning paths, DSP decode pipeline, or 
 
 - `proto/`: gRPC + protobuf contract.
 - `backend/`: API server runtime and minimal receiver/event/audio engine.
+- `docs/backend_thin_thick_split.md`: proposed thin-backend / thick-DSP split architecture.
 - `frontend/`: Qt6 desktop client.
 - `tests/`: core + API behavior tests.
 
