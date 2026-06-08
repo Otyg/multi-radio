@@ -1,0 +1,14 @@
+# Thick backend example: run on the DSP/compute host
+# This host receives the IQ stream from the thin host and performs the heavy DSP work.
+
+MR_BIND_ADDRESS=0.0.0.0:50051
+MR_AUTH_TOKEN=multi-radio-dev-token
+MR_PLUGIN_DIR=./backend/plugins
+MR_LOG_DIR=./logs
+MR_POSITION_BIND_ADDRESS=
+MR_POSITION_AUTH_TOKEN=
+
+# Thick backend mode
+MR_BACKEND_MODE=remote
+MR_REMOTE_DSP_HOST=192.168.1.50:50051
+MR_IQ_TRANSPORT=grpc_stream
