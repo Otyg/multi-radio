@@ -19,5 +19,6 @@ BackendMode ParseBackendMode(const std::string& value);
 std::string BackendModeToString(BackendMode mode);
 bool IsRemoteBackendMode(BackendMode mode);
 bool IsValidIqTransport(const std::string& value);
+bool IsImplementedBackendMode(BackendMode mode);
 
 }  // namespace multi_radio

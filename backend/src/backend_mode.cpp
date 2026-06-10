@@ -36,4 +36,9 @@ bool IsValidIqTransport(const std::string& value) {
   return normalized == "grpc_stream" || normalized == "udp_raw";
 }
 
+bool IsImplementedBackendMode(BackendMode mode) {
+  (void)mode;
+  return true;
+}
+
 }  // namespace multi_radio

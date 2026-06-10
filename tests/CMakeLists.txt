@@ -10,6 +10,10 @@ add_executable(test_multi_receiver_integration test_multi_receiver_integration.c
 target_link_libraries(test_multi_receiver_integration PRIVATE multi_radio::core)
 add_test(NAME test_multi_receiver_integration COMMAND test_multi_receiver_integration)
 
+add_executable(test_receiver_worker_external_iq test_receiver_worker_external_iq.cpp)
+target_link_libraries(test_receiver_worker_external_iq PRIVATE multi_radio::core)
+add_test(NAME test_receiver_worker_external_iq COMMAND test_receiver_worker_external_iq)
+
 add_executable(test_backend_mode test_backend_mode.cpp)
 target_link_libraries(test_backend_mode PRIVATE multi_radio::core)
 add_test(NAME test_backend_mode COMMAND test_backend_mode)

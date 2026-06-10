@@ -1,14 +1,15 @@
-# Thin backend example: run on the SDR/radio host
-# This host exposes the SDR-side backend and streams IQ to the thick backend.
+# Thin backend example: run on the SDR/radio host.
+# This host owns the SDR device, exposes control + `StreamIqFrames`,
+# and does not need the decoder plugin chain in split mode.
 
 MR_BIND_ADDRESS=0.0.0.0:50051
 MR_AUTH_TOKEN=multi-radio-dev-token
-MR_PLUGIN_DIR=./backend/plugins
+MR_PLUGIN_DIR=
 MR_LOG_DIR=./logs
 MR_POSITION_BIND_ADDRESS=
 MR_POSITION_AUTH_TOKEN=
 
-# Thin backend mode
+# Thin backend mode: keep this local.
 MR_BACKEND_MODE=local
 MR_REMOTE_DSP_HOST=
 MR_IQ_TRANSPORT=grpc_stream

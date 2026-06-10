@@ -1,5 +1,6 @@
-# Thick backend example: run on the DSP/compute host
-# This host receives the IQ stream from the thin host and performs the heavy DSP work.
+# Thick backend example: this host proxies control to the thin radio host,
+# consumes `StreamIqFrames`, and runs DSP/decoding locally.
+# This host needs the decoder/demodulator plugin chain.
 
 MR_BIND_ADDRESS=0.0.0.0:50051
 MR_AUTH_TOKEN=multi-radio-dev-token
@@ -9,6 +10,7 @@ MR_POSITION_BIND_ADDRESS=
 MR_POSITION_AUTH_TOKEN=
 
 # Thick backend mode
+# `MR_REMOTE_DSP_HOST` points to the upstream thin radio host endpoint.
 MR_BACKEND_MODE=remote
 MR_REMOTE_DSP_HOST=192.168.1.50:50051
 MR_IQ_TRANSPORT=grpc_stream

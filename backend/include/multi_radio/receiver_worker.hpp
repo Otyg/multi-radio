@@ -24,7 +24,7 @@ class ReceiverWorker {
   ReceiverWorker(uint32_t receiver_id, std::string serial, std::unique_ptr<IRadioDevice> device,
                  std::shared_ptr<EventBus> event_bus, std::shared_ptr<PluginHost> plugin_host,
                  std::shared_ptr<JsonlLogger> logger, std::shared_ptr<TrackDatabase> track_db,
-                 std::shared_ptr<TargetTracker> target_tracker);
+                 std::shared_ptr<TargetTracker> target_tracker, bool external_iq_input = false);
   ~ReceiverWorker();
 
   bool Start(std::string* error);
@@ -32,6 +32,7 @@ class ReceiverWorker {
 
   bool SetMode(RadioMode mode, std::string* error);
   bool SetModeConfig(const ModeConfig& config, std::string* error);
+  bool SubmitIqFrame(const IqFrame& frame, std::string* error);
   ModeConfig GetModeConfig() const;
 
   ReceiverStatus Status() const;
@@ -52,6 +53,7 @@ class ReceiverWorker {
   std::shared_ptr<TrackDatabase> track_db_;
   std::shared_ptr<TargetTracker> target_tracker_;
   std::shared_ptr<JsonlLogger> logger_;
+  const bool external_iq_input_ = false;
 
   mutable std::mutex mu_;
   std::thread thread_;

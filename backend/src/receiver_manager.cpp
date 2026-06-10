@@ -27,22 +27,26 @@ ReceiverManager::ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory,
                                  std::shared_ptr<PluginHost> plugin_host,
                                  std::shared_ptr<JsonlLogger> logger,
                                  std::shared_ptr<TrackDatabase> track_db,
-                                 std::shared_ptr<TargetTracker> target_tracker)
+                                 std::shared_ptr<TargetTracker> target_tracker,
+                                 std::vector<ReceiverDescriptor> descriptors,
+                                 bool external_iq_input)
     : event_bus_(std::move(event_bus)),
       plugin_host_(std::move(plugin_host)),
       logger_(std::move(logger)),
       track_db_(std::move(track_db)),
       target_tracker_(std::move(target_tracker)) {
-  auto descriptors = BuildApiOnlyDescriptors(factory.get());
+  if (descriptors.empty()) {
+    descriptors = BuildApiOnlyDescriptors(factory.get());
+  }
   workers_.reserve(descriptors.size());
   for (const auto& descriptor : descriptors) {
     std::unique_ptr<IRadioDevice> device = nullptr;
-    if (factory != nullptr) {
+    if (!external_iq_input && factory != nullptr) {
       device = factory->Create(descriptor.receiver_id);
     }
     workers_.push_back(std::make_unique<ReceiverWorker>(
         descriptor.receiver_id, descriptor.serial, std::move(device),
-        event_bus_, plugin_host_, logger_, track_db_, target_tracker_));
+        event_bus_, plugin_host_, logger_, track_db_, target_tracker_, external_iq_input));
   }
 }
 
@@ -118,6 +122,18 @@ bool ReceiverManager::SetModeConfig(uint32_t receiver_id, const ModeConfig& conf
     return false;
   }
   return worker->SetModeConfig(config, error);
+}
+
+bool ReceiverManager::SubmitIqFrame(uint32_t receiver_id, const IqFrame& frame, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto* worker = FindWorker(receiver_id);
+  if (worker == nullptr) {
+    if (error != nullptr) {
+      *error = "receiver not found";
+    }
+    return false;
+  }
+  return worker->SubmitIqFrame(frame, error);
 }
 
 void ReceiverManager::ApplyHardwarePpm(int ppm) {

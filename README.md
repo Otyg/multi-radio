@@ -82,7 +82,13 @@ cmake -S . -B build \
 cmake --build build --target multi_radio_radio -j
 ```
 
-Then run it with the same config file, for example with a remote DSP host:
+Remote split now works in pull mode:
+- run the thin radio host as a normal backend exposing gRPC + `StreamIqFrames`
+- run the thick backend with `MR_BACKEND_MODE=remote`
+- point `MR_REMOTE_DSP_HOST` at the thin radio host
+- point the frontend at the thick backend
+
+Example thick-backend config:
 
 ```ini
 MR_BIND_ADDRESS=0.0.0.0:50051
@@ -118,6 +124,35 @@ Optional config path:
 ```bash
 MR_CLIENT_CONFIG=/path/to/client.ini ./build/frontend/multi_radio_client
 ```
+
+## `systemd`
+
+Template service files for split deployment are provided in:
+
+- `deploy/systemd/multi-radio-radio.service`
+- `deploy/systemd/multi-radio-thick.service`
+
+Expected layout:
+
+- binaries under `/opt/multi-radio/build/backend/`
+- config files under `/etc/multi-radio/`
+- service user/group `multi-radio`
+
+Install example:
+
+```bash
+sudo install -d /etc/multi-radio
+sudo install -m 0644 backend.ini.radio.production /etc/multi-radio/backend.radio.ini
+sudo install -m 0644 backend.ini.thick.production /etc/multi-radio/backend.thick.ini
+sudo install -m 0644 deploy/systemd/multi-radio-radio.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/multi-radio-thick.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now multi-radio-radio.service
+sudo systemctl enable --now multi-radio-thick.service
+```
+
+Adjust `User=`, `Group=`, `WorkingDirectory=`, `ExecStart=` and config paths if your
+install root differs from `/opt/multi-radio`.
 
 ## Run TUI client
 

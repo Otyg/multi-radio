@@ -59,10 +59,6 @@ int main() {
   std::cout << "Multi-Radio server build commit: " << MR_BUILD_GIT_COMMIT << "\n";
   std::cout << "Backend mode: " << multi_radio::BackendModeToString(config.split.mode)
             << ", IQ transport: " << config.split.iq_transport << "\n";
-  if (multi_radio::IsRemoteBackendMode(config.split.mode) && config.split.remote_dsp_host.empty()) {
-    std::cerr << "Warning: remote DSP backend requested but MR_REMOTE_DSP_HOST is empty; "
-              << "falling back to local SDR path for now.\n";
-  }
 
   std::string error;
   if (!app.Init(&error)) {

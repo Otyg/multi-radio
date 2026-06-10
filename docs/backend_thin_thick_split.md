@@ -5,6 +5,15 @@ Separate the SDR-facing "thin" backend from the DSP-heavy "thick" backend so the
 
 ## Proposed split
 
+Status: the current runtime now supports a first working split:
+- thin radio host runs the existing backend locally and exposes `StreamIqFrames`
+- thick backend runs with `MR_BACKEND_MODE=remote`, proxies control RPCs to the thin host,
+  consumes IQ over gRPC, and performs DSP/decoding locally
+- the frontend should connect to the thick backend
+
+Current limitation: the config key is still named `remote_dsp_host`, but in practice it
+points to the upstream thin radio host.
+
 ### Thin backend (SDR host)
 Responsibilities:
 - Open and control the SDR dongle

@@ -1,0 +1,19 @@
+[Unit]
+Description=Multi-Radio thin radio backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=multi-radio
+Group=multi-radio
+WorkingDirectory=/opt/multi-radio
+Environment=MR_BACKEND_CONFIG=/etc/multi-radio/backend.radio.ini
+ExecStart=/opt/multi-radio/build/backend/multi_radio_radio
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

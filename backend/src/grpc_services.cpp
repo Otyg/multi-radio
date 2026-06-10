@@ -1,6 +1,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include <chrono>
+#include <atomic>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
@@ -298,14 +299,275 @@ void FillPluginInfo(const PluginInfo& info, v1::PluginInfo* out) {
   }
 }
 
+void PublishRelayEvent(EventBus* event_bus, EventKind kind, const std::string& message) {
+  if (event_bus == nullptr) return;
+  ReceiverEvent event;
+  event.unix_ms = UnixMillisNow();
+  event.receiver_id = 0;
+  event.kind = kind;
+  event.message = message;
+  event.tuned_frequency_hz = 0.0;
+  event_bus->PublishReceiverEvent(event);
+}
+
+class RemoteRadioClient {
+ public:
+  RemoteRadioClient(std::string target, std::string token)
+      : target_(std::move(target)),
+        token_(std::move(token)) {
+    auto channel = grpc::CreateChannel(target_, grpc::InsecureChannelCredentials());
+    control_client_ = v1::RadioControlService::NewStub(channel);
+    telemetry_client_ = v1::TelemetryService::NewStub(channel);
+  }
+
+  ~RemoteRadioClient() { StopIqRelay(); }
+
+  bool ListReceivers(std::vector<ReceiverStatus>* receivers, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::ListReceiversRequest request;
+    v1::ListReceiversResponse response;
+    const grpc::Status status = control_client_->ListReceivers(&context, request, &response);
+    if (!status.ok()) {
+      if (error != nullptr) *error = status.error_message();
+      return false;
+    }
+    if (receivers != nullptr) {
+      receivers->clear();
+      receivers->reserve(static_cast<size_t>(response.receivers_size()));
+      for (const auto& info : response.receivers()) {
+        ReceiverStatus out;
+        out.receiver_id = info.receiver_id();
+        out.serial = info.serial();
+        out.running = info.running();
+        out.mode = FromProto(info.mode());
+        out.mode_config = FromProto(info.mode_config());
+        out.last_error = info.last_error();
+        receivers->push_back(std::move(out));
+      }
+    }
+    if (error != nullptr) error->clear();
+    return true;
+  }
+
+  bool GetReceiverStatus(uint32_t receiver_id, ReceiverStatus* receiver, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::GetReceiverStatusRequest request;
+    request.set_receiver_id(receiver_id);
+    v1::GetReceiverStatusResponse response;
+    const grpc::Status status = control_client_->GetReceiverStatus(&context, request, &response);
+    if (!status.ok()) {
+      if (error != nullptr) *error = status.error_message();
+      return false;
+    }
+    if (receiver != nullptr) {
+      receiver->receiver_id = response.receiver().receiver_id();
+      receiver->serial = response.receiver().serial();
+      receiver->running = response.receiver().running();
+      receiver->mode = FromProto(response.receiver().mode());
+      receiver->mode_config = FromProto(response.receiver().mode_config());
+      receiver->last_error = response.receiver().last_error();
+    }
+    if (error != nullptr) error->clear();
+    return true;
+  }
+
+  bool StartReceiver(uint32_t receiver_id, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::StartReceiverRequest request;
+    request.set_receiver_id(receiver_id);
+    v1::StartReceiverResponse response;
+    const grpc::Status status = control_client_->StartReceiver(&context, request, &response);
+    return CheckBoolResponse(status, response.ok(), response.error(), error);
+  }
+
+  bool StopReceiver(uint32_t receiver_id, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::StopReceiverRequest request;
+    request.set_receiver_id(receiver_id);
+    v1::StopReceiverResponse response;
+    const grpc::Status status = control_client_->StopReceiver(&context, request, &response);
+    return CheckBoolResponse(status, response.ok(), response.error(), error);
+  }
+
+  bool SetMode(uint32_t receiver_id, RadioMode mode, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::SetModeRequest request;
+    request.set_receiver_id(receiver_id);
+    request.set_mode(ToProto(mode));
+    v1::SetModeResponse response;
+    const grpc::Status status = control_client_->SetMode(&context, request, &response);
+    return CheckBoolResponse(status, response.ok(), response.error(), error);
+  }
+
+  bool SetModeConfig(uint32_t receiver_id, const ModeConfig& config, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::SetModeConfigRequest request;
+    request.set_receiver_id(receiver_id);
+    ToProto(config, request.mutable_mode_config());
+    v1::SetModeConfigResponse response;
+    const grpc::Status status = control_client_->SetModeConfig(&context, request, &response);
+    return CheckBoolResponse(status, response.ok(), response.error(), error);
+  }
+
+  bool SetHardwareConfig(int ppm_correction, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::SetHardwareConfigRequest request;
+    request.mutable_config()->set_ppm_correction(ppm_correction);
+    v1::SetHardwareConfigResponse response;
+    const grpc::Status status = control_client_->SetHardwareConfig(&context, request, &response);
+    return CheckBoolResponse(status, response.ok(), response.error(), error);
+  }
+
+  bool GetHardwareConfig(int* ppm_correction, std::string* error) {
+    grpc::ClientContext context;
+    AddAuth(&context);
+    SetUnaryDeadline(&context);
+    v1::GetHardwareConfigRequest request;
+    v1::GetHardwareConfigResponse response;
+    const grpc::Status status = control_client_->GetHardwareConfig(&context, request, &response);
+    if (!status.ok()) {
+      if (error != nullptr) *error = status.error_message();
+      return false;
+    }
+    if (ppm_correction != nullptr) {
+      *ppm_correction = response.config().ppm_correction();
+    }
+    if (error != nullptr) error->clear();
+    return true;
+  }
+
+  void StartIqRelay(ReceiverManager* receiver_manager, EventBus* event_bus) {
+    if (relay_running_.exchange(true)) return;
+    relay_thread_ = std::thread(&RemoteRadioClient::IqRelayLoop, this, receiver_manager, event_bus);
+  }
+
+  void StopIqRelay() {
+    if (!relay_running_.exchange(false)) return;
+    {
+      std::lock_guard<std::mutex> lock(relay_context_mu_);
+      if (relay_context_ != nullptr) {
+        relay_context_->TryCancel();
+      }
+    }
+    if (relay_thread_.joinable()) {
+      relay_thread_.join();
+    }
+  }
+
+ private:
+  static bool CheckBoolResponse(const grpc::Status& status, bool ok, const std::string& rpc_error,
+                                std::string* error) {
+    if (!status.ok()) {
+      if (error != nullptr) *error = status.error_message();
+      return false;
+    }
+    if (!ok) {
+      if (error != nullptr) *error = rpc_error;
+      return false;
+    }
+    if (error != nullptr) error->clear();
+    return true;
+  }
+
+  void AddAuth(grpc::ClientContext* context) const {
+    if (context == nullptr || token_.empty()) return;
+    context->AddMetadata("authorization", "Bearer " + token_);
+  }
+
+  void SetUnaryDeadline(grpc::ClientContext* context) const {
+    if (context == nullptr) return;
+    context->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+  }
+
+  void IqRelayLoop(ReceiverManager* receiver_manager, EventBus* event_bus) {
+    bool announced_connect = false;
+    while (relay_running_.load()) {
+      grpc::ClientContext context;
+      AddAuth(&context);
+      v1::StreamIqFramesRequest request;
+      request.set_include_all_receivers(true);
+      request.set_receiver_id(0);
+      {
+        std::lock_guard<std::mutex> lock(relay_context_mu_);
+        relay_context_ = &context;
+      }
+      auto reader = telemetry_client_->StreamIqFrames(&context, request);
+      if (!announced_connect) {
+        PublishRelayEvent(event_bus, EventKind::kInfo,
+                          "remote IQ relay connecting to " + target_);
+      }
+
+      v1::IqFrame frame;
+      while (relay_running_.load() && reader->Read(&frame)) {
+        if (!announced_connect) {
+          PublishRelayEvent(event_bus, EventKind::kInfo,
+                            "remote IQ relay connected to " + target_);
+          announced_connect = true;
+        }
+        IqFrame local_frame;
+        local_frame.unix_ms = frame.unix_ms();
+        local_frame.receiver_id = frame.receiver_id();
+        local_frame.sample_rate_hz = frame.sample_rate_hz();
+        local_frame.tuned_frequency_hz = frame.tuned_frequency_hz();
+        local_frame.sequence = frame.sequence();
+        local_frame.sample_index = frame.sample_index();
+        const std::string& bytes = frame.interleaved_iq_s16le();
+        local_frame.interleaved_iq_s16le.resize(bytes.size() / sizeof(int16_t));
+        if (!bytes.empty()) {
+          std::memcpy(local_frame.interleaved_iq_s16le.data(), bytes.data(), bytes.size());
+        }
+        receiver_manager->SubmitIqFrame(local_frame.receiver_id, local_frame, nullptr);
+      }
+
+      const grpc::Status status = reader->Finish();
+      {
+        std::lock_guard<std::mutex> lock(relay_context_mu_);
+        relay_context_ = nullptr;
+      }
+      if (!relay_running_.load()) break;
+
+      const std::string why = status.ok() ? "stream ended" : status.error_message();
+      PublishRelayEvent(event_bus, EventKind::kWarning,
+                        "remote IQ relay disconnected from " + target_ + ": " + why);
+      announced_connect = false;
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+  }
+
+  std::string target_;
+  std::string token_;
+  std::unique_ptr<v1::RadioControlService::Stub> control_client_;
+  std::unique_ptr<v1::TelemetryService::Stub> telemetry_client_;
+  std::atomic<bool> relay_running_{false};
+  std::thread relay_thread_;
+  std::mutex relay_context_mu_;
+  grpc::ClientContext* relay_context_ = nullptr;
+};
+
 class RadioControlServiceImpl final : public v1::RadioControlService::Service {
  public:
   RadioControlServiceImpl(ReceiverManager* receiver_manager, PluginHost* plugin_host,
-                          TrackDatabase* track_db, std::string auth_token)
+                          TrackDatabase* track_db, std::string auth_token,
+                          RemoteRadioClient* remote_client)
       : receiver_manager_(receiver_manager),
         plugin_host_(plugin_host),
         track_db_(track_db),
-        auth_token_(std::move(auth_token)) {}
+        auth_token_(std::move(auth_token)),
+        remote_client_(remote_client) {}
 
   grpc::Status ListReceivers(grpc::ServerContext* context, const v1::ListReceiversRequest*,
                              v1::ListReceiversResponse* response) override {
@@ -313,7 +575,16 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
       return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
     }
 
-    for (const auto& receiver : receiver_manager_->ListReceivers()) {
+    std::vector<ReceiverStatus> receivers;
+    if (remote_client_ != nullptr) {
+      std::string error;
+      if (!remote_client_->ListReceivers(&receivers, &error)) {
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, error);
+      }
+    } else {
+      receivers = receiver_manager_->ListReceivers();
+    }
+    for (const auto& receiver : receivers) {
       FillReceiverInfo(receiver, response->add_receivers());
     }
     return grpc::Status::OK;
@@ -328,8 +599,13 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
 
     ReceiverStatus status;
     std::string error;
-    if (!receiver_manager_->GetReceiverStatus(request->receiver_id(), &status, &error)) {
-      return grpc::Status(grpc::StatusCode::NOT_FOUND, error);
+    const bool ok = (remote_client_ != nullptr)
+                        ? remote_client_->GetReceiverStatus(request->receiver_id(), &status, &error)
+                        : receiver_manager_->GetReceiverStatus(request->receiver_id(), &status, &error);
+    if (!ok) {
+      return grpc::Status(remote_client_ != nullptr ? grpc::StatusCode::UNAVAILABLE
+                                                    : grpc::StatusCode::NOT_FOUND,
+                          error);
     }
     FillReceiverInfo(status, response->mutable_receiver());
     return grpc::Status::OK;
@@ -342,7 +618,17 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     }
 
     std::string error;
-    response->set_ok(receiver_manager_->StartReceiver(request->receiver_id(), &error));
+    bool ok = receiver_manager_->StartReceiver(request->receiver_id(), &error);
+    if (ok && remote_client_ != nullptr) {
+      std::string remote_error;
+      ok = remote_client_->StartReceiver(request->receiver_id(), &remote_error);
+      if (!ok) {
+        std::string rollback_error;
+        receiver_manager_->StopReceiver(request->receiver_id(), &rollback_error);
+        error = remote_error;
+      }
+    }
+    response->set_ok(ok);
     response->set_error(error);
     return grpc::Status::OK;
   }
@@ -354,7 +640,19 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     }
 
     std::string error;
-    response->set_ok(receiver_manager_->StopReceiver(request->receiver_id(), &error));
+    bool ok = true;
+    if (remote_client_ != nullptr) {
+      ok = remote_client_->StopReceiver(request->receiver_id(), &error);
+    }
+    std::string local_error;
+    const bool local_ok = receiver_manager_->StopReceiver(request->receiver_id(), &local_error);
+    if (!local_ok && ok) {
+      ok = false;
+      error = local_error;
+    } else if (!local_ok && !ok && error.empty()) {
+      error = local_error;
+    }
+    response->set_ok(ok);
     response->set_error(error);
     return grpc::Status::OK;
   }
@@ -366,7 +664,12 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     }
 
     std::string error;
-    response->set_ok(receiver_manager_->SetMode(request->receiver_id(), FromProto(request->mode()), &error));
+    const RadioMode mode = FromProto(request->mode());
+    bool ok = receiver_manager_->SetMode(request->receiver_id(), mode, &error);
+    if (ok && remote_client_ != nullptr) {
+      ok = remote_client_->SetMode(request->receiver_id(), mode, &error);
+    }
+    response->set_ok(ok);
     response->set_error(error);
     return grpc::Status::OK;
   }
@@ -379,8 +682,12 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     }
 
     std::string error;
-    response->set_ok(receiver_manager_->SetModeConfig(request->receiver_id(),
-                                                      FromProto(request->mode_config()), &error));
+    const ModeConfig config = FromProto(request->mode_config());
+    bool ok = receiver_manager_->SetModeConfig(request->receiver_id(), config, &error);
+    if (ok && remote_client_ != nullptr) {
+      ok = remote_client_->SetModeConfig(request->receiver_id(), config, &error);
+    }
+    response->set_ok(ok);
     response->set_error(error);
     return grpc::Status::OK;
   }
@@ -428,11 +735,15 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
     if (!auth::ValidateBearerToken(*context, auth_token_))
       return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
     std::string error;
-    const bool ok = HwCfg().SetPpm(request->config().ppm_correction(), &error);
+    bool ok = false;
+    if (remote_client_ != nullptr) {
+      ok = remote_client_->SetHardwareConfig(request->config().ppm_correction(), &error);
+    } else {
+      ok = HwCfg().SetPpm(request->config().ppm_correction(), &error);
+    }
     response->set_ok(ok);
     response->set_error(error);
     if (ok) {
-      /* Apply immediately to all running receivers via SetModeConfig PPM field */
       receiver_manager_->ApplyHardwarePpm(request->config().ppm_correction());
     }
     return grpc::Status::OK;
@@ -443,7 +754,15 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
                                   v1::GetHardwareConfigResponse* response) override {
     if (!auth::ValidateBearerToken(*context, auth_token_))
       return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
-    response->mutable_config()->set_ppm_correction(HwCfg().GetPpm());
+    int ppm = 0;
+    std::string error;
+    const bool ok = (remote_client_ != nullptr)
+                        ? remote_client_->GetHardwareConfig(&ppm, &error)
+                        : (ppm = HwCfg().GetPpm(), true);
+    if (!ok) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, error);
+    }
+    response->mutable_config()->set_ppm_correction(ppm);
     return grpc::Status::OK;
   }
 
@@ -462,6 +781,7 @@ class RadioControlServiceImpl final : public v1::RadioControlService::Service {
   PluginHost*      plugin_host_;
   TrackDatabase*   track_db_;
   std::string      auth_token_;
+  RemoteRadioClient* remote_client_ = nullptr;
 };
 
 class TelemetryServiceImpl final : public v1::TelemetryService::Service {
@@ -731,11 +1051,32 @@ class ServerApp::Impl {
         position_bind_address_(std::move(position_bind_address)),
         position_auth_token_(std::move(position_auth_token)) {}
 
+  bool PrepareRemoteRuntime(const BackendSplitConfig& split_config, std::vector<ReceiverStatus>* receivers,
+                            std::string* error) {
+    if (!IsRemoteBackendMode(split_config.mode)) {
+      return true;
+    }
+    if (split_config.remote_dsp_host.empty()) {
+      if (error != nullptr) {
+        *error = "remote backend mode requires MR_REMOTE_DSP_HOST to point at the thin radio host";
+      }
+      return false;
+    }
+    remote_client_ = std::make_unique<RemoteRadioClient>(split_config.remote_dsp_host, auth_token_);
+    if (!remote_client_->ListReceivers(receivers, error)) {
+      return false;
+    }
+    return true;
+  }
+
+  RemoteRadioClient* remote_client() const { return remote_client_.get(); }
+
   bool Run(ReceiverManager* receiver_manager, PluginHost* plugin_host, EventBus* event_bus,
            TargetTracker* target_tracker, TrackDatabase* track_db,
            const std::string& bind_address, std::string* error) {
     radio_control_service_ =
-        std::make_unique<RadioControlServiceImpl>(receiver_manager, plugin_host, track_db, auth_token_);
+        std::make_unique<RadioControlServiceImpl>(receiver_manager, plugin_host, track_db, auth_token_,
+                                                  remote_client_.get());
     telemetry_service_ = std::make_unique<TelemetryServiceImpl>(event_bus, target_tracker, auth_token_);
 
     grpc::ServerBuilder builder;
@@ -774,11 +1115,16 @@ class ServerApp::Impl {
       }
     }
 
+    if (remote_client_ != nullptr) {
+      remote_client_->StartIqRelay(receiver_manager, event_bus);
+    }
+
     server_->Wait();
     return true;
   }
 
   void Shutdown() {
+    if (remote_client_) remote_client_->StopIqRelay();
     if (position_server_) position_server_->Shutdown();
     if (server_) server_->Shutdown();
   }
@@ -792,6 +1138,7 @@ class ServerApp::Impl {
   std::unique_ptr<PositionServiceImpl>     position_service_;
   std::unique_ptr<grpc::Server>            server_;
   std::unique_ptr<grpc::Server>            position_server_;
+  std::unique_ptr<RemoteRadioClient>       remote_client_;
 };
 
 ServerApp::ServerApp(ServerConfig config)
@@ -806,20 +1153,48 @@ ServerApp::ServerApp(ServerConfig config)
 ServerApp::~ServerApp() { Shutdown(); }
 
 bool ServerApp::Init(std::string* error) {
-  if (IsRemoteBackendMode(config_.split.mode)) {
-    std::cout << "Remote DSP mode selected; the current server still uses the local SDR path "
-              << "until the remote worker is wired in.\n";
-  }
-
+  impl_ = std::make_unique<Impl>(config_.auth_token,
+                                 config_.position_bind_address,
+                                 config_.position_auth_token);
   std::string plugin_error;
   plugin_host_->LoadAll(&plugin_error);
 
-  std::unique_ptr<IRadioDeviceFactory> factory = CreateRtlSdrFactory();
+  std::vector<ReceiverStatus> remote_receivers;
+  if (!impl_->PrepareRemoteRuntime(config_.split, &remote_receivers, error)) {
+    return false;
+  }
+
+  std::vector<ReceiverDescriptor> descriptors;
+  descriptors.reserve(remote_receivers.size());
+  for (const auto& receiver : remote_receivers) {
+    descriptors.push_back(ReceiverDescriptor{.receiver_id = receiver.receiver_id, .serial = receiver.serial});
+  }
+
+  const bool remote_mode = IsRemoteBackendMode(config_.split.mode);
+  std::unique_ptr<IRadioDeviceFactory> factory = remote_mode ? nullptr : CreateRtlSdrFactory();
   receiver_manager_ = std::make_unique<ReceiverManager>(
-      std::move(factory), event_bus_, plugin_host_, logger_, track_db_, target_tracker_);
-  impl_ = std::make_unique<Impl>(config_.auth_token,
-                                  config_.position_bind_address,
-                                  config_.position_auth_token);
+      std::move(factory), event_bus_, plugin_host_, logger_, track_db_, target_tracker_,
+      std::move(descriptors), remote_mode);
+
+  if (remote_mode) {
+    for (const auto& receiver : remote_receivers) {
+      std::string sync_error;
+      if (!receiver_manager_->SetMode(receiver.receiver_id, receiver.mode, &sync_error)) {
+        if (error != nullptr) *error = sync_error;
+        return false;
+      }
+      if (!receiver_manager_->SetModeConfig(receiver.receiver_id, receiver.mode_config, &sync_error)) {
+        if (error != nullptr) *error = sync_error;
+        return false;
+      }
+      if (receiver.running &&
+          !receiver_manager_->StartReceiver(receiver.receiver_id, &sync_error)) {
+        if (error != nullptr) *error = sync_error;
+        return false;
+      }
+    }
+  }
+
   if (error != nullptr) {
     error->clear();
   }

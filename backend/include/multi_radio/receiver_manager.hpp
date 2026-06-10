@@ -21,7 +21,8 @@ class ReceiverManager {
  public:
   ReceiverManager(std::unique_ptr<IRadioDeviceFactory> factory, std::shared_ptr<EventBus> event_bus,
                   std::shared_ptr<PluginHost> plugin_host, std::shared_ptr<JsonlLogger> logger,
-                  std::shared_ptr<TrackDatabase> track_db, std::shared_ptr<TargetTracker> target_tracker);
+                  std::shared_ptr<TrackDatabase> track_db, std::shared_ptr<TargetTracker> target_tracker,
+                  std::vector<ReceiverDescriptor> descriptors = {}, bool external_iq_input = false);
 
   std::vector<ReceiverStatus> ListReceivers() const;
   bool GetReceiverStatus(uint32_t receiver_id, ReceiverStatus* status, std::string* error) const;
@@ -31,6 +32,7 @@ class ReceiverManager {
 
   bool SetMode(uint32_t receiver_id, RadioMode mode, std::string* error);
   bool SetModeConfig(uint32_t receiver_id, const ModeConfig& config, std::string* error);
+  bool SubmitIqFrame(uint32_t receiver_id, const IqFrame& frame, std::string* error);
   void ApplyHardwarePpm(int ppm);
 
  private:

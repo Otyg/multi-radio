@@ -422,7 +422,7 @@ IqFrame BuildIqFrame(const IQSampleBlock& block, uint32_t receiver_id, double tu
 ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial, std::unique_ptr<IRadioDevice> device,
                                std::shared_ptr<EventBus> event_bus, std::shared_ptr<PluginHost> plugin_host,
                                std::shared_ptr<JsonlLogger> logger, std::shared_ptr<TrackDatabase> track_db,
-                               std::shared_ptr<TargetTracker> target_tracker)
+                               std::shared_ptr<TargetTracker> target_tracker, bool external_iq_input)
     : receiver_id_(receiver_id),
       serial_(std::move(serial)),
       device_(std::move(device)),
@@ -430,7 +430,8 @@ ReceiverWorker::ReceiverWorker(uint32_t receiver_id, std::string serial, std::un
       plugin_host_(std::move(plugin_host)),
       logger_(std::move(logger)),
       track_db_(std::move(track_db)),
-      target_tracker_(std::move(target_tracker)) {
+      target_tracker_(std::move(target_tracker)),
+      external_iq_input_(external_iq_input) {
   mode_config_ = NormalizeModeConfig(mode_config_);
 }
 
@@ -460,7 +461,9 @@ bool ReceiverWorker::Start(std::string* error) {
   PushPluginConfig();
 
   thread_ = std::thread(&ReceiverWorker::RunLoop, this);
-  ingest_thread_ = std::thread(&ReceiverWorker::IngestLoop, this);
+  if (!external_iq_input_) {
+    ingest_thread_ = std::thread(&ReceiverWorker::IngestLoop, this);
+  }
   process_thread_ = std::thread(&ReceiverWorker::ProcessLoop, this);
   if (error != nullptr) {
     error->clear();
@@ -557,6 +560,59 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
       << " lpf4k5:" << mode_config_.audio_lpf4k5_enabled
       << " bpf:" << mode_config_.audio_bpf_voice_enabled;
   PublishEvent(EventKind::kInfo, msg.str());
+  return true;
+}
+
+bool ReceiverWorker::SubmitIqFrame(const IqFrame& frame, std::string* error) {
+  if (!external_iq_input_) {
+    if (error != nullptr) {
+      *error = "receiver is not configured for external IQ input";
+    }
+    return false;
+  }
+  if (!running_.load()) {
+    if (error != nullptr) {
+      *error = "receiver not running";
+    }
+    return false;
+  }
+
+  RadioMode mode = RadioMode::kFixed;
+  ModeConfig config;
+  int scan_ch_idx = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    mode = mode_;
+    config = mode_config_;
+    scan_ch_idx = scan_channel_idx_;
+  }
+
+  const RuntimeChannel ch = SelectRuntimeChannel(mode, config, scan_ch_idx);
+  IqQueueEntry entry;
+  entry.block.sample_rate_hz = frame.sample_rate_hz;
+  entry.block.center_frequency_hz = static_cast<uint32_t>(std::llround(
+      frame.tuned_frequency_hz > 0.0 ? frame.tuned_frequency_hz : ch.frequency_hz));
+  entry.block.interleaved_iq = frame.interleaved_iq_s16le;
+  entry.effective_sample_rate_hz = frame.sample_rate_hz != 0 ? frame.sample_rate_hz : config.sample_rate_hz;
+  entry.audio_sample_rate_hz = AudioSampleRateForModulation(ch.modulation);
+  entry.channel_bandwidth_hz = (ch.channel_bandwidth_hz > 0) ? ch.channel_bandwidth_hz
+                                                              : config.channel_bandwidth_hz;
+  entry.tuned_frequency_hz = frame.tuned_frequency_hz != 0.0 ? frame.tuned_frequency_hz : ch.frequency_hz;
+  entry.modulation = ch.modulation;
+  entry.scan_channel_idx = scan_ch_idx;
+
+  {
+    std::lock_guard<std::mutex> lock(iq_queue_mu_);
+    constexpr size_t kMaxQueueDepth = 8;
+    if (iq_deque_.size() >= kMaxQueueDepth) {
+      iq_deque_.pop_front();
+    }
+    iq_deque_.push_back(std::move(entry));
+  }
+  iq_queue_cv_.notify_one();
+  if (error != nullptr) {
+    error->clear();
+  }
   return true;
 }
 
