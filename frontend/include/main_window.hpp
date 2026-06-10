@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -16,8 +17,11 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QString>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QVariant>
 
 #include "coastline_loader.hpp"
 #include "grpc_client.hpp"
@@ -26,7 +30,10 @@
 #include "signal_visualization_widget.hpp"
 #include "visible_objects_widget.hpp"
 
+class QEvent;
 class QIODevice;
+class QKeyEvent;
+class QGroupBox;
 class QGridLayout;
 class QLabel;
 class QScrollArea;
@@ -53,6 +60,7 @@ class MainWindow : public QMainWindow {
 
  protected:
   bool eventFilter(QObject* watched, QEvent* event) override;
+  void keyPressEvent(QKeyEvent* event) override;
 
  private slots:
   void RefreshReceivers();
@@ -150,7 +158,10 @@ class MainWindow : public QMainWindow {
   std::vector<MessageRow> all_rows_;
 
   QComboBox* receiver_combo_ = nullptr;
+  QGroupBox* control_group_ = nullptr;
+  QWidget* button_row_ = nullptr;
   QTabWidget* mode_tabs_ = nullptr;
+  QVBoxLayout* root_layout_ = nullptr;
   int last_tab_index_ = -1;
   int last_mode_tab_index_ = 0;
   QCheckBox* scan_list_monitor_checkbox_ = nullptr;

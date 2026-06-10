@@ -31,6 +31,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QTabBar>
+#include <QKeyEvent>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -1141,77 +1143,90 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
       coastline_pass_(QString::fromStdString(std::move(coastline_pass))) {
   setWindowTitle("Multi-Radio Client");
   resize(1300, 780);
+  setStyleSheet("QMainWindow { background-color: #0b0f16; }");
 
   auto* central = new QWidget(this);
-  auto* root_layout = new QVBoxLayout(central);
+  root_layout_ = new QVBoxLayout(central);
+  central->setStyleSheet("background-color: #0b0f16; color: #b2c0d6;");
 
   auto* top_layout = new QHBoxLayout();
 
-  auto* control_group = new QGroupBox("Receiver Control", central);
-  auto* control_layout = new QFormLayout(control_group);
+  control_group_ = new QGroupBox("Receiver Control", central);
+  auto* control_layout = new QFormLayout(control_group_);
+  control_group_->setStyleSheet(
+      "QGroupBox { color: #5CDB95; font-weight: bold; border: 1px solid #2E7D32; "
+      "margin-top: 1.1em; padding-top: 10px; background-color: #0b0f16; }"
+      "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; "
+      "padding: 0 3px; left: 10px; }");
 
-  receiver_combo_ = new QComboBox(control_group);
+  receiver_combo_ = new QComboBox(control_group_);
   receiver_combo_->setVisible(false);  // single-receiver UX for now
 
-  fixed_frequency_edit_ = new QLineEdit("162.025", control_group);
-  range_start_edit_ = new QLineEdit("156", control_group);
-  range_end_edit_ = new QLineEdit("163", control_group);
-  range_fft_size_combo_ = new QComboBox(control_group);
+  fixed_frequency_edit_ = new QLineEdit("162.025", control_group_);
+  range_start_edit_ = new QLineEdit("156", control_group_);
+  range_end_edit_ = new QLineEdit("163", control_group_);
+  range_fft_size_combo_ = new QComboBox(control_group_);
   for (int s : {64, 128, 256, 512, 1024, 2048, 4096}) {
     range_fft_size_combo_->addItem(QString::number(s), QVariant(s));
   }
   range_fft_size_combo_->setCurrentIndex(
       range_fft_size_combo_->findData(QVariant(1024)));
 
-  dwell_ms_spin_ = new QSpinBox(control_group);
+  dwell_ms_spin_ = new QSpinBox(control_group_);
   dwell_ms_spin_->setRange(100, 10000);
   dwell_ms_spin_->setValue(500);
-  sample_rate_spin_ = new QSpinBox(control_group);
+  sample_rate_spin_ = new QSpinBox(control_group_);
   sample_rate_spin_->setRange(225000, 3200000);
   sample_rate_spin_->setSingleStep(1000);
   sample_rate_spin_->setValue(2048000);
   sample_rate_spin_->setSuffix(" Hz");
-  channel_bandwidth_spin_ = new QSpinBox(control_group);
+  channel_bandwidth_spin_ = new QSpinBox(control_group_);
   channel_bandwidth_spin_->setRange(0, 500000);
   channel_bandwidth_spin_->setSingleStep(1000);
   channel_bandwidth_spin_->setValue(30000);
   channel_bandwidth_spin_->setSuffix(" Hz");
   channel_bandwidth_spin_->setSpecialValueText("Off");
-  hardware_bandwidth_spin_ = new QSpinBox(control_group);
+  hardware_bandwidth_spin_ = new QSpinBox(control_group_);
   hardware_bandwidth_spin_->setRange(0, 3200000);
   hardware_bandwidth_spin_->setSingleStep(1000);
   hardware_bandwidth_spin_->setValue(0);
   hardware_bandwidth_spin_->setSuffix(" Hz");
   hardware_bandwidth_spin_->setSpecialValueText("Auto");
-  dc_blocker_checkbox_ = new QCheckBox("Enabled", control_group);
+  dc_blocker_checkbox_ = new QCheckBox("Enabled", control_group_);
   dc_blocker_checkbox_->setChecked(false);
-  dc_blocker_cutoff_spin_ = new QSpinBox(control_group);
+  dc_blocker_cutoff_spin_ = new QSpinBox(control_group_);
   dc_blocker_cutoff_spin_->setRange(1, 5000);
   dc_blocker_cutoff_spin_->setSingleStep(10);
   dc_blocker_cutoff_spin_->setValue(30);
   dc_blocker_cutoff_spin_->setSuffix(" Hz");
   dc_blocker_cutoff_spin_->setEnabled(false);
-  center_notch_checkbox_ = new QCheckBox("Enabled", control_group);
+  center_notch_checkbox_ = new QCheckBox("Enabled", control_group_);
   center_notch_checkbox_->setChecked(false);
-  center_notch_width_spin_ = new QSpinBox(control_group);
+  center_notch_width_spin_ = new QSpinBox(control_group_);
   center_notch_width_spin_->setRange(100, 200000);
   center_notch_width_spin_->setSingleStep(100);
   center_notch_width_spin_->setValue(2000);
   center_notch_width_spin_->setSuffix(" Hz");
   center_notch_width_spin_->setEnabled(false);
-  lo_offset_checkbox_ = new QCheckBox("Enabled", control_group);
+  lo_offset_checkbox_ = new QCheckBox("Enabled", control_group_);
   lo_offset_checkbox_->setChecked(false);
-  lo_offset_spin_ = new QSpinBox(control_group);
+  lo_offset_spin_ = new QSpinBox(control_group_);
   lo_offset_spin_->setRange(-500000, 500000);
   lo_offset_spin_->setSingleStep(100);
   lo_offset_spin_->setValue(0);
   lo_offset_spin_->setSuffix(" Hz");
   lo_offset_spin_->setEnabled(false);
 
-  mode_tabs_ = new QTabWidget(control_group);
+  mode_tabs_ = new QTabWidget(control_group_);
   mode_tabs_->setUsesScrollButtons(false);
   mode_tabs_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  control_group->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  mode_tabs_->setStyleSheet(
+      "QTabWidget::pane { border: 1px solid #2E7D32; background-color: #0b0f16; top: -1px; }"
+      "QTabBar::tab { background: #121e2e; color: #8fa7be; border: 1px solid #2E7D32; "
+      "border-bottom-color: none; border-top-left-radius: 4px; border-top-right-radius: 4px; "
+      "padding: 5px 12px; margin-right: 2px; }"
+      "QTabBar::tab:selected { background: #0b0f16; color: #5CDB95; border-bottom-color: #0b0f16; }");
+  control_group_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
   auto* fixed_tab = new QWidget(mode_tabs_);
   auto* fixed_layout = new QFormLayout(fixed_tab);
@@ -1712,7 +1727,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   controls_outer->setContentsMargins(6, 6, 6, 6);
   controls_outer->setSpacing(10);
 
-  constexpr int kRadarSidePanelWidth = 340;
+  constexpr int kRadarSidePanelWidth = 400;
   air_marine_controls->setMinimumWidth(kRadarSidePanelWidth);
   air_marine_controls->setMaximumWidth(kRadarSidePanelWidth);
 
@@ -1778,8 +1793,6 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);
   visible_objects_widget_ = new VisibleObjectsWidget(air_marine_controls);
-  visible_objects_widget_->setMinimumWidth(kRadarSidePanelWidth);
-  visible_objects_widget_->setMaximumWidth(kRadarSidePanelWidth);
   controls_outer->addWidget(visible_objects_widget_, 1);
   air_marine_splitter->setStretchFactor(0, 1);
   air_marine_splitter->setStretchFactor(1, 3);
@@ -2088,7 +2101,7 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   mode_tabs_->addTab(global_tab, "GLOBAL");
 
-  event_log_ = new QPlainTextEdit(control_group);
+  event_log_ = new QPlainTextEdit(control_group_);
   event_log_->setReadOnly(true);
   mode_tabs_->addTab(event_log_, "LOGG");
 
@@ -2104,13 +2117,13 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   mode_tabs_->setCurrentIndex(kFixedModeTabIndex);
   last_tab_index_ = mode_tabs_->currentIndex();
 
-  auto* button_row = new QWidget(control_group);
-  auto* button_layout = new QHBoxLayout(button_row);
+  button_row_ = new QWidget(control_group_);
+  auto* button_layout = new QHBoxLayout(button_row_);
   button_layout->setContentsMargins(0, 0, 0, 0);
-  auto* refresh_button = new QPushButton("Refresh", button_row);
-  auto* start_button = new QPushButton("Start", button_row);
-  auto* stop_button = new QPushButton("Stop", button_row);
-  auto* apply_button = new QPushButton("Apply mode/radio settings", button_row);
+  auto* refresh_button = new QPushButton("Refresh", button_row_);
+  auto* start_button = new QPushButton("Start", button_row_);
+  auto* stop_button = new QPushButton("Stop", button_row_);
+  auto* apply_button = new QPushButton("Apply mode/radio settings", button_row_);
   button_layout->addWidget(refresh_button);
   button_layout->addWidget(start_button);
   button_layout->addWidget(stop_button);
@@ -2118,9 +2131,9 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   // Use full width for the active view.
   control_layout->addRow(mode_tabs_);
-  control_layout->addRow(button_row);
+  control_layout->addRow(button_row_);
 
-  top_layout->addWidget(control_group, 1);
+  top_layout->addWidget(control_group_, 1);
 
   signal_visualization_ = new SignalVisualizationWidget(central);
   signal_visualization_->SetSpectrumSource(SignalVisualizationWidget::SpectrumSource::kReceiverInput);
@@ -2141,8 +2154,8 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
     signal_visualization_->SetNoiseFloorDb(noise_floor_db);
   }
 
-  root_layout->addLayout(top_layout, 1);
-  root_layout->addWidget(signal_visualization_);
+  root_layout_->addLayout(top_layout, 1);
+  root_layout_->addWidget(signal_visualization_);
 
   setCentralWidget(central);
   LoadScanListConfigFromSettings();
@@ -5396,6 +5409,32 @@ bool MainWindow::CurrentReceiverId(uint32_t* receiver_id) const {
     *receiver_id = static_cast<uint32_t>(receiver_combo_->currentData().toInt());
   }
   return true;
+}
+
+void MainWindow::keyPressEvent(QKeyEvent* event) {
+  if (event->key() == Qt::Key_F11 || (event->key() == Qt::Key_Escape && isFullScreen())) {
+    const bool entering = !isFullScreen() && event->key() == Qt::Key_F11;
+    if (entering) showFullScreen(); else showNormal();
+
+    const bool fs = isFullScreen();
+    const bool is_radar = (mode_tabs_ && mode_tabs_->currentIndex() == kAirMarineModeTabIndex);
+
+    if (signal_visualization_) signal_visualization_->setVisible(!fs || !is_radar);
+    if (button_row_) button_row_->setVisible(!fs || !is_radar);
+    if (mode_tabs_) {
+        if (auto* bar = mode_tabs_->findChild<QTabBar*>())
+            bar->setVisible(!fs || !is_radar);
+    }
+    if (fs && is_radar) {
+        if (control_group_) control_group_->setTitle("");
+        if (root_layout_) root_layout_->setContentsMargins(0, 0, 0, 0);
+    } else {
+        if (control_group_) control_group_->setTitle("Receiver Control");
+        if (root_layout_) root_layout_->setContentsMargins(10, 10, 10, 10);
+    }
+    return;
+  }
+  QMainWindow::keyPressEvent(event);
 }
 
 void MainWindow::AppendLog(const QString& line) {

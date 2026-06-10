@@ -55,6 +55,18 @@ static double HaversineKm(double lat1, double lon1, double lat2, double lon2) {
   return 2.0 * kR * std::asin(std::sqrt(a));
 }
 
+static double BearingDegrees(double lat1, double lon1, double lat2, double lon2) {
+  constexpr double kDeg = M_PI / 180.0;
+  const double dlon = (lon2 - lon1) * kDeg;
+  const double lat1r = lat1 * kDeg;
+  const double lat2r = lat2 * kDeg;
+  const double y = std::sin(dlon) * std::cos(lat2r);
+  const double x = std::cos(lat1r) * std::sin(lat2r) -
+                   std::sin(lat1r) * std::cos(lat2r) * std::cos(dlon);
+  const double bearing = std::atan2(y, x) / kDeg;
+  return std::fmod(bearing + 360.0, 360.0);
+}
+
 }  // namespace
 
 VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
@@ -71,7 +83,7 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
 
   cards_container_ = new QWidget(scroll_area_);
   cards_layout_ = new QGridLayout(cards_container_);
-  cards_layout_->setContentsMargins(0, 0, 0, 0);
+  cards_layout_->setContentsMargins(4, 4, 4, 4);
   cards_layout_->setHorizontalSpacing(4);
   cards_layout_->setVerticalSpacing(2);
   cards_container_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
@@ -97,16 +109,19 @@ void VisibleObjectsWidget::SetSelectedTarget(const QString& id) {
 }
 
 void VisibleObjectsWidget::RefreshTable() {
-  struct Row { RadarTargetUpdate t; double dist_km; };
+  struct Row { RadarTargetUpdate t; double dist_km; double bearing_deg; };
   std::vector<Row> items;
   items.reserve(rows_.size());
   const bool have_center = (center_lat_ != 0.0 || center_lon_ != 0.0);
   for (const auto& [_, st] : rows_) {
     if (hide_low_speed_ && st.last.kind == RadarTargetKind::kVessel && st.last.sog < 1.0) continue;
     double dist = std::numeric_limits<double>::infinity();
-    if (have_center && std::isfinite(st.last.lat) && std::isfinite(st.last.lon))
+    double bearing = 0.0;
+    if (have_center && std::isfinite(st.last.lat) && std::isfinite(st.last.lon)) {
       dist = HaversineKm(center_lat_, center_lon_, st.last.lat, st.last.lon);
-    items.push_back(Row{st.last, dist});
+      bearing = BearingDegrees(center_lat_, center_lon_, st.last.lat, st.last.lon);
+    }
+    items.push_back(Row{st.last, dist, bearing});
   }
   std::sort(items.begin(), items.end(), [](const Row& a, const Row& b) {
     return a.dist_km < b.dist_km;
@@ -145,9 +160,10 @@ void VisibleObjectsWidget::RefreshTable() {
         "QPushButton:checked { background: #10231A; border-color: #5CDB95; color: #DDFBE6; }");
 
     const QString dist_text = std::isfinite(row.dist_km)
-        ? QString("%1 km away").arg(row.dist_km < 10.0
+        ? QString("%1 km @ %2°").arg(row.dist_km < 10.0
                                          ? QString::number(row.dist_km, 'f', 2)
                                          : QString::number(row.dist_km, 'f', 1))
+                                .arg(static_cast<int>(std::round(row.bearing_deg)))
         : QString("Distance unknown");
     const QString sog_text = t.sog > 0.0 ? QString("SOG %1 kn").arg(t.sog, 0, 'f', 1) : QString("SOG —");
     const QString cog_text = t.sog > 0.0 ? QString("COG %1°").arg(t.cog, 0, 'f', 1) : QString("COG —");
