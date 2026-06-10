@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <map>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -207,6 +208,20 @@ std::string FormatDouble(double value, int precision) {
   out.precision(precision);
   out << value;
   return out.str();
+}
+
+const char* SignalTypeToken(SignalType signal_type) {
+  switch (signal_type) {
+    case SignalType::kAis:
+      return "AIS";
+    case SignalType::kAdsb:
+      return "ADSB";
+    case SignalType::kDsc:
+      return "DSC";
+    case SignalType::kUnknown:
+    default:
+      return "UNKNOWN";
+  }
 }
 
 size_t AudioFrameSamplesForRate(uint32_t audio_sample_rate_hz) {
@@ -1189,6 +1204,10 @@ void ReceiverWorker::ProcessLoop() {
 #endif
   };
 
+  std::map<SignalType, uint64_t> decoded_counts_by_type;
+  uint64_t decoded_publish_total = 0;
+  uint64_t decoded_publish_window_start_ms = 0;
+
   int last_processed_channel_idx = -1;
   Modulation last_demod_modulation = static_cast<Modulation>(-1);  // sentinel: no demod set yet
   int last_plugin_config_gen = -1;
@@ -1423,7 +1442,9 @@ void ReceiverWorker::ProcessLoop() {
       }
       plugin_host_->ProcessIq(
           plugin_block,
-          [this, &entry, &allow_dsc_message](const multi_radio::PluginMessage& msg) {
+          [this, &entry, &allow_dsc_message, &decoded_publish_total, &decoded_counts_by_type,
+           &decoded_publish_window_start_ms]
+          (const multi_radio::PluginMessage& msg) {
             if (!allow_dsc_message(msg)) return;
             const auto& nf = msg.normalized_fields;
 
@@ -1541,24 +1562,6 @@ void ReceiverWorker::ProcessLoop() {
               }
             }
 
-            // --- Radar-relevance filter ---
-            // Only forward messages that carry something the radar can display.
-            const bool is_positional =
-                nf.count("lat") && nf.count("lon");
-            const bool has_speed =
-                nf.count("gs") || nf.count("sog") || nf.count("cog");
-            const bool has_altitude =
-                nf.count("alt_baro") || nf.count("alt_geom");
-            // Messages with a name or callsign are allowed through so that
-            // TargetTracker can pre-populate labels before the first position
-            // is received, and so the frontend log shows static-data messages.
-            const bool has_name =
-                nf.count("name") || nf.count("callsign") || nf.count("call_sign");
-            if (msg.signal_type == SignalType::kAdsb ||
-                msg.signal_type == SignalType::kAis) {
-              if (!is_positional && !has_speed && !has_altitude && !has_name) return;
-            }
-
             // --- Name injection ---
             DecodedMessage dm;
             dm.unix_ms       = msg.unix_ms;
@@ -1587,6 +1590,23 @@ void ReceiverWorker::ProcessLoop() {
 
             if (target_tracker_) target_tracker_->Update(dm);
             event_bus_->PublishDecodedMessage(dm);
+            const uint64_t msg_unix_ms = (dm.unix_ms != 0) ? dm.unix_ms : UnixMillisNow();
+            if (decoded_publish_window_start_ms == 0) {
+              decoded_publish_window_start_ms = msg_unix_ms;
+            }
+            ++decoded_publish_total;
+            ++decoded_counts_by_type[dm.signal_type];
+            if (msg_unix_ms >= decoded_publish_window_start_ms + 1000) {
+              std::ostringstream decode_status;
+              decode_status << "DECODE_PUBLISH total=" << decoded_publish_total;
+              for (const auto& [signal_type, count] : decoded_counts_by_type) {
+                decode_status << " " << SignalTypeToken(signal_type) << "=" << count;
+              }
+              PublishEvent(EventKind::kInfo, decode_status.str(), dm.frequency_hz, false);
+              decoded_publish_total = 0;
+              decoded_counts_by_type.clear();
+              decoded_publish_window_start_ms = msg_unix_ms;
+            }
           });
     }
 

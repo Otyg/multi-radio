@@ -3654,6 +3654,15 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     if (fixed_hdlc_log_ != nullptr)
       fixed_hdlc_log_->appendPlainText(
           QString("[%1] DF%2 %3%4 %5").arg(ts).arg(df).arg(icao).arg(decoded).arg(payload));
+    AppendLog(QString("[%1] RX%2 ADSB f=%3Hz DF%4 %5%6")
+                  .arg(ts)
+                  .arg(receiver_id)
+                  .arg(frequency_hz, 0, 'f', 0)
+                  .arg(df)
+                  .arg(icao)
+                  .arg(decoded));
+    all_rows_.push_back(row);
+    AddMessageRow(row);
     return;
   }
 
