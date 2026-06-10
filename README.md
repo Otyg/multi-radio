@@ -134,13 +134,22 @@ Template service files for split deployment are provided in:
 
 Expected layout:
 
-- binaries under `/opt/multi-radio/build/backend/`
+- binaries under `/opt/multi-radio/backend/`
+- plugins under `/opt/multi-radio/backend/plugins/`
 - config files under `/etc/multi-radio/`
 - service user/group `multi-radio`
 
 Install example:
 
 ```bash
+cmake -S . -B build \
+  -DMR_BUILD_SERVER=ON \
+  -DMR_BUILD_RADIO=ON \
+  -DMR_BUILD_FRONTEND=OFF \
+  -DMR_BUILD_TUI=OFF \
+  -DMR_BUILD_TESTS=OFF
+cmake --build build -j
+sudo cmake --install build
 sudo install -d /etc/multi-radio
 sudo install -m 0644 backend.ini.radio.production /etc/multi-radio/backend.radio.ini
 sudo install -m 0644 backend.ini.thick.production /etc/multi-radio/backend.thick.ini
@@ -153,6 +162,12 @@ sudo systemctl enable --now multi-radio-thick.service
 
 Adjust `User=`, `Group=`, `WorkingDirectory=`, `ExecStart=` and config paths if your
 install root differs from `/opt/multi-radio`.
+
+Default install prefix is `/opt/multi-radio`. Override it with:
+
+```bash
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/some/other/path
+```
 
 ## Run TUI client
 

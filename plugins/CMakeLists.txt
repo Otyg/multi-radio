@@ -44,7 +44,7 @@ function(mr_add_plugin target source)
   endif()
   target_link_libraries(${target} PRIVATE ${MR_PLUGIN_LIQUID_TARGET})
   target_compile_definitions(${target} PRIVATE MR_PLUGIN_HAS_LIQUID=1)
-  install(TARGETS ${target} LIBRARY DESTINATION "${MR_PLUGIN_OUTPUT_DIR}")
+  install(TARGETS ${target} LIBRARY DESTINATION "backend/plugins")
 endfunction()
 
 # ---------------------------------------------------------------------------

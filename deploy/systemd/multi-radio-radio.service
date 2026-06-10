@@ -9,7 +9,7 @@ User=multi-radio
 Group=multi-radio
 WorkingDirectory=/opt/multi-radio
 Environment=MR_BACKEND_CONFIG=/etc/multi-radio/backend.radio.ini
-ExecStart=/opt/multi-radio/build/backend/multi_radio_radio
+ExecStart=/opt/multi-radio/backend/multi_radio_radio
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

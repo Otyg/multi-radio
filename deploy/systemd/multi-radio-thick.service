@@ -9,7 +9,7 @@ User=multi-radio
 Group=multi-radio
 WorkingDirectory=/opt/multi-radio
 Environment=MR_BACKEND_CONFIG=/etc/multi-radio/backend.thick.ini
-ExecStart=/opt/multi-radio/build/backend/multi_radio_server
+ExecStart=/opt/multi-radio/backend/multi_radio_server
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
