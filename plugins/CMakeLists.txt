@@ -45,6 +45,7 @@ function(mr_add_plugin target source)
   target_link_libraries(${target} PRIVATE ${MR_PLUGIN_LIQUID_TARGET})
   target_compile_definitions(${target} PRIVATE MR_PLUGIN_HAS_LIQUID=1)
   install(TARGETS ${target} LIBRARY DESTINATION "backend/plugins")
+  set_property(GLOBAL APPEND PROPERTY MR_PLUGIN_TARGETS ${target})
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -126,4 +127,9 @@ if(LIBMODES_LIB AND LIBMODES_INC)
   message(STATUS "adsb_demod: using libmodes from ${LIBMODES_LIB}")
 else()
   message(FATAL_ERROR "libmodes not found — cannot build adsb_demod. Install libmodes or check /usr/local/lib.")
+endif()
+
+get_property(MR_PLUGIN_TARGETS GLOBAL PROPERTY MR_PLUGIN_TARGETS)
+if(MR_PLUGIN_TARGETS)
+  add_custom_target(multi_radio_plugins DEPENDS ${MR_PLUGIN_TARGETS})
 endif()
