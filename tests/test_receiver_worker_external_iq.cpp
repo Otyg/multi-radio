@@ -40,6 +40,9 @@ int main() {
   for (int attempt = 0; attempt < 10; ++attempt) {
     auto iq = bus->WaitForIqFrame(&cursor, 250);
     if (iq.has_value() && iq->receiver_id == 7) {
+      assert(iq->sample_rate_hz == frame.sample_rate_hz);
+      assert(iq->tuned_frequency_hz == frame.tuned_frequency_hz);
+      assert(iq->interleaved_iq_s16le.size() == frame.interleaved_iq_s16le.size());
       saw_iq = true;
       break;
     }

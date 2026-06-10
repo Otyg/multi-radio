@@ -54,6 +54,18 @@ void EventBus::PublishIqFrame(const IqFrame& frame) {
   iq_frames_cv_.notify_all();
 }
 
+void EventBus::PublishRawIqFrame(const IqFrame& frame) {
+  {
+    std::lock_guard<std::mutex> lock(raw_iq_frames_mu_);
+    raw_iq_frames_.push_back(frame);
+    while (raw_iq_frames_.size() > max_messages_) {
+      raw_iq_frames_.pop_front();
+      ++raw_iq_base_index_;
+    }
+  }
+  raw_iq_frames_cv_.notify_all();
+}
+
 std::optional<ReceiverEvent> EventBus::WaitForReceiverEvent(size_t* cursor, uint32_t timeout_ms) {
   std::unique_lock<std::mutex> lock(receiver_events_mu_);
   auto has_data = [&]() {
@@ -130,6 +142,25 @@ std::optional<IqFrame> EventBus::WaitForIqFrame(size_t* cursor, uint32_t timeout
   return value;
 }
 
+std::optional<IqFrame> EventBus::WaitForRawIqFrame(size_t* cursor, uint32_t timeout_ms) {
+  std::unique_lock<std::mutex> lock(raw_iq_frames_mu_);
+  auto has_data = [&]() {
+    if (*cursor < raw_iq_base_index_) {
+      *cursor = raw_iq_base_index_;
+    }
+    return *cursor < raw_iq_base_index_ + raw_iq_frames_.size();
+  };
+
+  if (!raw_iq_frames_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), has_data)) {
+    return std::nullopt;
+  }
+
+  const size_t offset = *cursor - raw_iq_base_index_;
+  const IqFrame value = raw_iq_frames_.at(offset);
+  ++(*cursor);
+  return value;
+}
+
 size_t EventBus::AudioFrameCursorNow() {
   std::lock_guard<std::mutex> lock(audio_frames_mu_);
   return audio_base_index_ + audio_frames_.size();
@@ -138,6 +169,11 @@ size_t EventBus::AudioFrameCursorNow() {
 size_t EventBus::IqFrameCursorNow() {
   std::lock_guard<std::mutex> lock(iq_frames_mu_);
   return iq_base_index_ + iq_frames_.size();
+}
+
+size_t EventBus::RawIqFrameCursorNow() {
+  std::lock_guard<std::mutex> lock(raw_iq_frames_mu_);
+  return raw_iq_base_index_ + raw_iq_frames_.size();
 }
 
 }  // namespace multi_radio

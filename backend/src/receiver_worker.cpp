@@ -39,8 +39,8 @@ constexpr uint32_t kAudioSampleRateHzNfm = 12000;
 constexpr uint32_t kAudioSampleRateHzWfm = 32000;
 constexpr uint32_t kAudioFrameIntervalMs = 20;
 constexpr uint32_t kAudioStatsIntervalMs = 1000;
-constexpr uint32_t kIqVisualizationIntervalMs = 50;
 constexpr const char* kAudioPipelineRevision = "audio-v12-stream-paced";
+constexpr uint32_t kIqVisualizationIntervalMs = 50;
 constexpr size_t kIqVisualizationMaxInterleavedSamples = 8192;
 constexpr double kSyntheticIqToneFrequencyHz = 12000.0;
 constexpr int16_t kIqClipThresholdS16 = 32256;
@@ -393,6 +393,20 @@ IQSampleBlock BuildSyntheticIqBlock(uint32_t sample_rate_hz, uint32_t tuned_freq
 
 IqFrame BuildIqFrame(const IQSampleBlock& block, uint32_t receiver_id, double tuned_frequency_hz, uint64_t sequence,
                      uint64_t sample_index) {
+  IqFrame frame;
+  frame.unix_ms = UnixMillisNow();
+  frame.receiver_id = receiver_id;
+  frame.sample_rate_hz = block.sample_rate_hz;
+  frame.tuned_frequency_hz = tuned_frequency_hz;
+  frame.sequence = sequence;
+  frame.sample_index = sample_index;
+
+  frame.interleaved_iq_s16le = block.interleaved_iq;
+  return frame;
+}
+
+IqFrame BuildVisualizationIqFrame(const IQSampleBlock& block, uint32_t receiver_id, double tuned_frequency_hz,
+                                  uint64_t sequence, uint64_t sample_index) {
   IqFrame frame;
   frame.unix_ms = UnixMillisNow();
   frame.receiver_id = receiver_id;
@@ -1411,13 +1425,17 @@ void ReceiverWorker::ProcessLoop() {
         iq_shared_.interleaved_samples += static_cast<uint64_t>(entry.block.interleaved_iq.size());
       }
 
+      IqFrame raw_iq_frame = BuildIqFrame(entry.block, receiver_id_, entry.tuned_frequency_hz,
+                                          iq_sequence, iq_sample_index);
+      event_bus_->PublishRawIqFrame(raw_iq_frame);
       const auto iq_now = std::chrono::steady_clock::now();
       if (iq_now >= next_iq_visualization_at) {
-        IqFrame iq_frame = BuildIqFrame(entry.block, receiver_id_, entry.tuned_frequency_hz,
-                                        iq_sequence++, iq_sample_index);
+        IqFrame iq_frame = BuildVisualizationIqFrame(entry.block, receiver_id_, entry.tuned_frequency_hz,
+                                                     iq_sequence, iq_sample_index);
         event_bus_->PublishIqFrame(iq_frame);
         next_iq_visualization_at = iq_now + std::chrono::milliseconds(kIqVisualizationIntervalMs);
       }
+      ++iq_sequence;
       iq_sample_index += block_samples;
     }
 

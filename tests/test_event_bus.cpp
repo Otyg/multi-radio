@@ -65,5 +65,25 @@ int main() {
   assert(iq_live->interleaved_iq_s16le[0] == 300);
   assert(iq_live->interleaved_iq_s16le[1] == -300);
 
+  IqFrame raw1 = iq1;
+  raw1.unix_ms = 20;
+  bus.PublishRawIqFrame(raw1);
+
+  size_t raw_cursor = bus.RawIqFrameCursorNow();
+  auto raw_historical = bus.WaitForRawIqFrame(&raw_cursor, 5);
+  assert(!raw_historical.has_value());
+
+  IqFrame raw2 = iq2;
+  raw2.unix_ms = 21;
+  raw2.interleaved_iq_s16le = {1, 2, 3, 4, 5, 6};
+  bus.PublishRawIqFrame(raw2);
+
+  auto raw_live = bus.WaitForRawIqFrame(&raw_cursor, 20);
+  assert(raw_live.has_value());
+  assert(raw_live->unix_ms == 21);
+  assert(raw_live->interleaved_iq_s16le.size() == 6);
+  assert(raw_live->interleaved_iq_s16le[4] == 5);
+  assert(raw_live->interleaved_iq_s16le[5] == 6);
+
   return 0;
 }

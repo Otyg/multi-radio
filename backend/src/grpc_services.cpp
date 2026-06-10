@@ -498,14 +498,14 @@ class RemoteRadioClient {
     while (relay_running_.load()) {
       grpc::ClientContext context;
       AddAuth(&context);
-      v1::StreamIqFramesRequest request;
+      v1::StreamRawIqFramesRequest request;
       request.set_include_all_receivers(true);
       request.set_receiver_id(0);
       {
         std::lock_guard<std::mutex> lock(relay_context_mu_);
         relay_context_ = &context;
       }
-      auto reader = telemetry_client_->StreamIqFrames(&context, request);
+      auto reader = telemetry_client_->StreamRawIqFrames(&context, request);
       if (!announced_connect) {
         PublishRelayEvent(event_bus, EventKind::kInfo,
                           "remote IQ relay connecting to " + target_);
@@ -936,6 +936,43 @@ class TelemetryServiceImpl final : public v1::TelemetryService::Service {
         break;
       }
     }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status StreamRawIqFrames(grpc::ServerContext* context,
+                                 const v1::StreamRawIqFramesRequest* request,
+                                 grpc::ServerWriter<v1::IqFrame>* writer) override {
+    if (!auth::ValidateBearerToken(*context, auth_token_)) {
+      return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid bearer token");
+    }
+
+    size_t cursor = event_bus_->RawIqFrameCursorNow();
+    while (!context->IsCancelled()) {
+      auto frame = event_bus_->WaitForRawIqFrame(&cursor, 1000);
+      if (!frame.has_value()) {
+        continue;
+      }
+      if (!request->include_all_receivers() && frame->receiver_id != request->receiver_id()) {
+        continue;
+      }
+
+      v1::IqFrame response;
+      response.set_unix_ms(frame->unix_ms);
+      response.set_receiver_id(frame->receiver_id);
+      response.set_sample_rate_hz(frame->sample_rate_hz);
+      response.set_tuned_frequency_hz(frame->tuned_frequency_hz);
+      response.set_sequence(frame->sequence);
+      response.set_sample_index(frame->sample_index);
+      if (!frame->interleaved_iq_s16le.empty()) {
+        response.set_interleaved_iq_s16le(
+            frame->interleaved_iq_s16le.data(),
+            static_cast<int>(frame->interleaved_iq_s16le.size() * sizeof(int16_t)));
+      }
+      if (!writer->Write(response)) {
+        break;
+      }
+    }
+
     return grpc::Status::OK;
   }
 
