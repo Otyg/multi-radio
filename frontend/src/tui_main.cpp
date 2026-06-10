@@ -113,8 +113,18 @@ class TuiApp {
         renderer_(std::filesystem::temp_directory_path() / "multi-radio-tui") {
     QObject::connect(&client_, &GrpcClient::RadarSnapshotReceived, &client_,
                      [this](const QVector<RadarTargetUpdate>& targets, const QStringList& removed_ids, quint64) {
-                       for (const QString& id : removed_ids) {
-                         targets_.erase(id.toStdString());
+                       (void)removed_ids;
+                       const auto now_ms = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+                       for (auto it = targets_.begin(); it != targets_.end();) {
+                         const auto& target = it->second;
+                         const std::uint64_t window =
+                             target.kind == RadarTargetKind::kVessel ? 600'000ULL : 60'000ULL;
+                         if (target.unix_ms != 0 && now_ms > target.unix_ms &&
+                             (now_ms - target.unix_ms) > window) {
+                           it = targets_.erase(it);
+                         } else {
+                           ++it;
+                         }
                        }
                        for (const auto& target : targets) {
                          targets_[target.id.toStdString()] = target;

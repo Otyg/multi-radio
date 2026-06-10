@@ -67,6 +67,20 @@ static double BearingDegrees(double lat1, double lon1, double lat2, double lon2)
   return std::fmod(bearing + 360.0, 360.0);
 }
 
+static std::uint64_t NowMs() {
+  return static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+}
+
+static std::uint64_t ExpireWindowMs(multi_radio::RadarTargetKind kind) {
+  return kind == multi_radio::RadarTargetKind::kVessel ? 600'000ULL : 60'000ULL;
+}
+
+static bool IsExpired(const multi_radio::RadarTargetUpdate& target, std::uint64_t now_ms) {
+  if (target.unix_ms == 0) return false;
+  const std::uint64_t window = ExpireWindowMs(target.kind);
+  return now_ms > target.unix_ms && (now_ms - target.unix_ms) > window;
+}
+
 }  // namespace
 
 VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
@@ -94,8 +108,16 @@ VisibleObjectsWidget::VisibleObjectsWidget(QWidget* parent) : QWidget(parent) {
 
 void VisibleObjectsWidget::ApplySnapshot(const QVector<RadarTargetUpdate>& targets,
                                          const QStringList& removed_ids) {
-  for (const QString& rid : removed_ids)
-    rows_.erase(ToKey(rid));
+  Q_UNUSED(removed_ids);
+
+  const std::uint64_t now_ms = NowMs();
+  for (auto it = rows_.begin(); it != rows_.end();) {
+    if (IsExpired(it->second.last, now_ms)) {
+      it = rows_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 
   for (const auto& t : targets) {
     auto& state = rows_[ToKey(t.id)];
@@ -119,7 +141,9 @@ void VisibleObjectsWidget::RefreshTable() {
   std::vector<Row> items;
   items.reserve(rows_.size());
   const bool have_center = (center_lat_ != 0.0 || center_lon_ != 0.0);
+  const std::uint64_t now_ms = NowMs();
   for (const auto& [_, st] : rows_) {
+    if (IsExpired(st.last, now_ms)) continue;
     if (hide_low_speed_ && st.last.kind == RadarTargetKind::kVessel && st.last.sog < 1.0) continue;
     double dist = std::numeric_limits<double>::infinity();
     double bearing = 0.0;

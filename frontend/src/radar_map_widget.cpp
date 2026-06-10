@@ -5,6 +5,7 @@
 #include <limits>
 
 #include <QFont>
+#include <QDateTime>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -24,6 +25,9 @@ constexpr double kDefaultTrailWindowSeconds = 120.0;
 constexpr double kVectorMinutes          = (10.0 / 60.0);  // speed vector shows 10 s of travel
 constexpr double kKnotsToKmH             = 1.852;
 constexpr double kMinSogForVector        = 1.0;   // knots — below this no vector is drawn
+constexpr std::uint64_t kAirTargetExpireMs = 60'000;
+constexpr std::uint64_t kSeaTargetExpireMs = 600'000;
+constexpr double kFadeWindowRatio = 0.5;
 
 static std::string ToKey(const QString& id) { return id.toStdString(); }
 
@@ -33,6 +37,32 @@ static QColor WithAlpha(const QColor& c, double alpha) {
   QColor out = c;
   out.setAlphaF(std::clamp(alpha, 0.0, 1.0));
   return out;
+}
+
+static std::uint64_t NowMs() {
+  return static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+}
+
+static std::uint64_t ExpireWindowMs(RadarTargetKind kind) {
+  return kind == RadarTargetKind::kVessel ? kSeaTargetExpireMs : kAirTargetExpireMs;
+}
+
+static bool IsExpired(const RadarTargetUpdate& target, std::uint64_t now_ms) {
+  if (target.unix_ms == 0) return false;
+  const std::uint64_t window = ExpireWindowMs(target.kind);
+  return now_ms > target.unix_ms && (now_ms - target.unix_ms) > window;
+}
+
+static double TargetAlpha(const RadarTargetUpdate& target, std::uint64_t now_ms) {
+  if (target.unix_ms == 0) return 1.0;
+  const std::uint64_t window = ExpireWindowMs(target.kind);
+  const std::uint64_t fade_window = static_cast<std::uint64_t>(static_cast<double>(window) * kFadeWindowRatio);
+  if (fade_window == 0 || now_ms <= target.unix_ms) return 1.0;
+  const std::uint64_t age = now_ms - target.unix_ms;
+  if (age <= window - fade_window) return 1.0;
+  const double progress = static_cast<double>(age - (window - fade_window)) /
+                          static_cast<double>(std::max<std::uint64_t>(1, fade_window));
+  return std::clamp(1.0 - progress, 0.12, 1.0);
 }
 
 }  // namespace
@@ -141,8 +171,16 @@ void RadarMapWidget::SetFixedObjects(const std::vector<RadarFixedObject>& fixed)
 
 void RadarMapWidget::ApplySnapshot(const QVector<RadarTargetUpdate>& targets,
                                    const QStringList& removed_ids) {
-  for (const QString& rid : removed_ids)
-    targets_.erase(rid.toStdString());
+  Q_UNUSED(removed_ids);
+
+  const std::uint64_t now_ms = NowMs();
+  for (auto it = targets_.begin(); it != targets_.end();) {
+    if (IsExpired(it->second.last, now_ms)) {
+      it = targets_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 
   for (const auto& upd : targets) {
     if (upd.id.isEmpty()) continue;
@@ -246,6 +284,7 @@ QString RadarMapWidget::PickTargetAt(const QPointF& pos_px) const {
 }
 
 void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
+  const std::uint64_t now_ms = NowMs();
   const double w = width();
   const double h = height();
   const double cx = w * 0.5;
@@ -360,11 +399,13 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
   // Trails.
   for (const auto& [_, state] : targets_) {
     const auto& t = state.last;
+    if (IsExpired(t, now_ms)) continue;
     if (hide_low_speed_ && t.kind == RadarTargetKind::kVessel && t.sog < 1.0) continue;
     QColor color = (t.kind == RadarTargetKind::kAircraft)    ? aircraft_color_
                  : (t.kind == RadarTargetKind::kSarAircraft) ? sar_color_
                  :                                             vessel_color_;
     if (!selected_target_id_.isEmpty() && t.id == selected_target_id_) color = selected_color_;
+    color = WithAlpha(color, TargetAlpha(t, now_ms));
 
     // Draw recent trail points with fading alpha.
     if (!state.trail.empty()) {
@@ -388,6 +429,7 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
 
   for (const auto& [_, state] : targets_) {
     const auto& t = state.last;
+    if (IsExpired(t, now_ms)) continue;
     if (hide_low_speed_ && t.kind == RadarTargetKind::kVessel && t.sog < 1.0) continue;
     const QPointF p = LatLonToXY(t.lat, t.lon, cx, cy, px_per_km);
 
@@ -395,6 +437,7 @@ void RadarMapWidget::paintEvent(QPaintEvent* /*event*/) {
                  : (t.kind == RadarTargetKind::kSarAircraft) ? sar_color_
                  :                                             vessel_color_;
     if (!selected_target_id_.isEmpty() && t.id == selected_target_id_) color = selected_color_;
+    color = WithAlpha(color, TargetAlpha(t, now_ms));
 
     painter.setPen(QPen(color, 1));
     painter.setBrush(color);
