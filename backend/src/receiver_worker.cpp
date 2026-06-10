@@ -167,6 +167,16 @@ const char* ModulationToken(Modulation modulation) {
       return "AM";
     case Modulation::kWfm:
       return "WFM";
+    case Modulation::kFsk:
+      return "FSK";
+    case Modulation::kGmsk:
+      return "GMSK";
+    case Modulation::kPpm:
+      return "PPM";
+    case Modulation::kAdsbMod:
+      return "ADSB";
+    case Modulation::kAisDual:
+      return "AIS_DUAL";
     case Modulation::kVdesAsm:
       return "VDES_ASM";
     case Modulation::kNfm:
@@ -216,9 +226,21 @@ struct RuntimeChannel {
   uint32_t channel_bandwidth_hz = 0;
 };
 
+std::string DescribeRuntimeChannel(const RuntimeChannel& channel) {
+  std::ostringstream out;
+  out << "idx=" << channel.index
+      << " label=" << channel.label
+      << " freq_mhz=" << FormatDouble(channel.frequency_hz / 1e6, 3)
+      << " mod=" << ModulationToken(channel.modulation)
+      << " dwell_ms=" << channel.dwell_ms
+      << " bw_hz=" << channel.channel_bandwidth_hz;
+  return out.str();
+}
+
 RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config, int channel_idx) {
   RuntimeChannel out;
-  if (mode == RadioMode::kScanList && !config.scan_list_channels.empty()) {
+  if ((mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) &&
+      !config.scan_list_channels.empty()) {
     const int n = static_cast<int>(config.scan_list_channels.size());
     const int idx = std::clamp(channel_idx, 0, n - 1);
     const auto& ch = config.scan_list_channels[static_cast<size_t>(idx)];
@@ -472,6 +494,10 @@ bool ReceiverWorker::SetMode(RadioMode mode, std::string* error) {
   std::ostringstream msg;
   msg << "mode changed to " << ToString(mode);
   PublishEvent(EventKind::kStateChange, msg.str());
+  const RuntimeChannel ch = SelectRuntimeChannel(mode, GetModeConfig(), 0);
+  std::ostringstream diag;
+  diag << "MODE_DIAG mode=" << ToString(mode) << " " << DescribeRuntimeChannel(ch);
+  PublishEvent(EventKind::kInfo, diag.str(), ch.frequency_hz);
   return true;
 }
 
@@ -504,7 +530,10 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
     error->clear();
   }
   std::ostringstream msg;
-  msg << "mode config updated freq_list=" << mode_config_.frequency_list_hz.size()
+  msg << "mode config updated mode=" << ToString(mode_)
+      << " fixed_mod=" << ModulationToken(mode_config_.fixed_modulation)
+      << " fixed_freq_mhz=" << FormatDouble(mode_config_.fixed_frequency_hz / 1e6, 3)
+      << " freq_list=" << mode_config_.frequency_list_hz.size()
       << " range=" << FormatDouble(mode_config_.range_start_hz / 1e6, 3)
       << "-" << FormatDouble(mode_config_.range_end_hz / 1e6, 3)
       << " MHz step=" << FormatDouble(mode_config_.range_step_hz / 1e3, 1) << " kHz"
@@ -557,7 +586,8 @@ void ReceiverWorker::PushPluginConfig() {
      runs first.  The per-channel demodulator is switched in ProcessLoop on each channel
      transition, so PushPluginConfig only needs to set the initial demodulator and ensure
      the decoder chain is ready for whichever channel type fires first. */
-  const bool is_scan_list_mode = (current_mode == RadioMode::kScanList);
+  const bool is_scan_list_mode =
+      (current_mode == RadioMode::kScanList || current_mode == RadioMode::kAirMarinePlot);
   bool has_ais_dual = (cfg.fixed_modulation == Modulation::kAisDual);
   if (is_scan_list_mode && !has_ais_dual) {
     for (const auto& ch : cfg.scan_list_channels) {
@@ -686,6 +716,15 @@ void ReceiverWorker::PushPluginConfig() {
                    << " vdes_sync_err=" << std::min<uint32_t>(8u, cfg.vdes_asm_sync_errors_max);
   }
   PublishEvent(EventKind::kInfo, plugin_cfg_msg.str());
+  const RuntimeChannel active_channel = SelectRuntimeChannel(current_mode, cfg, 0);
+  std::ostringstream runtime_diag_msg;
+  runtime_diag_msg << "RUNTIME_CHAIN mode=" << ToString(current_mode)
+                   << " " << DescribeRuntimeChannel(active_channel)
+                   << " demod=" << (demod_name.empty() ? "(none/FM)" : demod_name)
+                   << " decoder=" << decoder_label
+                   << " postproc=" << postproc_label
+                   << " asm_postproc=" << asm_postproc_label;
+  PublishEvent(EventKind::kInfo, runtime_diag_msg.str(), active_channel.frequency_hz);
   fprintf(stderr,
           "[plugin_cfg] demod='%s'  decoder='%s'  postproc='%s'  asm_postproc='%s'"
           "  invert=%s  baud=%u  vdes_bps=%u  vdes_pll_bw=%.4f  vdes_cand_bits=%u  vdes_sync_err=%u\n",
@@ -715,6 +754,7 @@ void ReceiverWorker::IngestLoop() {
      even before the client sends a ModeConfig. */
   int configured_ppm_correction = LoadHardwarePpm() - 1; /* -1 forces set on first loop */
   bool device_opened = false;
+  std::string last_runtime_channel_diag;
 
   while (running_.load()) {
     RadioMode mode = RadioMode::kFixed;
@@ -728,6 +768,15 @@ void ReceiverWorker::IngestLoop() {
     }
 
     const RuntimeChannel ch = SelectRuntimeChannel(mode, config, scan_ch_idx);
+    const std::string runtime_channel_diag = DescribeRuntimeChannel(ch);
+    if (runtime_channel_diag != last_runtime_channel_diag) {
+      std::ostringstream runtime_diag_msg;
+      runtime_diag_msg << "INGEST_CHANNEL mode=" << ToString(mode)
+                       << " " << runtime_channel_diag
+                       << " scan_idx=" << scan_ch_idx;
+      PublishEvent(EventKind::kInfo, runtime_diag_msg.str(), ch.frequency_hz);
+      last_runtime_channel_diag = runtime_channel_diag;
+    }
     const uint32_t tuned_frequency_hz =
         ch.frequency_hz <= 0.0 ? 0 : static_cast<uint32_t>(std::llround(ch.frequency_hz));
     int64_t hardware_frequency_i64 = static_cast<int64_t>(tuned_frequency_hz);
@@ -1867,7 +1916,7 @@ void ReceiverWorker::RunLoop() {
       // Scanner mode bypasses this — it sends muted (zero) frames while squelch is closed,
       // so there is no underrun risk and no need to accumulate a prefill.
       if (!buffer_primed && audio_buffer_ != nullptr) {
-        if (mode == RadioMode::kScanList) {
+        if (mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) {
           buffer_primed = true;  // scanner: muted frames prevent underruns, no prefill needed
         } else {
           const size_t minimum_prefill =
@@ -1937,7 +1986,8 @@ void ReceiverWorker::RunLoop() {
 
         // Squelch audio gate: mute frame when scanner squelch is closed (non-monitor mode).
         // The ring buffer is still drained above to prevent overflow; only output is silenced.
-        if (mode == RadioMode::kScanList && !config.scan_list_monitor_mode && scan_audio_muted) {
+        if ((mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) &&
+            !config.scan_list_monitor_mode && scan_audio_muted) {
           std::fill(frame.pcm_s16le.begin(), frame.pcm_s16le.end(), int16_t{0});
         }
 
@@ -1956,7 +2006,8 @@ void ReceiverWorker::RunLoop() {
     // Scan list: check squelch and advance channel every 200ms.
     // Normal mode: squelch-gated audio + channel advance only on squelch close.
     // Monitor mode: full dwell always, audio always on (for calibration).
-    if (mode == RadioMode::kScanList && !config.scan_list_channels.empty() &&
+    if ((mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) &&
+        !config.scan_list_channels.empty() &&
         now >= next_scan_check_at) {
       next_scan_check_at = now + std::chrono::milliseconds(200);
 
@@ -2034,20 +2085,33 @@ void ReceiverWorker::RunLoop() {
         should_advance = false;
         scan_audio_muted = false;
         if (cur_ingest_idx != locked_idx) {
+          const auto& locked_chan = config.scan_list_channels[static_cast<size_t>(locked_idx)];
           std::lock_guard<std::mutex> lock(mu_);
           scan_channel_idx_ = locked_idx;
           scan_dwell_started_at = now;
           scan_state = ScanState::kWaiting;
         }
+        const auto& locked_chan = config.scan_list_channels[static_cast<size_t>(locked_idx)];
+        PublishEvent(EventKind::kInfo,
+                     "SCAN_SELECT reason=lock idx=" + std::to_string(locked_idx) +
+                         " mod=" + std::string(ModulationToken(locked_chan.modulation)),
+                     locked_chan.frequency_hz,
+                     false);
       }
 
       if (should_advance) {
         if (n > 1) {
           const int next_idx = (cur_ingest_idx + 1) % n;
+          const auto& next_chan = config.scan_list_channels[static_cast<size_t>(next_idx)];
           {
             std::lock_guard<std::mutex> lock(mu_);
             scan_channel_idx_ = next_idx;
           }
+          PublishEvent(EventKind::kInfo,
+                       "SCAN_SELECT reason=dwell idx=" + std::to_string(next_idx) +
+                           " mod=" + std::string(ModulationToken(next_chan.modulation)),
+                       next_chan.frequency_hz,
+                       false);
         }
         scan_dwell_started_at = now;
         scan_state = ScanState::kWaiting;
