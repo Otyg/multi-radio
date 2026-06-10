@@ -97,8 +97,14 @@ void VisibleObjectsWidget::ApplySnapshot(const QVector<RadarTargetUpdate>& targe
   for (const QString& rid : removed_ids)
     rows_.erase(ToKey(rid));
 
-  for (const auto& t : targets)
-    rows_[ToKey(t.id)].last = t;
+  for (const auto& t : targets) {
+    auto& state = rows_[ToKey(t.id)];
+    if (state.last.unix_ms > 0) {
+      state.prev_sog = state.last.sog;
+      state.prev_alt = state.last.altitude;
+    }
+    state.last = t;
+  }
 
   RefreshTable();
 }
@@ -109,7 +115,7 @@ void VisibleObjectsWidget::SetSelectedTarget(const QString& id) {
 }
 
 void VisibleObjectsWidget::RefreshTable() {
-  struct Row { RadarTargetUpdate t; double dist_km; double bearing_deg; };
+  struct Row { RadarTargetUpdate t; double dist_km; double bearing_deg; double prev_sog; double prev_alt; };
   std::vector<Row> items;
   items.reserve(rows_.size());
   const bool have_center = (center_lat_ != 0.0 || center_lon_ != 0.0);
@@ -121,7 +127,7 @@ void VisibleObjectsWidget::RefreshTable() {
       dist = HaversineKm(center_lat_, center_lon_, st.last.lat, st.last.lon);
       bearing = BearingDegrees(center_lat_, center_lon_, st.last.lat, st.last.lon);
     }
-    items.push_back(Row{st.last, dist, bearing});
+    items.push_back(Row{st.last, dist, bearing, st.prev_sog, st.prev_alt});
   }
   std::sort(items.begin(), items.end(), [](const Row& a, const Row& b) {
     return a.dist_km < b.dist_km;
@@ -153,11 +159,13 @@ void VisibleObjectsWidget::RefreshTable() {
     card->setCursor(Qt::PointingHandCursor);
     card->setMinimumHeight(88);
     card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    card->setStyleSheet(
-        "QPushButton { text-align: left; padding: 6px 8px; border-radius: 8px; "
-        "border: 1px solid #2E7D32; background: #0B1018; color: #8FA7BE; }"
+    const QString card_style =
+        "QPushButton { border: 1px solid #2E7D32; border-radius: 8px; background: #0B1018; }"
         "QPushButton:hover { background: #121E2E; border-color: #5CDB95; }"
-        "QPushButton:checked { background: #10231A; border-color: #5CDB95; color: #DDFBE6; }");
+        "QPushButton:checked { background: #10231A; border-color: #5CDB95; }"
+        "QLabel { color: #8FA7BE; font-size: 14px; background: transparent; }"
+        "QPushButton:checked QLabel { color: #DDFBE6; }";
+    card->setStyleSheet(card_style);
 
     const QString dist_text = std::isfinite(row.dist_km)
         ? QString("%1 km @ %2°").arg(row.dist_km < 10.0
@@ -165,21 +173,49 @@ void VisibleObjectsWidget::RefreshTable() {
                                          : QString::number(row.dist_km, 'f', 1))
                                 .arg(static_cast<int>(std::round(row.bearing_deg)))
         : QString("Distance unknown");
-    const QString sog_text = t.sog > 0.0 ? QString("SOG %1 kn").arg(t.sog, 0, 'f', 1) : QString("SOG —");
+
+    QString sog_trend;
+    if (t.sog > 0.0 && row.prev_sog > 0.0) {
+      if (t.sog > row.prev_sog + 0.1) sog_trend = " ↑";
+      else if (t.sog < row.prev_sog - 0.1) sog_trend = " ↓";
+    }
+    const QString sog_text = t.sog > 0.0 ? QString("SOG %1 kn%2").arg(t.sog, 0, 'f', 1).arg(sog_trend) : QString("SOG —");
+
     const QString cog_text = t.sog > 0.0 ? QString("COG %1°").arg(t.cog, 0, 'f', 1) : QString("COG —");
-    const QString alt_text = std::isfinite(t.altitude) ? QString("Alt %1 ft").arg(static_cast<int>(t.altitude)) : QString("Alt —");
+
+    QString alt_trend;
+    if (std::isfinite(t.altitude) && std::isfinite(row.prev_alt)) {
+      if (t.altitude > row.prev_alt + 25.0) alt_trend = " ↑";
+      else if (t.altitude < row.prev_alt - 25.0) alt_trend = " ↓";
+    }
+    const QString alt_text = std::isfinite(t.altitude) ? QString("Alt %1 ft%2").arg(static_cast<int>(t.altitude)).arg(alt_trend) : QString("Alt —");
+
     const QString last_text = t.unix_ms > 0
         ? QString("Last %1").arg(QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(t.unix_ms)).toLocalTime().toString("HH:mm:ss"))
         : QString("Last —");
 
-    card->setText(QString("%1 %2 — %3\n%4  %5  %6\n%7")
-                      .arg(KindIcon(t.kind))
-                      .arg(t.label.trimmed().isEmpty() ? QString("<unnamed>") : t.label.trimmed())
-                      .arg(dist_text)
-                      .arg(sog_text)
-                      .arg(cog_text)
-                      .arg(alt_text)
-                      .arg(last_text));
+    auto* card_layout = new QVBoxLayout(card);
+    card_layout->setContentsMargins(10, 6, 10, 6);
+    card_layout->setSpacing(2);
+
+    auto* line1 = new QLabel(card);
+    line1->setText(QString("<b>%1 %2</b> — %3")
+                       .arg(KindIcon(t.kind))
+                       .arg(t.label.trimmed().isEmpty() ? QString("<unnamed>") : t.label.trimmed())
+                       .arg(dist_text));
+    line1->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    auto* line2 = new QLabel(card);
+    line2->setText(QString("%1  %2  %3").arg(sog_text).arg(cog_text).arg(alt_text));
+    line2->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    auto* line3 = new QLabel(card);
+    line3->setText(last_text);
+    line3->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    card_layout->addWidget(line1);
+    card_layout->addWidget(line2);
+    card_layout->addWidget(line3);
 
     connect(card, &QPushButton::clicked, this, [this, id = t.id]() {
       emit TargetActivated(id);

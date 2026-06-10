@@ -31,6 +31,8 @@ class VisibleObjectsWidget : public QWidget {
  private:
   struct RowState {
     RadarTargetUpdate last;
+    double prev_sog = 0.0;
+    double prev_alt = std::numeric_limits<double>::quiet_NaN();
   };
 
   void RefreshTable();
