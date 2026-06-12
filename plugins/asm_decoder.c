@@ -25,6 +25,9 @@
  * Emitted signal types:
  *   AIS_MSG6       addressed binary message (raw hex if DAC≠001 or unknown FI)
  *   AIS_MSG8       broadcast binary message (same)
+ *   AIS_MSG6_RAW   raw hex from ais_decoder (full frame including FCS)
+ *   AIS_MSG8_RAW   raw hex from ais_decoder (full frame including FCS)
+ *   AIS_MSG12_RAW  raw hex from ais_decoder (full frame including FCS)
  *   AIS_MSG12      addressed safety-related text
  *   AIS_MSG14      safety-related broadcast text
  *   AIS_ASM_*      per-FI decoded payloads (see list above)
@@ -98,6 +101,22 @@ static void ais_str(const uint8_t* d, uint32_t db, int start, int n, char* out) 
     end = n;
     while (end > 0 && (out[end-1] == '@' || out[end-1] == ' ')) --end;
     out[end] = '\0';
+}
+
+/* Helper function to convert hex string to byte array */
+static uint32_t hex_to_bytes(const char* hex_str, uint8_t* out_buf, uint32_t out_buf_cap) {
+    uint32_t len = 0;
+    if (!hex_str || !out_buf || out_buf_cap == 0) return 0;
+
+    for (int i = 0; hex_str[i] && hex_str[i+1]; i += 2) {
+        if (len >= out_buf_cap) break;
+        char hex_byte[3];
+        hex_byte[0] = hex_str[i];
+        hex_byte[1] = hex_str[i+1];
+        hex_byte[2] = '\0';
+        out_buf[len++] = (uint8_t)strtol(hex_byte, NULL, 16);
+    }
+    return len;
 }
 
 /* Hex-encode `bytes` bytes starting at frame_buf[offset]. */
@@ -185,7 +204,7 @@ static const char* notice_type_name(int t) {
  * Bit positions are relative to start of app data (after DAC+FI).
  */
 static void decode_fi11_21(const uint8_t* d, uint32_t db, int app_off,
-                            uint32_t mmsi, int fi,
+                            uint32_t mmsi, int fi, int msg_type,
                             MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     /* Wind */
     int   wspd = (int)ais_u(d, db, app_off,      7);   /* kn, 127=N/A */
@@ -208,35 +227,6 @@ static void decode_fi11_21(const uint8_t* d, uint32_t db, int app_off,
     char kv[768], pay[256];
     const char* src = (fi == 21) ? "ship" : "shore";
 
-    snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_METHYDRO\","
-        "\"fi\":\"%d\",\"mmsi\":\"%u\",\"source\":\"%s\","
-        "\"wind_speed_kn\":\"%s\","
-        "\"wind_dir_deg\":\"%s\","
-        "\"wind_gust_kn\":\"%s\","
-        "\"air_temp_c\":\"%s\","
-        "\"rel_humidity_pct\":\"%s\","
-        "\"dew_point_c\":\"%s\","
-        "\"pressure_hpa\":\"%s\","
-        "\"pressure_trend_hpa3h\":\"%lld\","
-        "\"visibility_nm\":\"%s\","
-        "\"precipitation\":\"%s\","
-        "\"salinity_ppt\":\"%s\","
-        "\"ice\":\"%s\"}",
-        fi, mmsi, src,
-        wspd == 127 ? "N/A" : (snprintf((char[16]){""},16,"%d",wspd), (char[16]){""}),
-        wdir == 360 ? "N/A" : (snprintf((char[16]){""},16,"%d",wdir), (char[16]){""}),
-        wgst == 127 ? "N/A" : (snprintf((char[16]){""},16,"%d",wgst), (char[16]){""}),
-        atmp == 601 ? "N/A" : (snprintf((char[16]){""},16,"%.1f",(double)atmp/10.0),(char[16]){""}),
-        rhum == 101 ? "N/A" : (snprintf((char[16]){""},16,"%d",rhum),(char[16]){""}),
-        dew  == 501 ? "N/A" : (snprintf((char[16]){""},16,"%.1f",(double)dew/10.0),(char[16]){""}),
-        pres == 511 ? "N/A" : (snprintf((char[16]){""},16,"%d",pres+800),(char[16]){""}),
-        (long long)ptrend,
-        vis  == 255 ? "N/A" : (snprintf((char[16]){""},16,"%.1f",(double)vis/10.0),(char[16]){""}),
-        precip_name(prec),
-        sal  == 511 ? "N/A" : (snprintf((char[16]){""},16,"%.1f",(double)sal/10.0),(char[16]){""}),
-        ice  == 3   ? "N/A" : (ice == 1 ? "Yes" : "No"));
-
     /* Simpler version without compound-literal trick for older compilers */
     char ws[12], wd[12], wg[12], at[12], rh[12], dp[12], pr[12], vi[12], sl[12];
     if (wspd==127) snprintf(ws,12,"N/A"); else snprintf(ws,12,"%d kn",wspd);
@@ -251,7 +241,7 @@ static void decode_fi11_21(const uint8_t* d, uint32_t db, int app_off,
 
     /* Re-build kv cleanly */
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_METHYDRO\","
+        "{\"signal_type\":\"AIS_ASM_METHYDRO\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"fi\":\"%d\",\"mmsi\":\"%u\",\"source\":\"%s\","
         "\"wind_speed_kn\":\"%s\",\"wind_dir_deg\":\"%s\","
         "\"wind_gust_kn\":\"%s\","
@@ -262,7 +252,7 @@ static void decode_fi11_21(const uint8_t* d, uint32_t db, int app_off,
         "\"precipitation\":\"%s\","
         "\"salinity_ppt\":\"%s\","
         "\"ice\":\"%s\"}",
-        fi, mmsi, src,
+        msg_type, mmsi, fi, mmsi, src,
         ws, wd, wg, at, rh, dp, pr, (long long)ptrend, vi,
         precip_name(prec), sl,
         ice == 3 ? "N/A" : (ice == 1 ? "Yes" : "No"));
@@ -276,7 +266,7 @@ static void decode_fi11_21(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=13: Fairway Closed */
 static void decode_fi13(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     char reason[21];
     ais_str(d, db, app_off, 20, reason);  /* 20 chars × 6 bit */
@@ -289,12 +279,12 @@ static void decode_fi13(const uint8_t* d, uint32_t db, int app_off,
 
     char kv[512], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_FAIRWAY_CLOSED\","
+        "{\"signal_type\":\"AIS_ASM_FAIRWAY_CLOSED\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\","
         "\"reason\":\"%s\","
         "\"from\":\"day%02d %02d:%02d\","
         "\"to\":\"day%02d %02d:%02d\"}",
-        mmsi, reason, from_day, from_hour, from_min,
+        msg_type, mmsi, mmsi, reason, from_day, from_hour, from_min,
         to_day, to_hour, to_min);
     snprintf(pay, sizeof(pay),
         "Fairway Closed MMSI:%u Reason:%s From:day%02d %02d:%02d To:day%02d %02d:%02d",
@@ -304,14 +294,14 @@ static void decode_fi13(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=16: Number of Persons on Board (app bits: 13+3 spare = 16 bits) */
 static void decode_fi16(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     int persons = (int)ais_u(d, db, app_off, 13);  /* 0-8190; 8191=N/A */
     char kv[256], pay[128];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_PERSONS_ON_BOARD\","
+        "{\"signal_type\":\"AIS_ASM_PERSONS_ON_BOARD\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\",\"persons\":\"%s\"}",
-        mmsi, persons == 8191 ? "N/A" : (snprintf(pay,128,"%d",persons),pay));
+        msg_type, mmsi, mmsi, persons == 8191 ? "N/A" : (snprintf(pay,128,"%d",persons),pay));
     snprintf(pay, sizeof(pay),
         "Persons on Board MMSI:%u Count:%s",
         mmsi, persons == 8191 ? "N/A" : (snprintf(kv+200,50,"%d",persons),kv+200));
@@ -320,7 +310,7 @@ static void decode_fi16(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=17: VTS-Generated Safety-Related Text (6-bit ASCII, variable) */
 static void decode_fi17(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     /* App data: link ID (10 bits) + text (6-bit ASCII, variable) */
     int link_id = (int)ais_u(d, db, app_off, 10);
@@ -333,16 +323,16 @@ static void decode_fi17(const uint8_t* d, uint32_t db, int app_off,
     if (n_chars > 0) ais_str(d, db, app_off + 10, n_chars, text);
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_VTS_TEXT\","
+        "{\"signal_type\":\"AIS_ASM_VTS_TEXT\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\",\"link_id\":\"%d\",\"text\":\"%s\"}",
-        mmsi, link_id, text);
+        msg_type, mmsi, mmsi, link_id, text);
     snprintf(pay, sizeof(pay), "VTS Text MMSI:%u [%d] %s", mmsi, link_id, text);
     emit("AIS_ASM_VTS_TEXT", pay, freq, ms, kv, ud);
 }
 
 /* FI=22: Area Notice Broadcast (variable length, sub-areas) */
 static void decode_fi22(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     int link_id    = (int)ais_u(d, db, app_off,      10);
     int notice_t   = (int)ais_u(d, db, app_off + 10,  7);
@@ -354,14 +344,14 @@ static void decode_fi22(const uint8_t* d, uint32_t db, int app_off,
 
     char kv[512], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_AREA_NOTICE\","
+        "{\"signal_type\":\"AIS_ASM_AREA_NOTICE\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\","
         "\"link_id\":\"%d\","
         "\"notice_type\":\"%d\","
         "\"notice_name\":\"%s\","
         "\"utc\":\"M%02d D%02d %02d:%02d\","
         "\"duration_min\":\"%d\"}",
-        mmsi, link_id, notice_t, notice_type_name(notice_t),
+        msg_type, mmsi, mmsi, link_id, notice_t, notice_type_name(notice_t),
         month, day, hour, minute, duration);
     snprintf(pay, sizeof(pay),
         "Area Notice MMSI:%u [%d] %s UTC:M%02d D%02d %02d:%02d Dur:%dmin",
@@ -372,7 +362,7 @@ static void decode_fi22(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=26: Environmental (sensor report, first sensor only) */
 static void decode_fi26(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     /* Report type (4 bits), report data (variable). Emit first report type. */
     int report_t = (int)ais_u(d, db, app_off, 4);
@@ -384,9 +374,9 @@ static void decode_fi26(const uint8_t* d, uint32_t db, int app_off,
     };
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_ENVIRONMENTAL\","
+        "{\"signal_type\":\"AIS_ASM_ENVIRONMENTAL\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\",\"report_type\":\"%d\",\"report_name\":\"%s\"}",
-        mmsi, report_t,
+        msg_type, mmsi, mmsi, report_t,
         (report_t < 16) ? rep_names[report_t] : "Unknown");
     snprintf(pay, sizeof(pay),
         "Environmental MMSI:%u Report:%d(%s)",
@@ -396,7 +386,7 @@ static void decode_fi26(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=27: Route Information */
 static void decode_fi27(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     int link_id    = (int)ais_u(d, db, app_off,     10);
     int sender_cla = (int)ais_u(d, db, app_off + 10, 2);
@@ -423,14 +413,14 @@ static void decode_fi27(const uint8_t* d, uint32_t db, int app_off,
     };
     char kv[512], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_ROUTE\","
+        "{\"signal_type\":\"AIS_ASM_ROUTE\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\",\"link_id\":\"%d\","
         "\"route_type\":\"%s\","
         "\"utc\":\"M%02d D%02d %02d:%02d\","
         "\"duration_min\":\"%d\","
         "\"waypoints\":\"%d\","
         "\"first_wp\":\"%s\"}",
-        mmsi, link_id,
+        msg_type, mmsi, mmsi, link_id,
         (rtype < 5) ? rtypes[rtype] : "Unknown",
         month, day, hour, minute, duration, wp_count, wp1);
     snprintf(pay, sizeof(pay),
@@ -443,7 +433,7 @@ static void decode_fi27(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=28: Text using 6-bit ASCII (variable, up to ~14 chars per slot) */
 static void decode_fi28(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     /* bits 0-1: sentence sequence; bit 2: last; bits 3-5: spare */
     int seq    = (int)ais_u(d, db, app_off, 2);
@@ -460,9 +450,9 @@ static void decode_fi28(const uint8_t* d, uint32_t db, int app_off,
 
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_TEXT\","
+        "{\"signal_type\":\"AIS_ASM_TEXT\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\",\"seq\":\"%d\",\"last\":\"%d\",\"text\":\"%s\"}",
-        mmsi, seq, is_last, text);
+        msg_type, mmsi, mmsi, seq, is_last, text);
     snprintf(pay, sizeof(pay), "ASM Text MMSI:%u [%d%s] \"%s\"",
              mmsi, seq, is_last ? "/" : "+", text);
     emit("AIS_ASM_TEXT", pay, freq, ms, kv, ud);
@@ -470,7 +460,7 @@ static void decode_fi28(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=29: Marine Traffic Signal */
 static void decode_fi29(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     int link_id  = (int)ais_u(d, db, app_off,     10);
     char name[15]; ais_str(d, db, app_off + 10, 14, name);
@@ -483,12 +473,12 @@ static void decode_fi29(const uint8_t* d, uint32_t db, int app_off,
     static const char* stat_names[] = {"N/A","In Use","Not in Use","N/A"};
     char kv[512], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_TRAFFIC_SIGNAL\","
+        "{\"signal_type\":\"AIS_ASM_TRAFFIC_SIGNAL\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\",\"link_id\":\"%d\",\"name\":\"%s\","
         "\"lat\":\"%.6f\",\"lon\":\"%.6f\","
         "\"status\":\"%s\",\"signal\":\"%d\","
         "\"utc\":\"%02d:%02d\"}",
-        mmsi, link_id, name,
+        msg_type, mmsi, mmsi, link_id, name,
         lat / 600000.0, lon / 600000.0,
         stat_names[status & 3], signal, hour, minute);
     snprintf(pay, sizeof(pay),
@@ -501,7 +491,7 @@ static void decode_fi29(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=31: Met/Hydro Data (long), 352 app bits */
 static void decode_fi31(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     int64_t lon  = ais_s(d, db, app_off,      25);  /* 1/10 min */
     int64_t lat  = ais_s(d, db, app_off + 25, 24);  /* 1/10 min */
@@ -528,50 +518,9 @@ static void decode_fi31(const uint8_t* d, uint32_t db, int app_off,
     int salinity = (int)ais_u(d, db, app_off +192,  9);   /* 0.1‰ */
     int ice      = (int)ais_u(d, db, app_off +201,  2);
 
+    /* Cleaner kv without compound literals */
     char kv[1024], pay[384];
     char ws[16], wd[16], at[16], rh[16], dp[16], pr[16], vi[16], sw[16];
-
-    if (wspd==127) snprintf(ws,16,"N/A"); else snprintf(ws,16,"%dkn",wspd);
-    if (wdir==360) snprintf(wd,16,"N/A"); else snprintf(wd,16,"%d°",wdir);
-    if (atmp==601) snprintf(at,16,"N/A"); else snprintf(at,16,"%.1f°C",(double)atmp/10.0);
-    if (rhum==101) snprintf(rh,16,"N/A"); else snprintf(rh,16,"%d%%",rhum);
-    if (dew ==501) snprintf(dp,16,"N/A"); else snprintf(dp,16,"%.1f°C",(double)dew/10.0);
-    if (pres==511) snprintf(pr,16,"N/A"); else snprintf(pr,16,"%dhPa",pres+800);
-    if (vis ==255) snprintf(vi,16,"N/A"); else snprintf(vi,16,"%.1fnm",(double)vis/10.0);
-    if (swell_h==255) snprintf(sw,16,"N/A"); else snprintf(sw,16,"%.1fm",(double)swell_h/10.0);
-
-    snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_METHYDRO_LONG\","
-        "\"mmsi\":\"%u\","
-        "\"lat\":\"%.6f\",\"lon\":\"%.6f\",\"pos_acc\":\"%d\","
-        "\"utc\":\"D%02d %02d:%02d\","
-        "\"wind_speed_kn\":\"%s\",\"wind_dir_deg\":\"%s\","
-        "\"wind_gust_kn\":\"%s\",\"gust_dir_deg\":\"%s\","
-        "\"air_temp_c\":\"%s\",\"rel_humidity_pct\":\"%s\","
-        "\"dew_point_c\":\"%s\",\"pressure_hpa\":\"%s\","
-        "\"pressure_trend\":\"%lld\","
-        "\"visibility_nm\":\"%s\","
-        "\"water_level_m\":\"%.1f\","
-        "\"swell_height_m\":\"%s\",\"swell_period_s\":\"%d\",\"swell_dir_deg\":\"%d\","
-        "\"sea_temp_c\":\"%.1f\","
-        "\"precipitation\":\"%s\","
-        "\"salinity_ppt\":\"%.1f\","
-        "\"ice\":\"%s\"}",
-        mmsi,
-        lat / 600000.0, lon / 600000.0, pos_acc,
-        utcday, utchour, utcmin,
-        ws, wd,
-        wgst == 127 ? "N/A" : (snprintf((char[16]){""},16,"%d",wgst),(char[16]){""}),
-        wgdir == 360 ? "N/A" : (snprintf((char[16]){""},16,"%d",wgdir),(char[16]){""}),
-        at, rh, dp, pr, (long long)ptr, vi,
-        wlvl == 511 ? 0.0 : (double)wlvl / 10.0,
-        sw, swell_p, swell_d,
-        stmp == 601 ? 0.0 : (double)stmp / 10.0,
-        precip_name(prec),
-        salinity == 511 ? 0.0 : (double)salinity / 10.0,
-        ice == 3 ? "N/A" : (ice == 1 ? "Yes" : "No"));
-
-    /* Cleaner kv without compound literals */
     char wgsts[16], wgdrs[16], swells[16], stmps[16], sals[16];
     if (wgst ==127) snprintf(wgsts,16,"N/A"); else snprintf(wgsts,16,"%dkn",wgst);
     if (wgdir==360) snprintf(wgdrs,16,"N/A"); else snprintf(wgdrs,16,"%d°",wgdir);
@@ -579,7 +528,7 @@ static void decode_fi31(const uint8_t* d, uint32_t db, int app_off,
     if (salinity==511) snprintf(sals,16,"N/A"); else snprintf(sals,16,"%.1f‰",(double)salinity/10.0);
 
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_METHYDRO_LONG\","
+        "{\"signal_type\":\"AIS_ASM_METHYDRO_LONG\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\","
         "\"lat\":\"%.6f\",\"lon\":\"%.6f\","
         "\"utc\":\"D%02d %02d:%02d\","
@@ -594,7 +543,7 @@ static void decode_fi31(const uint8_t* d, uint32_t db, int app_off,
         "\"precipitation\":\"%s\","
         "\"salinity_ppt\":\"%s\","
         "\"ice\":\"%s\"}",
-        mmsi,
+        msg_type, mmsi, mmsi,
         lat / 600000.0, lon / 600000.0,
         utcday, utchour, utcmin,
         ws, wd, wgsts, wgdrs, at, rh, dp, pr,
@@ -612,7 +561,7 @@ static void decode_fi31(const uint8_t* d, uint32_t db, int app_off,
 
 /* FI=32: Tidal Window */
 static void decode_fi32(const uint8_t* d, uint32_t db, int app_off,
-                         uint32_t mmsi,
+                         uint32_t mmsi, int msg_type,
                          MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     int month = (int)ais_u(d, db, app_off,      4);
     int day   = (int)ais_u(d, db, app_off +  4, 5);
@@ -628,14 +577,14 @@ static void decode_fi32(const uint8_t* d, uint32_t db, int app_off,
 
     char kv[512], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_ASM_TIDAL_WINDOW\","
+        "{\"signal_type\":\"AIS_ASM_TIDAL_WINDOW\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
         "\"mmsi\":\"%u\","
         "\"date\":\"M%02d D%02d\","
         "\"lat\":\"%.6f\",\"lon\":\"%.6f\","
         "\"from\":\"%02d:%02d\",\"to\":\"%02d:%02d\","
         "\"current_dir_deg\":\"%d\","
         "\"current_spd_kn\":\"%.1f\"}",
-        mmsi, month, day,
+        msg_type, mmsi, mmsi, month, day,
         lat1 / 600000.0, lon1 / 600000.0,
         from_h, from_m, to_h, to_m,
         cdir, (double)cspd / 10.0);
@@ -651,21 +600,21 @@ static void decode_fi32(const uint8_t* d, uint32_t db, int app_off,
 /* ── DAC/FI dispatch ──────────────────────────────────────────────────── */
 
 static void dispatch_dac001(const uint8_t* d, uint32_t db,
-                             int app_off, int fi, uint32_t mmsi,
+                             int app_off, int fi, uint32_t mmsi, int msg_type,
                              MrEmitFn emit, void* ud, double freq, uint64_t ms) {
     switch (fi) {
-    case 11: decode_fi11_21(d, db, app_off, mmsi, 11, emit, ud, freq, ms); break;
-    case 13: decode_fi13(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 16: decode_fi16(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 17: decode_fi17(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 21: decode_fi11_21(d, db, app_off, mmsi, 21, emit, ud, freq, ms); break;
-    case 22: decode_fi22(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 26: decode_fi26(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 27: decode_fi27(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 28: decode_fi28(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 29: decode_fi29(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 31: decode_fi31(d, db, app_off, mmsi, emit, ud, freq, ms); break;
-    case 32: decode_fi32(d, db, app_off, mmsi, emit, ud, freq, ms); break;
+    case 11: decode_fi11_21(d, db, app_off, mmsi, 11, msg_type, emit, ud, freq, ms); break;
+    case 13: decode_fi13(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 16: decode_fi16(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 17: decode_fi17(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 21: decode_fi11_21(d, db, app_off, mmsi, 21, msg_type, emit, ud, freq, ms); break;
+    case 22: decode_fi22(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 26: decode_fi26(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 27: decode_fi27(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 28: decode_fi28(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 29: decode_fi29(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 31: decode_fi31(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 32: decode_fi32(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
     default: {
         /* Unknown FI: emit raw hex */
         uint32_t app_byte = (uint32_t)(app_off / 8);
@@ -674,9 +623,9 @@ static void dispatch_dac001(const uint8_t* d, uint32_t db,
                                    hex, sizeof(hex));
         char kv[384], pay[256];
         snprintf(kv, sizeof(kv),
-            "{\"signal_type\":\"AIS_ASM_UNKNOWN\","
+            "{\"signal_type\":\"AIS_ASM_UNKNOWN\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
             "\"mmsi\":\"%u\",\"dac\":\"1\",\"fi\":\"%d\",\"hex\":\"%s\"}",
-            mmsi, fi, hex);
+            msg_type, mmsi, mmsi, fi, hex);
         snprintf(pay, sizeof(pay),
             "ASM MMSI:%u DAC:1 FI:%d Data:%s", mmsi, fi, hex);
         emit("AIS_ASM_UNKNOWN", pay, freq, ms, kv, ud);
@@ -697,7 +646,7 @@ static void decode_msg6(const uint8_t* frm, uint32_t flen,
     int fi  = (int)ais_u(frm, db, 82, 6);
 
     if (dac == 1) {
-        dispatch_dac001(frm, db, 88, fi, src_mmsi, emit, ud, freq, ms);
+        dispatch_dac001(frm, db, 88, fi, src_mmsi, 6, emit, ud, freq, ms);
         return;
     }
 
@@ -705,10 +654,10 @@ static void decode_msg6(const uint8_t* frm, uint32_t flen,
     char hex[128]; hex_encode(frm, 11, db > 11 ? (db-11 < 60u ? db-11 : 60u) : 0u, hex, sizeof(hex));
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_MSG6\","
+        "{\"signal_type\":\"AIS_MSG6\",\"msg_type\":\"6\",\"sender_mmsi\":\"%u\","
         "\"src_mmsi\":\"%u\",\"dst_mmsi\":\"%u\","
         "\"dac\":\"%d\",\"fi\":\"%d\",\"hex\":\"%s\"}",
-        src_mmsi, dst_mmsi, dac, fi, hex);
+        src_mmsi, src_mmsi, dst_mmsi, dac, fi, hex);
     snprintf(pay, sizeof(pay),
         "MSG6 Src:%u Dst:%u DAC:%d FI:%d Data:%s",
         src_mmsi, dst_mmsi, dac, fi, hex);
@@ -725,7 +674,7 @@ static void decode_msg8(const uint8_t* frm, uint32_t flen,
     int fi  = (int)ais_u(frm, db, 50,  6);
 
     if (dac == 1) {
-        dispatch_dac001(frm, db, 56, fi, mmsi, emit, ud, freq, ms);
+        dispatch_dac001(frm, db, 56, fi, mmsi, 8, emit, ud, freq, ms);
         return;
     }
 
@@ -754,9 +703,9 @@ static void decode_msg12(const uint8_t* frm, uint32_t flen,
     if (n > 0) ais_str(frm, db, 72, n, text);
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_MSG12\","
+        "{\"signal_type\":\"AIS_MSG12\",\"msg_type\":\"12\",\"sender_mmsi\":\"%u\","
         "\"src_mmsi\":\"%u\",\"dst_mmsi\":\"%u\",\"text\":\"%s\"}",
-        src, dst, text);
+        src, src, dst, text);
     snprintf(pay, sizeof(pay), "Safety(addr) Src:%u Dst:%u \"%s\"", src, dst, text);
     emit("AIS_MSG12", pay, freq, ms, kv, ud);
 }
@@ -774,8 +723,8 @@ static void decode_msg14(const uint8_t* frm, uint32_t flen,
     if (n > 0) ais_str(frm, db, 40, n, text);
     char kv[256], pay[256];
     snprintf(kv, sizeof(kv),
-        "{\"signal_type\":\"AIS_MSG14\","
-        "\"mmsi\":\"%u\",\"text\":\"%s\"}", mmsi, text);
+        "{\"signal_type\":\"AIS_MSG14\",\"msg_type\":\"14\",\"sender_mmsi\":\"%u\","
+        "\"mmsi\":\"%u\",\"text\":\"%s\"}", mmsi, mmsi, text);
     snprintf(pay, sizeof(pay), "Safety(bcast) MMSI:%u \"%s\"", mmsi, text);
     emit("AIS_MSG14", pay, freq, ms, kv, ud);
 }
@@ -991,11 +940,21 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
     if (!raw || !bit_bytes || bit_count == 0) return;
     ctx = (AsmCtx*)raw;
 
-    /* Byte-aligned handoff from ais_decoder (AIS_MSG8_RAW) */
-    if (source_type && strcmp(source_type, "AIS_MSG8_RAW") == 0) {
-        uint32_t flen = (bit_count + 7u) / 8u;
-        if (flen >= 5u)
-            dispatch_frame(bit_bytes, flen, emit_fn, user_data, freq_hz, unix_ms);
+    /* Byte-aligned handoff from ais_decoder (AIS_MSGX_RAW) */
+    if (source_type && (
+        strcmp(source_type, "AIS_MSG6_RAW") == 0 ||
+        strcmp(source_type, "AIS_MSG8_RAW") == 0 ||
+        strcmp(source_type, "AIS_MSG12_RAW") == 0 ||
+        strcmp(source_type, "AIS_MSG14_RAW") == 0)) {
+        // bit_bytes is actually a hex string here
+        uint8_t frame_buf[HDLC_MAX_FRAME];
+        uint32_t frame_len = hex_to_bytes((const char*)bit_bytes, frame_buf, sizeof(frame_buf));
+
+        if (frame_len >= 5u) { // Minimum frame length for any meaningful AIS message
+            dispatch_frame(frame_buf, frame_len, emit_fn, user_data, freq_hz, unix_ms);
+        } else {
+            ALOG("Received AIS_MSGX_RAW with too few bytes: %u\n", frame_len);
+        }
         return;
     }
 

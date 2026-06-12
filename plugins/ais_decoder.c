@@ -7,10 +7,13 @@
  * and decodes AIS messages per ITU-R M.1371-5.
  *
  * Supported message types:
+ *   6        — Addressed Binary Message (handed off to asm_decoder)
  *   1, 2, 3  — Class A Position Report (168 bits)
  *   4        — Base Station Report (168 bits)
  *   5        — Static and Voyage Related Data (426 bits)
+ *   8        — Binary Broadcast Message (handed off to asm_decoder)
  *   9        — Standard SAR Aircraft Position Report (168 bits)
+ *   12       — Addressed Safety-Related Message (handed off to asm_decoder)
  *   18       — Standard Class B CS Position Report (168 bits)
  *   19       — Class B CS Extended Position Report (312 bits, includes name)
  *   21       — Aid-to-Navigation Report (272+ bits, includes name)
@@ -20,6 +23,9 @@
  * Emitted signal types:
  *   AIS_POS     payload: "MMSI:N Lat:D Lon:D SOG:N COG:N"
  *   AIS_STAT    payload: "MMSI:N Name:X CS:X Dest:X"
+ *   AIS_MSG6_RAW payload: hex bytes (full frame including FCS)
+ *   AIS_MSG8_RAW payload: hex bytes (full frame including FCS)
+ *   AIS_MSG12_RAW payload: hex bytes (full frame including FCS)
  *   AIS_STAT24  payload: "MMSI:N Name:X / CS:X"
  *   AIR-SAR     payload: "MMSI:N Lat:D Lon:D Alt:Nft SOG:N COG:N"
  *   AIS_OTHER   payload: hex bytes
@@ -390,32 +396,61 @@ static void decode_extended_position(const uint8_t* d, uint32_t bytes,
                  mmsi, name, slat, slon, sog, cog);
 }
 
-/* Type 8 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
-static void emit_msg8_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
-                                   double freq_hz, uint64_t unix_ms,
-                                   MrEmitFn emit_fn, void* user_data) {
+/* Generic handoff: emit raw AIS frame (+FCS) to asm_decoder. */
+static void emit_msg_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
+                                  double freq_hz, uint64_t unix_ms,
+                                  MrEmitFn emit_fn, void* user_data,
+                                  int msg_type, const char* signal_name) {
     const uint32_t data_bytes = (frame_len >= 2u) ? (frame_len - 2u) : 0u;
     const uint32_t mmsi = (data_bytes >= 5u)
                               ? (uint32_t)ais_bits(frame_buf, data_bytes, 8, 30)
                               : 0u;
     uint32_t i;
     char kv[256];
-    char* hex;
+    char* hex_payload;
     if (!emit_fn || frame_len == 0u) return;
 
-    hex = (char*)malloc(frame_len * 2u + 1u);
-    if (!hex) return;
+    hex_payload = (char*)malloc(frame_len * 2u + 1u);
+    if (!hex_payload) return;
     for (i = 0; i < frame_len; ++i)
-        snprintf(hex + i * 2u, 3, "%02X", (unsigned)frame_buf[i]);
+        snprintf(hex_payload + i * 2u, 3, "%02X", (unsigned)frame_buf[i]);
 
     snprintf(kv, sizeof(kv),
-             "{\"signal_type\":\"AIS_MSG8_RAW\","
-             "\"msg_type\":\"8\","
+             "{\"signal_type\":\"%s\","
+             "\"msg_type\":\"%d\","
              "\"mmsi\":\"%u\","
              "\"frame_bytes\":\"%u\"}",
-             mmsi, frame_len);
-    emit_fn("AIS_MSG8_RAW", hex, freq_hz, unix_ms, kv, user_data);
-    free(hex);
+             signal_name, msg_type, mmsi, frame_len);
+    emit_fn(signal_name, hex_payload, freq_hz, unix_ms, kv, user_data);
+    free(hex_payload);
+}
+
+/* Type 8 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
+static void emit_msg8_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
+                                   double freq_hz, uint64_t unix_ms,
+                                   MrEmitFn emit_fn, void* user_data) {
+    emit_msg_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data, 8, "AIS_MSG8_RAW");
+}
+
+/* Type 6 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
+static void emit_msg6_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
+                                   double freq_hz, uint64_t unix_ms,
+                                   MrEmitFn emit_fn, void* user_data) {
+    emit_msg_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data, 6, "AIS_MSG6_RAW");
+}
+
+/* Type 12 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
+static void emit_msg12_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
+                                    double freq_hz, uint64_t unix_ms,
+                                    MrEmitFn emit_fn, void* user_data) {
+    emit_msg_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data, 12, "AIS_MSG12_RAW");
+}
+
+/* Type 14 handoff: emit raw AIS frame (+FCS) to asm_decoder. */
+static void emit_msg14_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
+                                    double freq_hz, uint64_t unix_ms,
+                                    MrEmitFn emit_fn, void* user_data) {
+    emit_msg_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data, 14, "AIS_MSG14_RAW");
 }
 
 /* Dispatch to per-type decoder and emit. */
@@ -452,9 +487,21 @@ static void decode_and_emit(const uint8_t* frame_buf, uint32_t frame_len,
         decode_voyage(frame_buf, data_bytes,
                       kv, sizeof(kv), payload, sizeof(payload));
         break;
+    case 6:
+        if (data_bytes < 11) return; /* 88 bits = 11 bytes minimum for DAC/FI */
+        emit_msg6_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data);
+        return;
     case 8:
         if (data_bytes < 7) return;  /* 56 bits = 7 bytes minimum */
         emit_msg8_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data);
+        return;
+    case 12:
+        if (data_bytes < 9) return; /* 72 bits = 9 bytes minimum for text */
+        emit_msg12_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data);
+        return;
+    case 14:
+        if (data_bytes < 5) return; /* 40 bits = 5 bytes minimum for text */
+        emit_msg14_raw_for_asm(frame_buf, frame_len, freq_hz, unix_ms, emit_fn, user_data);
         return;
     case 21:
         if (data_bytes < 34) return;  /* 272 bits = 34 bytes */

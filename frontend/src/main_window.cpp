@@ -1,4 +1,5 @@
 #include "main_window.hpp"
+#include "asm_message_widget.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1792,8 +1793,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   air_marine_splitter->addWidget(air_marine_controls);
   air_marine_splitter->addWidget(radar_widget_);
-  visible_objects_widget_ = new VisibleObjectsWidget(air_marine_controls);
-  controls_outer->addWidget(visible_objects_widget_, 1);
+
+  auto* side_splitter = new QSplitter(Qt::Vertical, air_marine_controls);
+  visible_objects_widget_ = new VisibleObjectsWidget(side_splitter);
+  asm_message_widget_ = new AsmMessageWidget(side_splitter);
+  side_splitter->addWidget(visible_objects_widget_);
+  side_splitter->addWidget(asm_message_widget_);
+  side_splitter->setStretchFactor(0, 3);
+  side_splitter->setStretchFactor(1, 1);
+  controls_outer->addWidget(side_splitter, 1);
+
   air_marine_splitter->setStretchFactor(0, 1);
   air_marine_splitter->setStretchFactor(1, 3);
 
@@ -3724,13 +3733,13 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
     return;
   }
 
-  if (plugin_type == "AIS_MSG8" || plugin_type == "AIS_MSG8_OTHER" ||
+  if (plugin_type.startsWith("AIS_MSG") || plugin_type.startsWith("AIS_ASM_") ||
       plugin_type == "ASM_MSG" || plugin_type == "ASM_OTHER") {
     const QString ts    = row.timestamp.toString("HH:mm:ss");
-    const QString mtype = fields.value("msg_type").toString();
+    const QString mtype_str = fields.value("msg_type").toString();
     if (fixed_hdlc_log_ != nullptr) {
       fixed_hdlc_log_->appendPlainText(
-          QString("[%1] AIS-MSG8 T%2 %3").arg(ts).arg(mtype).arg(payload));
+          QString("[%1] AIS-MSG%2 %3").arg(ts).arg(mtype_str).arg(payload));
     }
     AppendLog(QString("[%1] RX%2 %3 f=%4Hz: %5")
                   .arg(ts)
@@ -3738,6 +3747,18 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
                   .arg(payload));
+
+    // Skicka till ASM-panelen om det är typ 6, 8, 12 eller 14
+    if (asm_message_widget_) {
+      int mt = mtype_str.toInt();
+      if (mt == 6 || mt == 8 || mt == 12 || mt == 14) {
+        uint32_t sender = fields.value("sender_mmsi").toUInt();
+        if (sender == 0) sender = fields.value("mmsi").toUInt();
+        if (sender == 0) sender = fields.value("src_mmsi").toUInt();
+        asm_message_widget_->AddMessage(mt, sender, LabelFromFields(fields), payload, fields, unix_ms);
+      }
+    }
+
     all_rows_.push_back(row);
     AddMessageRow(row);
     return;
