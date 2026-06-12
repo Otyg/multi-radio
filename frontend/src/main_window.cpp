@@ -3756,6 +3756,11 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
         if (sender == 0) sender = fields.value("mmsi").toUInt();
         if (sender == 0) sender = fields.value("src_mmsi").toUInt();
         asm_message_widget_->AddMessage(mt, sender, LabelFromFields(fields), payload, fields, unix_ms);
+
+        // Trigger explicit visual ping on the radar target
+        if (radar_widget_ != nullptr && sender > 0) {
+          radar_widget_->TriggerMessagePing(QString::number(sender));
+        }
       }
     }
 

@@ -86,6 +86,7 @@ find_package(Qt6 COMPONENTS Multimedia QUIET)
 add_executable(multi_radio_client
   src/main.cpp
   src/main_window.cpp
+  src/asm_message_widget.cpp
   src/signal_visualization_widget.cpp
   src/scan_range_visualization_widget.cpp
   src/radar_map_widget.cpp
@@ -93,6 +94,7 @@ add_executable(multi_radio_client
   src/coastline_cache.cpp
   src/coastline_loader.cpp
   include/main_window.hpp
+  include/asm_message_widget.hpp
   include/signal_visualization_widget.hpp
   include/scan_range_visualization_widget.hpp
   include/radar_map_widget.hpp

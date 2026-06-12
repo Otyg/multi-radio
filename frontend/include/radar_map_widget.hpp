@@ -4,6 +4,7 @@
 #include <deque>
 #include <unordered_map>
 
+#include <QDateTime> // For quint64 in message_pings_
 #include <QColor>
 #include <QList>
 #include <QMap>
@@ -43,6 +44,8 @@ class RadarMapWidget : public QWidget {
   void ClearTargets();
   void ApplySnapshot(const QVector<RadarTargetUpdate>& targets, const QStringList& removed_ids);
   void SetSelectedTarget(const QString& id);
+
+  void TriggerMessagePing(const QString& id);
 
   QString SelectedTarget() const { return selected_target_id_; }
 
@@ -113,6 +116,8 @@ class RadarMapWidget : public QWidget {
 
   QString coastline_status_;
   bool    coastline_status_error_ = false;
+
+  std::unordered_map<std::string, std::uint64_t> message_pings_;
 
  private slots:
   void OnTileReady(int lat_deg, int lon_deg, QVector<QPolygonF> polygons);

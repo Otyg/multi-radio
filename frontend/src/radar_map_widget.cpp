@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QDateTime> // For QDateTime::currentMSecsSinceEpoch()
 #include <QPen>
 #include <QWheelEvent>
 
@@ -187,6 +188,12 @@ void RadarMapWidget::UpsertTarget(const RadarTargetUpdate& update_in) {
     state.trail.push_back(TrailPoint{update_in.lat, update_in.lon, update_in.unix_ms});
     TrimTrails(update_in.unix_ms);
   }
+  update();
+}
+
+void RadarMapWidget::TriggerMessagePing(const QString& id) {
+  if (id.isEmpty()) return;
+  message_pings_[id.toStdString()] = QDateTime::currentMSecsSinceEpoch();
   update();
 }
 
