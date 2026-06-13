@@ -56,24 +56,24 @@ void AsmMessageWidget::AddMessage(int msg_type, uint32_t mmsi, const QString& la
     auto* card = new QPushButton(container_);
     card->setCursor(Qt::PointingHandCursor);
     card->setStyleSheet(
-        "QPushButton { text-align: left; padding: 8px; border-radius: 6px; "
-        "border: 1px solid #1B5E20; background: #0D141F; color: #E0E6ED; }"
+        "QPushButton { text-align: left; padding: 12px; border-radius: 8px; "
+        "border: 1px solid #2E7D32; background: #0B141F; color: #E0E6ED; }"
         "QPushButton:hover { background: #162231; border-color: #5CDB95; }");
 
     auto* v = new QVBoxLayout(card);
-    v->setContentsMargins(5, 5, 5, 5);
-    v->setSpacing(2);
+    v->setContentsMargins(10, 10, 10, 10);
+    v->setSpacing(4);
 
     const QString station = label.isEmpty() ? QString::number(mmsi) : QString("%1 (%2)").arg(label).arg(mmsi);
     auto* line1 = new QLabel(QString("<b>%1</b> — %2").arg(MsgTypeName(msg_type)).arg(station), card);
-    line1->setStyleSheet("color: #92E6B5; font-size: 13px;");
+    line1->setStyleSheet("color: #5CDB95; font-size: 14px;");
 
     auto* line2 = new QLabel(payload, card);
     line2->setWordWrap(true);
-    line2->setStyleSheet("color: #B2C0D6; font-size: 12px;");
+    line2->setStyleSheet("color: #B2C0D6; font-size: 13px;");
 
     auto* line3 = new QLabel(QDateTime::fromMSecsSinceEpoch(unix_ms).toLocalTime().toString("HH:mm:ss"), card);
-    line3->setStyleSheet("color: #6B7A90; font-size: 10px;");
+    line3->setStyleSheet("color: #8FA7BE; font-size: 11px;");
 
     v->addWidget(line1);
     v->addWidget(line2);
@@ -102,6 +102,16 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& msg) {
     v->addWidget(new QLabel(QString("<b>From:</b> %1 (MMSI: %2)").arg(msg.station_label).arg(msg.mmsi)));
     v->addWidget(new QLabel(QString("<b>Type:</b> %1").arg(MsgTypeName(msg.msg_type))));
     v->addWidget(new QLabel(QString("<b>Time:</b> %1").arg(QDateTime::fromMSecsSinceEpoch(msg.unix_ms).toLocalTime().toString())));
+
+    auto* summary_label = new QLabel(QString("<b>Summary:</b> %1").arg(msg.payload), &dlg);
+    summary_label->setWordWrap(true);
+    v->addWidget(summary_label);
+
+    if (msg.fields.contains("hex")) {
+        auto* hex_label = new QLabel(QString("<b>Raw Hex:</b> <span style='font-family: monospace; color: #92E6B5;'>%1</span>")
+                                         .arg(msg.fields.value("hex").toString()), &dlg);
+        v->addWidget(hex_label);
+    }
 
     auto* text = new QTextEdit(&dlg);
     text->setReadOnly(true);
