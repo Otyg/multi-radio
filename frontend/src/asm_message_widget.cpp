@@ -24,6 +24,17 @@ QString MsgTypeName(int type) {
 }
 }
 
+QString MsgTypeIcon(int type) {
+    switch (type) {
+        case 6:  return "✉"; // Addressed
+        case 8:  return "📡"; // Broadcast
+        case 12: return "⚠"; // Addressed Safety
+        case 14: return "📢"; // Safety Broadcast
+        default: return "✉";
+    }
+}
+}
+
 AsmMessageWidget::AsmMessageWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -55,25 +66,25 @@ void AsmMessageWidget::AddMessage(int msg_type, uint32_t mmsi, const QString& la
 
     auto* card = new QPushButton(container_);
     card->setCursor(Qt::PointingHandCursor);
+    card->setMinimumHeight(88);
     card->setStyleSheet(
-        "QPushButton { text-align: left; padding: 12px; border-radius: 8px; "
-        "border: 1px solid #2E7D32; background: #0B141F; color: #E0E6ED; }"
+        "QPushButton { text-align: left; padding: 8px; border-radius: 8px; "
+        "border: 1px solid #2E7D32; background: #0B1018; color: #E0E6ED; }"
         "QPushButton:hover { background: #162231; border-color: #5CDB95; }");
 
     auto* v = new QVBoxLayout(card);
-    v->setContentsMargins(10, 10, 10, 10);
-    v->setSpacing(4);
+    v->setContentsMargins(10, 6, 10, 6);
+    v->setSpacing(2);
 
     const QString station = label.isEmpty() ? QString::number(mmsi) : QString("%1 (%2)").arg(label).arg(mmsi);
-    auto* line1 = new QLabel(QString("<b>%1</b> — %2").arg(MsgTypeName(msg_type)).arg(station), card);
-    line1->setStyleSheet("color: #5CDB95; font-size: 14px;");
+    auto* line1 = new QLabel(QString("<b>%1 %2</b>").arg(MsgTypeIcon(msg_type)).arg(MsgTypeName(msg_type)), card);
+    line1->setStyleSheet("color: #5CDB95; font-size: 14px; background: transparent;");
 
-    auto* line2 = new QLabel(payload, card);
-    line2->setWordWrap(true);
-    line2->setStyleSheet("color: #B2C0D6; font-size: 13px;");
+    auto* line2 = new QLabel(station, card);
+    line2->setStyleSheet("color: #DDFBE6; font-size: 13px; background: transparent;");
 
-    auto* line3 = new QLabel(QDateTime::fromMSecsSinceEpoch(unix_ms).toLocalTime().toString("HH:mm:ss"), card);
-    line3->setStyleSheet("color: #8FA7BE; font-size: 11px;");
+    auto* line3 = new QLabel(QString("Mottaget %1").arg(QDateTime::fromMSecsSinceEpoch(unix_ms).toLocalTime().toString("HH:mm:ss")), card);
+    line3->setStyleSheet("color: #8FA7BE; font-size: 11px; background: transparent;");
 
     v->addWidget(line1);
     v->addWidget(line2);
