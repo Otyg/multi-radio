@@ -417,10 +417,11 @@ static void emit_msg_raw_for_asm(const uint8_t* frame_buf, uint32_t frame_len,
 
     snprintf(kv, sizeof(kv),
              "{\"signal_type\":\"%s\","
-             "\"msg_type\":\"%d\","
+             "\"msg_type\":%d,"
              "\"mmsi\":\"%u\","
-             "\"frame_bytes\":\"%u\"}",
-             signal_name, msg_type, mmsi, frame_len);
+             "\"frame_bytes\":\"%u\","
+             "\"hex\":\"%s\"}",
+             signal_name, msg_type, mmsi, frame_len, hex_payload);
     emit_fn(signal_name, hex_payload, freq_hz, unix_ms, kv, user_data);
     free(hex_payload);
 }

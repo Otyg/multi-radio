@@ -619,7 +619,7 @@ static void dispatch_dac001(const uint8_t* d, uint32_t db,
         /* Unknown FI: emit raw hex */
         uint32_t app_byte = (uint32_t)(app_off / 8);
         uint32_t app_bytes = (db > app_byte) ? (db - app_byte) : 0u;
-        char hex[128]; hex_encode(d, app_byte, app_bytes < 60u ? app_bytes : 60u,
+        char hex[128]; hex_encode(d, 0, db < 60u ? db : 60u,
                                    hex, sizeof(hex));
         char kv[384], pay[256];
         snprintf(kv, sizeof(kv),
@@ -651,7 +651,7 @@ static void decode_msg6(const uint8_t* frm, uint32_t flen,
     }
 
     /* Unknown DAC: raw hex */
-    char hex[128]; hex_encode(frm, 11, db > 11 ? (db-11 < 60u ? db-11 : 60u) : 0u, hex, sizeof(hex));
+    char hex[128]; hex_encode(frm, 0, db < 60u ? db : 60u, hex, sizeof(hex));
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
         "{\"signal_type\":\"AIS_MSG6\",\"msg_type\":\"6\",\"sender_mmsi\":\"%u\","
@@ -678,7 +678,7 @@ static void decode_msg8(const uint8_t* frm, uint32_t flen,
         return;
     }
 
-    char hex[128]; hex_encode(frm, 7, db > 7 ? (db-7 < 60u ? db-7 : 60u) : 0u, hex, sizeof(hex));
+    char hex[128]; hex_encode(frm, 0, db < 60u ? db : 60u, hex, sizeof(hex));
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
         "{\"signal_type\":\"AIS_MSG8\","
@@ -701,11 +701,12 @@ static void decode_msg12(const uint8_t* frm, uint32_t flen,
     if (n > 63) n = 63;
     char text[64] = "";
     if (n > 0) ais_str(frm, db, 72, n, text);
+    char hex[128]; hex_encode(frm, 0, db < 60u ? db : 60u, hex, sizeof(hex));
     char kv[384], pay[256];
     snprintf(kv, sizeof(kv),
         "{\"signal_type\":\"AIS_MSG12\",\"msg_type\":\"12\",\"sender_mmsi\":\"%u\","
-        "\"src_mmsi\":\"%u\",\"dst_mmsi\":\"%u\",\"text\":\"%s\"}",
-        src, src, dst, text);
+        "\"src_mmsi\":\"%u\",\"dst_mmsi\":\"%u\",\"text\":\"%s\",\"hex\":\"%s\"}",
+        src, src, dst, text, hex);
     snprintf(pay, sizeof(pay), "Safety(addr) Src:%u Dst:%u \"%s\"", src, dst, text);
     emit("AIS_MSG12", pay, freq, ms, kv, ud);
 }
@@ -721,10 +722,11 @@ static void decode_msg14(const uint8_t* frm, uint32_t flen,
     if (n > 63) n = 63;
     char text[64] = "";
     if (n > 0) ais_str(frm, db, 40, n, text);
+    char hex[128]; hex_encode(frm, 0, db < 60u ? db : 60u, hex, sizeof(hex));
     char kv[256], pay[256];
     snprintf(kv, sizeof(kv),
         "{\"signal_type\":\"AIS_MSG14\",\"msg_type\":\"14\",\"sender_mmsi\":\"%u\","
-        "\"mmsi\":\"%u\",\"text\":\"%s\"}", mmsi, mmsi, text);
+        "\"mmsi\":\"%u\",\"text\":\"%s\",\"hex\":\"%s\"}", mmsi, mmsi, text, hex);
     snprintf(pay, sizeof(pay), "Safety(bcast) MMSI:%u \"%s\"", mmsi, text);
     emit("AIS_MSG14", pay, freq, ms, kv, ud);
 }
