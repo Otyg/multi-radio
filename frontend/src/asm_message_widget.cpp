@@ -188,19 +188,17 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& msg) {
     QJsonObject obj;
     for (auto it = msg.fields.begin(); it != msg.fields.end(); ++it)
         obj.insert(it.key(), QJsonValue::fromVariant(it.value()));
-    QJsonDocument doc(obj);
 
-    // Samla både hex och metadata i den kopierbara textrutan
+    // Samla både NMEA och metadata i den kopierbara textrutan
     QString content;
     if (msg.fields.contains("hex")) {
         const QString hex = msg.fields.value("hex").toString();
         const QString nmea = EncodeAisNmea(hex);
         if (!nmea.isEmpty()) {
-            content += "NMEA SENTENCE:\n" + nmea + "\n\n";
+            content += "NMEA:\n" + nmea + "\n\n";
         }
-        content += "RAW HEX:\n" + hex + "\n\n";
     }
-    content += "METADATA (JSON):\n" + doc.toJson(QJsonDocument::Indented);
+    content += "METADATA (JSON):\n" + QJsonDocument(obj).toJson(QJsonDocument::Indented);
 
     text->setPlainText(content);
 

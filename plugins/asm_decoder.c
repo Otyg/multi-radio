@@ -599,36 +599,47 @@ static void decode_fi32(const uint8_t* d, uint32_t db, int app_off,
 
 /* ── DAC/FI dispatch ──────────────────────────────────────────────────── */
 
-static void dispatch_dac001(const uint8_t* d, uint32_t db,
+typedef struct { MrEmitFn emit; void* ud; const char* hex; } AsmWrap;
+static void asm_wrap_emit(const char* st, const char* pay, double f, uint64_t ms, const char* kv, void* ud) {
+    AsmWrap* w = (AsmWrap*)ud;
+    if (!kv || !w->hex) { w->emit(st, pay, f, ms, kv, w->ud); return; }
+    char buf[1536]; int len = strlen(kv);
+    if (len > 0 && kv[len-1] == '}') {
+        snprintf(buf, sizeof(buf), "%.*s,\"hex\":\"%s\"}", len-1, kv, w->hex);
+        w->emit(st, pay, f, ms, buf, w->ud);
+    } else w->emit(st, pay, f, ms, kv, w->ud);
+}
+
+static void dispatch_dac001(const uint8_t* frm, uint32_t flen,
                              int app_off, int fi, uint32_t mmsi, int msg_type,
                              MrEmitFn emit, void* ud, double freq, uint64_t ms) {
+    const uint32_t db = flen - 2u;
+    char hex[128]; hex_encode(frm, 0, flen < 60u ? flen : 60u, hex, sizeof(hex));
+    AsmWrap wrap = { emit, ud, hex };
+
     switch (fi) {
-    case 11: decode_fi11_21(d, db, app_off, mmsi, 11, msg_type, emit, ud, freq, ms); break;
-    case 13: decode_fi13(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 16: decode_fi16(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 17: decode_fi17(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 21: decode_fi11_21(d, db, app_off, mmsi, 21, msg_type, emit, ud, freq, ms); break;
-    case 22: decode_fi22(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 26: decode_fi26(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 27: decode_fi27(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 28: decode_fi28(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 29: decode_fi29(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 31: decode_fi31(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
-    case 32: decode_fi32(d, db, app_off, mmsi, msg_type, emit, ud, freq, ms); break;
+    case 11: decode_fi11_21(frm, db, app_off, mmsi, 11, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 13: decode_fi13(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 16: decode_fi16(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 17: decode_fi17(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 21: decode_fi11_21(frm, db, app_off, mmsi, 21, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 22: decode_fi22(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 26: decode_fi26(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 27: decode_fi27(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 28: decode_fi28(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 29: decode_fi29(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 31: decode_fi31(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
+    case 32: decode_fi32(frm, db, app_off, mmsi, msg_type, asm_wrap_emit, &wrap, freq, ms); break;
     default: {
         /* Unknown FI: emit raw hex */
-        uint32_t app_byte = (uint32_t)(app_off / 8);
-        uint32_t app_bytes = (db > app_byte) ? (db - app_byte) : 0u;
-        char hex[128]; hex_encode(d, 0, db < 60u ? db : 60u,
-                                   hex, sizeof(hex));
         char kv[384], pay[256];
         snprintf(kv, sizeof(kv),
-            "{\"signal_type\":\"AIS_ASM_UNKNOWN\",\"msg_type\":\"%d\",\"sender_mmsi\":\"%u\","
-            "\"mmsi\":\"%u\",\"dac\":\"1\",\"fi\":\"%d\",\"hex\":\"%s\"}",
-            msg_type, mmsi, mmsi, fi, hex);
+            "{\"signal_type\":\"AIS_ASM_UNKNOWN\",\"msg_type\":%d,\"sender_mmsi\":\"%u\","
+            "\"mmsi\":\"%u\",\"dac\":1,\"fi\":%d}",
+            msg_type, mmsi, mmsi, fi);
         snprintf(pay, sizeof(pay),
             "ASM MMSI:%u DAC:1 FI:%d Data:%s", mmsi, fi, hex);
-        emit("AIS_ASM_UNKNOWN", pay, freq, ms, kv, ud);
+        asm_wrap_emit("AIS_ASM_UNKNOWN", pay, freq, ms, kv, &wrap);
     } break;
     }
 }
@@ -646,7 +657,7 @@ static void decode_msg6(const uint8_t* frm, uint32_t flen,
     int fi  = (int)ais_u(frm, db, 82, 6);
 
     if (dac == 1) {
-        dispatch_dac001(frm, db, 88, fi, src_mmsi, 6, emit, ud, freq, ms);
+        dispatch_dac001(frm, flen, 88, fi, src_mmsi, 6, emit, ud, freq, ms);
         return;
     }
 
@@ -674,7 +685,7 @@ static void decode_msg8(const uint8_t* frm, uint32_t flen,
     int fi  = (int)ais_u(frm, db, 50,  6);
 
     if (dac == 1) {
-        dispatch_dac001(frm, db, 56, fi, mmsi, 8, emit, ud, freq, ms);
+        dispatch_dac001(frm, flen, 56, fi, mmsi, 8, emit, ud, freq, ms);
         return;
     }
 
