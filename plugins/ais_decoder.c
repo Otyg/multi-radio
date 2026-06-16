@@ -84,7 +84,7 @@ static uint64_t ais_bits(const uint8_t* data, uint32_t data_bytes,
     for (i = 0; i < len; ++i) {
         int abs  = start + i;
         int bidx = abs / 8;
-        int boff = 7 - (abs % 8);  /* MSB-first: first AIS bit is MSB of byte 0 */
+        int boff = (abs % 8);  /* LSB-first assembly: first bit received is bit 0 */
         if (bidx < (int)data_bytes && (data[bidx] & (1u << boff)))
             r |= (1ULL << (len - 1 - i));
     }
@@ -637,7 +637,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 ctx->cur_byte  = 0;
             }
             if (ctx->in_frame && ctx->consecutive_ones <= 5) {
-                ctx->cur_byte |= (uint8_t)(1u << (7 - ctx->bit_pos));
+                ctx->cur_byte |= (uint8_t)(1u << ctx->bit_pos);
                 if (++ctx->bit_pos == 8) {
                     if (ctx->frame_len < HDLC_MAX_FRAME)
                         ctx->frame_buf[ctx->frame_len++] = ctx->cur_byte;
