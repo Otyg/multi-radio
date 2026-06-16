@@ -610,7 +610,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
            If max_ones == 6 and flags_count == 0 the flag boundary aligns wrong. */
         int max_ones = 0, cur_ones = 0, flags_count = 0;
         for (uint32_t bi = 0; bi < bit_count; ++bi) {
-            const int b = (bit_bytes[bi / 8] >> (7 - (bi % 8))) & 1;
+            const int b = (bit_bytes[bi / 8] >> (bi % 8)) & 1;
             if (b) {
                 ++cur_ones;
                 if (cur_ones > max_ones) max_ones = cur_ones;
@@ -626,7 +626,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
 
     uint32_t i;
     for (i = 0; i < bit_count; ++i) {
-        const int bit = (bit_bytes[i / 8] >> (7 - (i % 8))) & 1;
+        const int bit = (bit_bytes[i / 8] >> (i % 8)) & 1;
 
         if (bit) {
             ++ctx->consecutive_ones;
