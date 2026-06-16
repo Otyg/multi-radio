@@ -22,6 +22,7 @@ QString MsgTypeName(int type) {
         default: return QString("AIS Type %1").arg(type);
     }
 }
+}
 
 QString MsgTypeIcon(int type) {
     switch (type) {
@@ -32,60 +33,7 @@ QString MsgTypeIcon(int type) {
         default: return "✉";
     }
 }
-
-QString EncodeAisNmea(const QString& hex) {
-    QByteArray data = QByteArray::fromHex(hex.toLatin1());
-    if (data.size() < 2) return QString();
-    
-    // AIS frames usually include 2-byte HDLC FCS; NMEA payloads exclude it.
-    int payload_len = data.size() - 2;
-    if (payload_len <= 0) return QString();
-
-    QString encoded;
-    int bit_acc = 0, bit_count = 0;
-    for (int i = 0; i < payload_len; ++i) {
-        bit_acc = (bit_acc << 8) | (static_cast<uint8_t>(data[i]));
-        bit_count += 8;
-        while (bit_count >= 6) {
-            int val = (bit_acc >> (bit_count - 6)) & 0x3F;
-            bit_count -= 6;
-            encoded.append(QChar(val < 40 ? val + 48 : val + 56));
-        }
-    }
-    int fill_bits = 0;
-    if (bit_count > 0) {
-        fill_bits = 6 - bit_count;
-        int val = (bit_acc << fill_bits) & 0x3F;
-        encoded.append(QChar(val < 40 ? val + 48 : val + 56));
-    }
-
-    QString sentence = QString("!AIVDM,1,1,,A,%1,%2").arg(encoded).arg(fill_bits);
-    int checksum = 0;
-    for (int i = 1; i < sentence.length(); ++i) checksum ^= sentence[i].toLatin1();
-    return sentence + "*" + QString("%1").arg(checksum, 2, 16, QChar('0')).toUpper();
 }
-
-QString DacFiName(int dac, int fi) {
-    if (dac == 1) { // International (IMO)
-        switch (fi) {
-            case 11: return "Met/Hydro Data (short)";
-            case 13: return "Fairway Closed";
-            case 16: return "Persons on Board";
-            case 17: return "VTS Safety Message";
-            case 21: return "Weather Observation (ship)";
-            case 22: return "Area Notice (broadcast)";
-            case 26: return "Environmental";
-            case 27: return "Route Information";
-            case 28: return "ASM Text (6-bit ASCII)";
-            case 29: return "Marine Traffic Signal";
-            case 31: return "Met/Hydro Data (long)";
-            case 32: return "Tidal Window";
-            default: break;
-        }
-    }
-    return QString();
-}
-} // namespace
 
 AsmMessageWidget::AsmMessageWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
@@ -181,26 +129,22 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& msg) {
     summary_label->setWordWrap(true);
     v->addWidget(summary_label);
 
+    if (msg.fields.contains("hex")) {
+        auto* hex_label = new QLabel(QString("<b>Raw Hex:</b> <span style='font-family: monospace; color: #92E6B5;'>%1</span>")
+                                         .arg(msg.fields.value("hex").toString()), &dlg);
+        v->addWidget(hex_label);
+    }
+
     auto* text = new QTextEdit(&dlg);
     text->setReadOnly(true);
     text->setStyleSheet("background: #121E2E; border: 1px solid #2E7D32; color: #DDFBE6; font-family: monospace;");
 
+    // Convert fields to pretty JSON
     QJsonObject obj;
     for (auto it = msg.fields.begin(); it != msg.fields.end(); ++it)
         obj.insert(it.key(), QJsonValue::fromVariant(it.value()));
-
-    // Samla både NMEA och metadata i den kopierbara textrutan
-    QString content;
-    if (msg.fields.contains("hex")) {
-        const QString hex = msg.fields.value("hex").toString();
-        const QString nmea = EncodeAisNmea(hex);
-        if (!nmea.isEmpty()) {
-            content += "NMEA:\n" + nmea + "\n\n";
-        }
-    }
-    content += "METADATA (JSON):\n" + QJsonDocument(obj).toJson(QJsonDocument::Indented);
-
-    text->setPlainText(content);
+    QJsonDocument doc(obj);
+    text->setPlainText(doc.toJson(QJsonDocument::Indented));
 
     v->addWidget(text);
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
