@@ -22,6 +22,7 @@ QString MsgTypeName(int type) {
         default: return QString("AIS Type %1").arg(type);
     }
 }
+}
 
 QString MsgTypeIcon(int type) {
     switch (type) {
@@ -32,7 +33,7 @@ QString MsgTypeIcon(int type) {
         default: return "✉";
     }
 }
-} // namespace
+}
 
 AsmMessageWidget::AsmMessageWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
@@ -117,23 +118,22 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& msg) {
     summary_label->setWordWrap(true);
     v->addWidget(summary_label);
 
+    if (msg.fields.contains("hex")) {
+        auto* hex_label = new QLabel(QString("<b>Raw Hex:</b> <span style='font-family: monospace; color: #92E6B5;'>%1</span>")
+                                         .arg(msg.fields.value("hex").toString()), &dlg);
+        v->addWidget(hex_label);
+    }
+
     auto* text = new QTextEdit(&dlg);
     text->setReadOnly(true);
     text->setStyleSheet("background: #121E2E; border: 1px solid #2E7D32; color: #DDFBE6; font-family: monospace;");
 
+    // Convert fields to pretty JSON
     QJsonObject obj;
     for (auto it = msg.fields.begin(); it != msg.fields.end(); ++it)
         obj.insert(it.key(), QJsonValue::fromVariant(it.value()));
     QJsonDocument doc(obj);
-
-    // Samla både hex och metadata i den kopierbara textrutan
-    QString content;
-    if (msg.fields.contains("hex")) {
-        content += "RAW HEX:\n" + msg.fields.value("hex").toString() + "\n\n";
-    }
-    content += "METADATA (JSON):\n" + doc.toJson(QJsonDocument::Indented);
-
-    text->setPlainText(content);
+    text->setPlainText(doc.toJson(QJsonDocument::Indented));
 
     v->addWidget(text);
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
