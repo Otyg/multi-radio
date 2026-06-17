@@ -79,7 +79,7 @@ static uint64_t ais_u(const uint8_t* d, uint32_t dbytes, int start, int len) {
     for (i = 0; i < len; ++i) {
         int pos = start + i;
         if ((pos / 8) >= (int)dbytes) break;
-        if (d[pos / 8] & (1u << (pos % 8)))
+        if (d[pos / 8] & (1u << (7 - (pos % 8))))
             r |= (1ULL << (len - 1 - i));
     }
     return r;
@@ -981,7 +981,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 ctx->bit_pos  = 0; ctx->cur_byte  = 0;
             }
             if (ctx->in_frame && ctx->consecutive_ones <= 5) {
-                ctx->cur_byte |= (uint8_t)(1u << ctx->bit_pos);
+                ctx->cur_byte |= (uint8_t)(1u << (7 - ctx->bit_pos));
                 if (++ctx->bit_pos == 8) {
                     if (ctx->frame_len < HDLC_MAX_FRAME)
                         ctx->frame_buf[ctx->frame_len++] = ctx->cur_byte;
