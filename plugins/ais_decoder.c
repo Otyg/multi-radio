@@ -637,7 +637,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 ctx->cur_byte  = 0;
             }
             if (ctx->in_frame && ctx->consecutive_ones <= 5) {
-                ctx->cur_byte |= (uint8_t)(1u << (7 - ctx->bit_pos));
+                ctx->cur_byte |= (uint8_t)(1u << ctx->bit_pos);
                 if (++ctx->bit_pos == 8) {
                     if (ctx->frame_len < HDLC_MAX_FRAME)
                         ctx->frame_buf[ctx->frame_len++] = ctx->cur_byte;
@@ -672,7 +672,6 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
                 ctx->consecutive_ones = 0;
             }
             if (ctx->in_frame) {
-                ctx->cur_byte &= ~(uint8_t)(1u << ctx->bit_pos); // Säkerställ nolla vid 0-bit
                 if (++ctx->bit_pos == 8) {
                     if (ctx->frame_len < HDLC_MAX_FRAME)
                         ctx->frame_buf[ctx->frame_len++] = ctx->cur_byte;
