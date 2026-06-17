@@ -973,7 +973,7 @@ void mr_plugin_process_bits(MrPluginCtx* raw,
 
     /* Standalone HDLC decoder */
     for (i = 0; i < bit_count; ++i) {
-        const int bit = (bit_bytes[i / 8] >> (i % 8)) & 1;
+        const int bit = (bit_bytes[i / 8] >> (7 - (i % 8))) & 1;
         if (bit) {
             ++ctx->consecutive_ones;
             if (ctx->consecutive_ones > 6) {
