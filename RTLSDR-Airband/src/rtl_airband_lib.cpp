@@ -279,9 +279,16 @@ void rtl_airband_emit_iq_callback(int device_index, int channel_index, channel_t
     batch.channel_index = channel_index;
     batch.frequency = channel->freqlist[channel->freq_idx].frequency;
     batch.signal_active = channel->axcindicate != NO_SIGNAL;
-    batch.interleaved_iq = channel->iq_callback;
+    batch.interleaved_iq = channel->iq_out;
     batch.complex_sample_count = WAVE_BATCH;
     g_embedded_state.callbacks.on_iq(batch);
+}
+
+void rtl_airband_emit_raw_iq_callback(int device_index, device_t* dev) {
+    if (dev == nullptr) return;
+    for (int i = 0; i < dev->channel_count; ++i) {
+        rtl_airband_emit_iq_callback(device_index, i, &dev->channels[i]);
+    }
 }
 
 void rtl_airband_emit_scan_callback(int device_index, int channel_index, channel_t* channel) {
@@ -367,6 +374,21 @@ bool Session::SetScanFrequencyIndex(int device_index, int frequency_index, std::
     }
     channel->freq_idx = frequency_index;
     return RetuneScanChannel(device_index, channel, device, error);
+}
+
+bool Session::UpdateDeviceCorrection(int device_index, int correction, std::string* error) {
+    if (!IsValidDeviceIndex(device_index)) {
+        if (error) *error = "invalid device index";
+        return false;
+    }
+    device_t* device = devices + device_index;
+    if (device->input && device->input->dev_data) {
+        // Update the stored configuration
+        auto* dev_data = static_cast<rtlsdr_dev_data_t*>(device->input->dev_data);
+        dev_data->correction = correction;
+        // Note: PPM correction updates for a running RTLSDR device usually require a restart.
+    }
+    return true;
 }
 
 bool Session::UpdateScanFrequency(int device_index, int frequency_index, const FrequencyConfig& config, std::string* error) {
