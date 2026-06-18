@@ -1,10 +1,12 @@
 #include "multi_radio/receiver_worker.hpp"
+#include "multi_radio/analog_demod_backend.hpp"
 #include "multi_radio/hardware_config.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -15,8 +17,9 @@
 #include <thread>
 #include <vector>
 
-#include "multi_radio/am_demod.hpp"
-#include "multi_radio/fm_demod.hpp"
+#if defined(MR_HAS_RTL_AIRBAND) && MR_HAS_RTL_AIRBAND
+#include "rtl_airband_lib.h"
+#endif
 
 #if defined(MR_HAS_LIQUID) && MR_HAS_LIQUID
 #include <liquid/liquid.h>
@@ -292,6 +295,139 @@ RuntimeChannel SelectRuntimeChannel(RadioMode mode, const ModeConfig& config, in
   return out;
 }
 
+#if defined(MR_HAS_RTL_AIRBAND) && MR_HAS_RTL_AIRBAND
+bool UseAirbandRuntimeForModulation(Modulation modulation) {
+  return modulation != Modulation::kWfm;
+}
+
+rtl_airband::Modulation ToAirbandModulation(Modulation modulation) {
+  switch (modulation) {
+    case Modulation::kAm:
+      return rtl_airband::Modulation::Am;
+    case Modulation::kNfm:
+      return rtl_airband::Modulation::Nfm;
+    default:
+      return rtl_airband::Modulation::Iq;
+  }
+}
+
+bool ShouldUseAirbandRuntime(RadioMode mode, const ModeConfig& config) {
+  const char* requested = std::getenv("MR_ANALOG_DEMOD_BACKEND");
+  if (requested == nullptr || std::string(requested) != "rtl_airband") {
+    return false;
+  }
+  if (mode == RadioMode::kScanRange) {
+    return false;
+  }
+  if (mode == RadioMode::kFixed) {
+    return UseAirbandRuntimeForModulation(config.fixed_modulation);
+  }
+  if (config.scan_list_channels.empty()) {
+    return false;
+  }
+  for (const auto& ch : config.scan_list_channels) {
+    if (!UseAirbandRuntimeForModulation(ch.modulation)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+rtl_airband::FrequencyConfig BuildAirbandFrequencyConfig(const ModeConfig::ScanListChannel& source,
+                                                         double default_squelch_db) {
+  rtl_airband::FrequencyConfig out;
+  out.frequency = static_cast<int>(std::llround(source.frequency_hz));
+  out.label = source.label;
+  out.modulation = ToAirbandModulation(source.modulation);
+  out.squelch_threshold_dbfs = static_cast<int>(std::llround(
+      source.use_default_squelch ? default_squelch_db : source.squelch_threshold_db));
+  out.bandwidth = static_cast<int>(source.channel_bandwidth_hz);
+  out.ampfactor = std::pow(10.0f, source.audio_gain_db / 20.0f);
+  return out;
+}
+
+std::vector<rtl_airband::FrequencyConfig> BuildAirbandFrequencyConfigs(RadioMode mode,
+                                                                       const ModeConfig& config) {
+  std::vector<rtl_airband::FrequencyConfig> frequencies;
+  if (mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) {
+    frequencies.reserve(config.scan_list_channels.size());
+    for (const auto& scan_channel : config.scan_list_channels) {
+      frequencies.push_back(
+          BuildAirbandFrequencyConfig(scan_channel, config.scan_list_default_squelch_db));
+    }
+    return frequencies;
+  }
+
+  rtl_airband::FrequencyConfig frequency;
+  frequency.frequency = static_cast<int>(std::llround(config.fixed_frequency_hz));
+  frequency.modulation = ToAirbandModulation(config.fixed_modulation);
+  frequency.squelch_threshold_dbfs =
+      static_cast<int>(std::llround(config.scan_list_default_squelch_db));
+  frequency.bandwidth = static_cast<int>(config.channel_bandwidth_hz);
+  frequencies.push_back(std::move(frequency));
+  return frequencies;
+}
+
+rtl_airband::DeviceConfig BuildAirbandDeviceConfig(uint32_t receiver_id, const std::string& serial,
+                                                   RadioMode mode, const ModeConfig& config) {
+  rtl_airband::DeviceConfig out;
+  out.sample_rate = static_cast<int>(config.sample_rate_hz);
+  out.scan_mode = (mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot);
+  out.rtlsdr.index = static_cast<int>(receiver_id);
+  out.rtlsdr.serial = serial;
+  out.rtlsdr.gain_db = 0.0f;
+  out.rtlsdr.correction = config.ppm_correction;
+  out.channels.resize(1);
+  auto& channel = out.channels[0];
+  channel.emit_audio = true;
+  channel.emit_iq = false;
+  channel.tau = 0;
+  channel.frequencies = BuildAirbandFrequencyConfigs(mode, config);
+  if (!channel.frequencies.empty()) {
+    out.center_frequency = channel.frequencies.front().frequency;
+  }
+  return out;
+}
+
+bool AirbandFrequencyConfigEquals(const rtl_airband::FrequencyConfig& lhs,
+                                  const rtl_airband::FrequencyConfig& rhs) {
+  return lhs.frequency == rhs.frequency && lhs.label == rhs.label &&
+         lhs.modulation == rhs.modulation &&
+         lhs.squelch_threshold_dbfs == rhs.squelch_threshold_dbfs &&
+         std::fabs(lhs.squelch_snr_threshold - rhs.squelch_snr_threshold) < 1.0e-6f &&
+         std::fabs(lhs.notch_freq - rhs.notch_freq) < 1.0e-6f &&
+         std::fabs(lhs.notch_q - rhs.notch_q) < 1.0e-6f &&
+         std::fabs(lhs.ctcss_freq - rhs.ctcss_freq) < 1.0e-6f &&
+         lhs.bandwidth == rhs.bandwidth &&
+         std::fabs(lhs.ampfactor - rhs.ampfactor) < 1.0e-6f;
+}
+
+bool AirbandDeviceHotReloadEligible(const rtl_airband::DeviceConfig& applied,
+                                    const rtl_airband::DeviceConfig& desired) {
+  if (!applied.scan_mode || !desired.scan_mode) {
+    return false;
+  }
+  if (applied.sample_rate != desired.sample_rate || applied.tau != desired.tau ||
+      applied.rtlsdr.index != desired.rtlsdr.index ||
+      applied.rtlsdr.serial != desired.rtlsdr.serial ||
+      std::fabs(applied.rtlsdr.gain_db - desired.rtlsdr.gain_db) >= 1.0e-6f ||
+      applied.rtlsdr.buffers != desired.rtlsdr.buffers) {
+    return false;
+  }
+  if (applied.channels.size() != 1 || desired.channels.size() != 1) {
+    return false;
+  }
+  const auto& applied_channel = applied.channels.front();
+  const auto& desired_channel = desired.channels.front();
+  return applied_channel.highpass == desired_channel.highpass &&
+         applied_channel.lowpass == desired_channel.lowpass &&
+         applied_channel.afc == desired_channel.afc &&
+         applied_channel.tau == desired_channel.tau &&
+         applied_channel.emit_audio == desired_channel.emit_audio &&
+         applied_channel.emit_iq == desired_channel.emit_iq;
+}
+#endif
+
 std::string FormatRuntimeError(const char* operation, const std::string& error) {
   std::ostringstream out;
   out << operation << " failed";
@@ -458,9 +594,27 @@ bool ReceiverWorker::Start(std::string* error) {
   // Larger buffer provides better tolerance for timing variations
   audio_buffer_ = std::make_unique<AudioRingBuffer>(131072);
   PushPluginConfig();
+  const bool use_airband = ShouldUseAirbandRuntime(mode_, mode_config_);
+  ingest_enabled_.store(!use_airband);
+  ingest_idle_.store(use_airband);
 
   thread_ = std::thread(&ReceiverWorker::RunLoop, this);
   ingest_thread_ = std::thread(&ReceiverWorker::IngestLoop, this);
+  if (use_airband) {
+    if (!StartAirbandSession(error)) {
+      running_.store(false);
+      ingest_enabled_.store(false);
+      iq_queue_cv_.notify_all();
+      if (ingest_thread_.joinable()) {
+        ingest_thread_.join();
+      }
+      if (thread_.joinable()) {
+        thread_.join();
+      }
+      audio_buffer_.reset();
+      return false;
+    }
+  }
   process_thread_ = std::thread(&ReceiverWorker::ProcessLoop, this);
   if (error != nullptr) {
     error->clear();
@@ -479,6 +633,7 @@ bool ReceiverWorker::Stop(std::string* error) {
   }
 
   plugin_host_->SetParam("recording_stop", "1");
+  StopAirbandSession();
   iq_queue_cv_.notify_all();
   if (ingest_thread_.joinable()) {
     ingest_thread_.join();
@@ -502,6 +657,11 @@ bool ReceiverWorker::SetMode(RadioMode mode, std::string* error) {
     std::lock_guard<std::mutex> lock(mu_);
     mode_ = mode;
     mode_config_ = NormalizeModeConfig(mode_config_);
+  }
+  if (running_.load()) {
+    if (!ReconfigureRuntime(error)) {
+      return false;
+    }
   }
   if (error != nullptr) {
     error->clear();
@@ -541,6 +701,11 @@ bool ReceiverWorker::SetModeConfig(const ModeConfig& config, std::string* error)
     scan_channel_idx_ = 0;
   }
   PushPluginConfig();
+  if (running_.load()) {
+    if (!ReconfigureRuntime(error)) {
+      return false;
+    }
+  }
   if (error != nullptr) {
     error->clear();
   }
@@ -573,6 +738,292 @@ ReceiverStatus ReceiverWorker::Status() const {
                         .mode = mode_,
                         .mode_config = mode_config_,
                         .last_error = last_error_};
+}
+
+bool ReceiverWorker::ReconfigureRuntime(std::string* error) {
+  if (!running_.load()) {
+    if (error != nullptr) {
+      error->clear();
+    }
+    return true;
+  }
+
+  RadioMode mode;
+  ModeConfig config;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    mode = mode_;
+    config = mode_config_;
+  }
+
+  const bool desired_use_airband = ShouldUseAirbandRuntime(mode, config);
+  const bool current_use_airband = use_airband_runtime_.load();
+
+  ResetRuntimeBuffers();
+
+  if (desired_use_airband) {
+    ingest_enabled_.store(false);
+    if (!WaitForIngestIdle(error)) {
+      ingest_enabled_.store(true);
+      return false;
+    }
+    if (current_use_airband) {
+      return ReconfigureAirbandSession(error);
+    }
+    return StartAirbandSession(error);
+  }
+
+  if (current_use_airband) {
+    StopAirbandSession();
+  }
+  ingest_enabled_.store(true);
+  ingest_idle_.store(false);
+  iq_queue_cv_.notify_all();
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
+bool ReceiverWorker::StartAirbandSession(std::string* error) {
+#if defined(MR_HAS_RTL_AIRBAND) && MR_HAS_RTL_AIRBAND
+  RadioMode mode;
+  ModeConfig config;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    mode = mode_;
+    config = mode_config_;
+  }
+  auto session = std::make_unique<rtl_airband::Session>();
+  rtl_airband::RuntimeOptions options;
+  options.log_to_stderr = true;
+  options.enable_tui = false;
+  options.use_quadrature_demod = false;
+  options.multiple_demod_threads = false;
+  options.multiple_output_threads = false;
+  options.shout_metadata_delay = 0;
+  options.fft_size_log = 9;
+
+  rtl_airband::Callbacks callbacks;
+  callbacks.on_audio = [this](const rtl_airband::AudioBatch& batch) {
+    if (audio_buffer_ == nullptr || batch.left == nullptr || batch.sample_count == 0) {
+      return;
+    }
+    std::vector<int16_t> pcm(batch.sample_count);
+    for (size_t i = 0; i < batch.sample_count; ++i) {
+      const float sample = std::clamp(batch.left[i], -1.0f, 1.0f);
+      pcm[i] = static_cast<int16_t>(std::lrint(sample * 32767.0f));
+    }
+    audio_buffer_->Write(pcm.data(), pcm.size());
+  };
+  callbacks.on_scan = [this](const rtl_airband::ScanState& state) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      scan_channel_idx_ = state.frequency_index >= 0 ? state.frequency_index : 0;
+    }
+    PublishEvent(EventKind::kTuneHop,
+                 "AIRBAND_SCAN idx=" + std::to_string(state.frequency_index) +
+                     " freq_mhz=" + FormatDouble(static_cast<double>(state.frequency) / 1e6, 3),
+                 static_cast<double>(state.frequency),
+                 false);
+  };
+  callbacks.on_raw_iq = [this](const rtl_airband::RawIqBatch& batch) {
+    RadioMode mode;
+    ModeConfig config;
+    int scan_channel_idx;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      mode = mode_;
+      config = mode_config_;
+      scan_channel_idx = scan_channel_idx_;
+    }
+    const RuntimeChannel runtime_channel = SelectRuntimeChannel(mode, config, scan_channel_idx);
+    IQSampleBlock block;
+    block.sample_rate_hz = static_cast<uint32_t>(std::max(batch.sample_rate, 0));
+    block.center_frequency_hz = static_cast<uint32_t>(std::max(batch.center_frequency, 0));
+    block.interleaved_iq.assign(batch.interleaved_iq_s16,
+                                batch.interleaved_iq_s16 + batch.complex_sample_count * 2u);
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      iq_shared_.latest_block = block;
+      iq_shared_.have_latest_block = true;
+      iq_shared_.sample_rate_hz = block.sample_rate_hz;
+      iq_shared_.interleaved_samples += batch.complex_sample_count * 2u;
+    }
+
+    event_bus_->PublishIqFrame(
+        BuildIqFrame(block, receiver_id_, runtime_channel.frequency_hz, 0, 0));
+
+    if (runtime_channel.modulation == Modulation::kAm || runtime_channel.modulation == Modulation::kNfm ||
+        runtime_channel.modulation == Modulation::kWfm) {
+      return;
+    }
+
+    IqQueueEntry entry;
+    entry.block = std::move(block);
+    entry.effective_sample_rate_hz = entry.block.sample_rate_hz;
+    entry.audio_sample_rate_hz = 0;
+    entry.channel_bandwidth_hz = runtime_channel.channel_bandwidth_hz;
+    entry.tuned_frequency_hz = runtime_channel.frequency_hz;
+    entry.modulation = runtime_channel.modulation;
+    entry.scan_channel_idx = runtime_channel.index;
+    {
+      std::lock_guard<std::mutex> queue_lock(iq_queue_mu_);
+      if (iq_deque_.size() >= 8) {
+        iq_deque_.pop_front();
+      }
+      iq_deque_.push_back(std::move(entry));
+    }
+    iq_queue_cv_.notify_all();
+  };
+
+  const auto device_config = BuildAirbandDeviceConfig(receiver_id_, serial_, mode, config);
+  if (!session->Configure({device_config}, options, callbacks, error)) {
+    return false;
+  }
+  if (!session->Start(error)) {
+    return false;
+  }
+  airband_session_ = std::move(session);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    airband_applied_mode_ = mode;
+    airband_applied_mode_config_ = config;
+    have_airband_applied_config_ = true;
+  }
+  use_airband_runtime_.store(true);
+  return true;
+#else
+  if (error != nullptr) {
+    *error = "rtl_airband runtime not built";
+  }
+  return false;
+#endif
+}
+
+bool ReceiverWorker::ReconfigureAirbandSession(std::string* error) {
+#if defined(MR_HAS_RTL_AIRBAND) && MR_HAS_RTL_AIRBAND
+  if (!airband_session_) {
+    if (error != nullptr) error->clear();
+    return true;
+  }
+  RadioMode desired_mode;
+  ModeConfig desired_config;
+  RadioMode applied_mode = RadioMode::kFixed;
+  ModeConfig applied_config;
+  bool have_applied_config = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    desired_mode = mode_;
+    desired_config = mode_config_;
+    applied_mode = airband_applied_mode_;
+    applied_config = airband_applied_mode_config_;
+    have_applied_config = have_airband_applied_config_;
+  }
+
+  if (!have_applied_config) {
+    StopAirbandSession();
+    return StartAirbandSession(error);
+  }
+
+  const auto desired_device =
+      BuildAirbandDeviceConfig(receiver_id_, serial_, desired_mode, desired_config);
+  const auto applied_device =
+      BuildAirbandDeviceConfig(receiver_id_, serial_, applied_mode, applied_config);
+
+  if (!AirbandDeviceHotReloadEligible(applied_device, desired_device)) {
+    StopAirbandSession();
+    return StartAirbandSession(error);
+  }
+
+  if (applied_device.rtlsdr.correction != desired_device.rtlsdr.correction) {
+    if (!airband_session_->UpdateDeviceCorrection(0, desired_device.rtlsdr.correction, error)) {
+      return false;
+    }
+  }
+
+  const auto& desired_frequencies = desired_device.channels.front().frequencies;
+  const auto& applied_frequencies = applied_device.channels.front().frequencies;
+  bool ok = true;
+  if (desired_frequencies.size() != applied_frequencies.size()) {
+    ok = airband_session_->ReplaceScanFrequencies(0, desired_frequencies, error);
+  } else {
+    for (size_t i = 0; ok && i < desired_frequencies.size(); ++i) {
+      if (AirbandFrequencyConfigEquals(applied_frequencies[i], desired_frequencies[i])) {
+        continue;
+      }
+      ok = airband_session_->UpdateScanFrequency(0, static_cast<int>(i), desired_frequencies[i], error);
+    }
+  }
+  if (!ok) {
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    airband_applied_mode_ = desired_mode;
+    airband_applied_mode_config_ = desired_config;
+    have_airband_applied_config_ = true;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+#else
+  if (error != nullptr) error->clear();
+  return true;
+#endif
+}
+
+void ReceiverWorker::StopAirbandSession() {
+#if defined(MR_HAS_RTL_AIRBAND) && MR_HAS_RTL_AIRBAND
+  if (airband_session_) {
+    std::string error;
+    airband_session_->Stop(&error);
+    airband_session_.reset();
+  }
+#endif
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    have_airband_applied_config_ = false;
+  }
+  use_airband_runtime_.store(false);
+}
+
+bool ReceiverWorker::WaitForIngestIdle(std::string* error) {
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    if (!running_.load() || ingest_idle_.load()) {
+      if (error != nullptr) {
+        error->clear();
+      }
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (error != nullptr) {
+    *error = "timed out while waiting for ingest thread to pause";
+  }
+  return false;
+}
+
+void ReceiverWorker::ResetRuntimeBuffers() {
+  if (audio_buffer_ != nullptr) {
+    audio_buffer_->Clear();
+  }
+  {
+    std::lock_guard<std::mutex> lock(iq_queue_mu_);
+    iq_deque_.clear();
+  }
+  iq_queue_cv_.notify_all();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    iq_shared_ = IqSharedState{};
+    audio_channel_idx_ = -1;
+    if (mode_ != RadioMode::kScanList && mode_ != RadioMode::kAirMarinePlot) {
+      scan_channel_idx_ = 0;
+    }
+  }
 }
 
 void ReceiverWorker::PushPluginConfig() {
@@ -772,6 +1223,21 @@ void ReceiverWorker::IngestLoop() {
   std::string last_runtime_channel_diag;
 
   while (running_.load()) {
+    if (!ingest_enabled_.load()) {
+      if (device_ != nullptr && device_opened) {
+        device_->Close();
+        device_opened = false;
+        configured_frequency_hz = 0;
+        configured_sample_rate_hz = 0;
+        configured_hardware_bandwidth_hz = 0;
+        configured_gain_tenth_db = std::numeric_limits<int>::min();
+      }
+      ingest_idle_.store(true);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+    ingest_idle_.store(false);
+
     RadioMode mode = RadioMode::kFixed;
     ModeConfig config;
     int scan_ch_idx = 0;
@@ -943,25 +1409,15 @@ void ReceiverWorker::IngestLoop() {
   if (device_ != nullptr && device_opened) {
     device_->Close();
   }
+  ingest_idle_.store(true);
 }
 
 void ReceiverWorker::ProcessLoop() {
-  FmDemodulator fm_demod;
-  bool fm_demod_available = FmDemodulator::Available();
-  bool fm_demod_configured = false;
-  bool fm_demod_warned_unavailable = false;
-  uint32_t fm_demod_input_sr_hz = 0;
-  uint32_t fm_demod_audio_sr_hz = 0;
-  uint32_t fm_demod_channel_bw_hz = 0;
-  Modulation fm_demod_modulation = Modulation::kNfm;
-
-  AmDemodulator am_demod;
-  bool am_demod_available = AmDemodulator::Available();
-  bool am_demod_configured = false;
-  uint32_t am_demod_input_sr_hz = 0;
-  uint32_t am_demod_audio_sr_hz = 0;
-  uint32_t am_demod_channel_bw_hz = 0;
-  uint32_t am_block_log_counter = 0;
+  std::string analog_backend_name;
+  std::string analog_backend_warning;
+  auto analog_backend = CreateAnalogDemodBackend(&analog_backend_name, &analog_backend_warning);
+  bool analog_backend_announced = false;
+  bool analog_warned_unavailable = false;
   auto next_iq_visualization_at = std::chrono::steady_clock::now();
   uint64_t iq_sequence = 0;
   uint64_t iq_sample_index = 0;
@@ -1273,10 +1729,7 @@ void ReceiverWorker::ProcessLoop() {
       if (audio_buffer_ != nullptr) {
         audio_buffer_->Clear();
       }
-      fm_demod.Reset();
-      fm_demod_configured = false;
-      am_demod.Reset();
-      am_demod_configured = false;
+      analog_backend->Reset();
       rebuild_audio_filters(0);
       rebuild_rnnoise(0);
       audio_filter_sr_hz = 0;
@@ -1624,193 +2077,107 @@ void ReceiverWorker::ProcessLoop() {
       rebuild_rnnoise(entry.audio_sample_rate_hz);
     }
 
-    // FM demodulation
-    if (IsFmModulation(entry.modulation)) {
-      if (!fm_demod_available) {
-        if (!fm_demod_warned_unavailable) {
-          PublishEvent(EventKind::kWarning, "FM demod unavailable: backend built without libliquid",
-                       entry.tuned_frequency_hz);
-          fm_demod_warned_unavailable = true;
-        }
-      } else {
-        // Use adapted IQ rate whenever measured (compensates for USB read overhead).
-        // adaptive_rate_applied only freezes the EMA measurement; it does NOT gate
-        // which rate is used for demod — the adapted rate is always preferred once known.
-        const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
-                                                                        : entry.effective_sample_rate_hz;
-        const uint32_t demod_input_sr_hz = (adapted_iq_sr_hz != 0) ? adapted_iq_sr_hz : nominal_iq_sr;
-
-        const bool other_params_changed =
-            fm_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
-            fm_demod_channel_bw_hz != entry.channel_bandwidth_hz ||
-            fm_demod_modulation != entry.modulation;
-        const bool demod_reconfigure = !fm_demod_configured || other_params_changed ||
-                                       fm_demod_input_sr_hz != demod_input_sr_hz;
-        if (demod_reconfigure) {
-          std::string demod_error;
-          if (!fm_demod.Configure(demod_input_sr_hz, entry.audio_sample_rate_hz, entry.modulation,
-                                  entry.channel_bandwidth_hz, &demod_error)) {
-            fm_demod_configured = false;
-            PublishEvent(EventKind::kWarning, FormatRuntimeError("configure fm demod (process)", demod_error),
-                         entry.tuned_frequency_hz);
-          } else {
-            fm_demod_configured = true;
-            fm_demod_input_sr_hz = demod_input_sr_hz;
-            fm_demod_audio_sr_hz = entry.audio_sample_rate_hz;
-            fm_demod_channel_bw_hz = entry.channel_bandwidth_hz;
-            fm_demod_modulation = entry.modulation;
-            if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
-              adaptive_rate_applied = true;  // freeze EMA once first adapted config is applied
-            }
-          }
-        }
-
-        if (fm_demod_configured) {
-          std::vector<int16_t> demod_pcm;
-          FmDemodProcessStats demod_stats;
-          std::string demod_error;
-          if (!fm_demod.ProcessIq(entry.block.interleaved_iq, &demod_pcm, &demod_stats, &demod_error)) {
-            PublishEvent(EventKind::kWarning, FormatRuntimeError("fm demod (process)", demod_error),
-                         entry.tuned_frequency_hz);
-          } else {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
-            }
-            if (plugin_host_ != nullptr &&
-                nfm_dsc_audio_chain_enabled_.load() &&
-                entry.modulation == Modulation::kNfm &&
-                !demod_pcm.empty()) {
-              IQSampleBlock dsc_audio_block;
-              dsc_audio_block.sample_rate_hz = entry.audio_sample_rate_hz;
-              dsc_audio_block.center_frequency_hz =
-                  static_cast<uint32_t>(entry.tuned_frequency_hz);
-              dsc_audio_block.interleaved_iq.resize(demod_pcm.size() * 2u);
-              for (size_t i = 0; i < demod_pcm.size(); ++i) {
-                dsc_audio_block.interleaved_iq[i * 2u] = demod_pcm[i];
-                dsc_audio_block.interleaved_iq[i * 2u + 1u] = 0;
-              }
-              plugin_host_->ProcessIq(
-                  dsc_audio_block,
-                  [this, &entry, &allow_dsc_message](const multi_radio::PluginMessage& msg) {
-                    if (!allow_dsc_message(msg)) return;
-                    DecodedMessage dm;
-                    dm.unix_ms = msg.unix_ms;
-                    dm.receiver_id = receiver_id_;
-                    dm.signal_type = msg.signal_type;
-                    dm.frequency_hz = msg.frequency_hz != 0.0 ? msg.frequency_hz
-                                                               : entry.tuned_frequency_hz;
-                    dm.payload = msg.payload;
-                    dm.normalized_fields = msg.normalized_fields;
-                    event_bus_->PublishDecodedMessage(dm);
-                  });
-            }
-            apply_audio_filters(&demod_pcm);
-            apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
-            apply_rnnoise(&demod_pcm);
-            if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
-              size_t samples_written = 0;
-              const size_t to_write = demod_pcm.size();
-              size_t attempts = 0;
-              while (samples_written < to_write && running_.load() && attempts < 10) {
-                samples_written += audio_buffer_->Write(demod_pcm.data() + samples_written,
-                                                        to_write - samples_written);
-                if (samples_written < to_write) {
-                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                  ++attempts;
-                }
-              }
-              if (samples_written < to_write) {
-                PublishEvent(EventKind::kWarning,
-                             FormatRuntimeError("audio buffer overflow (process)",
-                                                "dropped " + std::to_string(to_write - samples_written) +
-                                                    " samples"),
-                             entry.tuned_frequency_hz);
-              }
-            }
-          }
-        }
-        am_demod.Reset();
-        am_demod_configured = false;
+    if (!analog_backend_announced) {
+      PublishEvent(EventKind::kInfo, "analog demod backend=" + analog_backend_name,
+                   entry.tuned_frequency_hz, false);
+      if (!analog_backend_warning.empty()) {
+        PublishEvent(EventKind::kWarning, analog_backend_warning, entry.tuned_frequency_hz, false);
       }
-    } else if (entry.modulation == Modulation::kAm) {
-      fm_demod.Reset();
-      fm_demod_configured = false;
+      analog_backend_announced = true;
+    }
 
-      if (!am_demod_available) {
-        // No action; AM requires libliquid
-      } else {
-        const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0
-                                           ? entry.block.sample_rate_hz
-                                           : entry.effective_sample_rate_hz;
-        const uint32_t demod_input_sr = (adapted_iq_sr_hz != 0) ? adapted_iq_sr_hz : nominal_iq_sr;
-        const bool am_reconfigure = !am_demod_configured ||
-                                    am_demod_input_sr_hz != demod_input_sr ||
-                                    am_demod_audio_sr_hz != entry.audio_sample_rate_hz ||
-                                    am_demod_channel_bw_hz != entry.channel_bandwidth_hz;
-        if (am_reconfigure) {
-          std::string demod_error;
-          if (!am_demod.Configure(demod_input_sr, entry.audio_sample_rate_hz,
-                                  entry.channel_bandwidth_hz, &demod_error)) {
-            am_demod_configured = false;
-            PublishEvent(EventKind::kWarning,
-                         FormatRuntimeError("configure am demod (process)", demod_error),
-                         entry.tuned_frequency_hz);
-          } else {
-            am_demod_configured = true;
-            am_demod_input_sr_hz = demod_input_sr;
-            am_demod_audio_sr_hz = entry.audio_sample_rate_hz;
-            am_demod_channel_bw_hz = entry.channel_bandwidth_hz;
-            if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
-              adaptive_rate_applied = true;  // freeze EMA
-            }
+    if (entry.modulation == Modulation::kAm || IsFmModulation(entry.modulation)) {
+      if (!analog_backend->Supports(entry.modulation)) {
+        if (!analog_warned_unavailable) {
+          PublishEvent(EventKind::kWarning, analog_backend->UnavailableReason(entry.modulation),
+                       entry.tuned_frequency_hz);
+          analog_warned_unavailable = true;
+        }
+        continue;
+      }
+
+      const uint32_t nominal_iq_sr = entry.block.sample_rate_hz != 0 ? entry.block.sample_rate_hz
+                                                                      : entry.effective_sample_rate_hz;
+      const uint32_t demod_input_sr_hz = (adapted_iq_sr_hz != 0) ? adapted_iq_sr_hz : nominal_iq_sr;
+      AnalogDemodResult demod_result;
+      std::string demod_error;
+      if (!analog_backend->Process(
+              AnalogDemodRequest{
+                  .block = &entry.block,
+                  .input_sample_rate_hz = demod_input_sr_hz,
+                  .audio_sample_rate_hz = entry.audio_sample_rate_hz,
+                  .channel_bandwidth_hz = entry.channel_bandwidth_hz,
+                  .modulation = entry.modulation,
+              },
+              &demod_result, &demod_error)) {
+        const std::string backend_operation = "analog demod backend (" + analog_backend_name + ")";
+        PublishEvent(EventKind::kWarning,
+                     FormatRuntimeError(backend_operation.c_str(), demod_error),
+                     entry.tuned_frequency_hz);
+        continue;
+      }
+
+      analog_warned_unavailable = false;
+      if (adapted_iq_sr_hz != 0 && !adaptive_rate_applied) {
+        adaptive_rate_applied = true;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        iq_shared_.channel_rssi_db = demod_result.channel_rssi_db;
+      }
+      if (plugin_host_ != nullptr &&
+          nfm_dsc_audio_chain_enabled_.load() &&
+          entry.modulation == Modulation::kNfm &&
+          !demod_result.pcm_s16le.empty()) {
+        IQSampleBlock dsc_audio_block;
+        dsc_audio_block.sample_rate_hz = entry.audio_sample_rate_hz;
+        dsc_audio_block.center_frequency_hz =
+            static_cast<uint32_t>(entry.tuned_frequency_hz);
+        dsc_audio_block.interleaved_iq.resize(demod_result.pcm_s16le.size() * 2u);
+        for (size_t i = 0; i < demod_result.pcm_s16le.size(); ++i) {
+          dsc_audio_block.interleaved_iq[i * 2u] = demod_result.pcm_s16le[i];
+          dsc_audio_block.interleaved_iq[i * 2u + 1u] = 0;
+        }
+        plugin_host_->ProcessIq(
+            dsc_audio_block,
+            [this, &entry, &allow_dsc_message](const multi_radio::PluginMessage& msg) {
+              if (!allow_dsc_message(msg)) return;
+              DecodedMessage dm;
+              dm.unix_ms = msg.unix_ms;
+              dm.receiver_id = receiver_id_;
+              dm.signal_type = msg.signal_type;
+              dm.frequency_hz = msg.frequency_hz != 0.0 ? msg.frequency_hz
+                                                         : entry.tuned_frequency_hz;
+              dm.payload = msg.payload;
+              dm.normalized_fields = msg.normalized_fields;
+              event_bus_->PublishDecodedMessage(dm);
+            });
+      }
+      apply_audio_filters(&demod_result.pcm_s16le);
+      apply_channel_gain(&demod_result.pcm_s16le, entry.scan_channel_idx);
+      apply_rnnoise(&demod_result.pcm_s16le);
+      if (audio_buffer_ != nullptr && !demod_result.pcm_s16le.empty()) {
+        size_t samples_written = 0;
+        const size_t to_write = demod_result.pcm_s16le.size();
+        size_t attempts = 0;
+        while (samples_written < to_write && running_.load() && attempts < 10) {
+          samples_written += audio_buffer_->Write(demod_result.pcm_s16le.data() + samples_written,
+                                                  to_write - samples_written);
+          if (samples_written < to_write) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ++attempts;
           }
         }
-
-        if (am_demod_configured) {
-          std::vector<int16_t> demod_pcm;
-          AmDemodProcessStats demod_stats;
-          std::string demod_error;
-          if (!am_demod.ProcessIq(entry.block.interleaved_iq, &demod_pcm, &demod_stats, &demod_error)) {
-            PublishEvent(EventKind::kWarning, FormatRuntimeError("am demod (process)", demod_error),
-                         entry.tuned_frequency_hz);
-          } else {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              iq_shared_.channel_rssi_db = demod_stats.channel_rssi_db;
-            }
-            ++am_block_log_counter;
-            apply_audio_filters(&demod_pcm);
-            apply_channel_gain(&demod_pcm, entry.scan_channel_idx);
-            apply_rnnoise(&demod_pcm);
-            if (audio_buffer_ != nullptr && !demod_pcm.empty()) {
-              size_t samples_written = 0;
-              const size_t to_write = demod_pcm.size();
-              size_t attempts = 0;
-              while (samples_written < to_write && running_.load() && attempts < 10) {
-                samples_written += audio_buffer_->Write(demod_pcm.data() + samples_written,
-                                                        to_write - samples_written);
-                if (samples_written < to_write) {
-                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                  ++attempts;
-                }
-              }
-              if (samples_written < to_write) {
-                PublishEvent(EventKind::kWarning,
-                             FormatRuntimeError("audio buffer overflow (process)",
-                                                "dropped " + std::to_string(to_write - samples_written) +
-                                                    " samples"),
-                             entry.tuned_frequency_hz);
-              }
-            }
-          }
+        if (samples_written < to_write) {
+          PublishEvent(EventKind::kWarning,
+                       FormatRuntimeError("audio buffer overflow (process)",
+                                          "dropped " + std::to_string(to_write - samples_written) +
+                                              " samples"),
+                       entry.tuned_frequency_hz);
         }
       }
     } else {
-      fm_demod.Reset();
-      fm_demod_configured = false;
-      am_demod.Reset();
-      am_demod_configured = false;
+      analog_backend->Reset();
     }
   }
 
@@ -2026,7 +2393,8 @@ void ReceiverWorker::RunLoop() {
     // Scan list: check squelch and advance channel every 200ms.
     // Normal mode: squelch-gated audio + channel advance only on squelch close.
     // Monitor mode: full dwell always, audio always on (for calibration).
-    if ((mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) &&
+    if (!use_airband_runtime_.load() &&
+        (mode == RadioMode::kScanList || mode == RadioMode::kAirMarinePlot) &&
         !config.scan_list_channels.empty() &&
         now >= next_scan_check_at) {
       next_scan_check_at = now + std::chrono::milliseconds(200);

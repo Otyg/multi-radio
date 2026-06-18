@@ -64,6 +64,7 @@ add_library(multi_radio_core
   src/track_database.cpp
   src/target_tracker.cpp
   src/plugin_host.cpp
+  src/analog_demod_backend.cpp
   src/fm_demod.cpp
   src/am_demod.cpp
   src/audio_ring_buffer.cpp
@@ -86,6 +87,15 @@ target_link_libraries(multi_radio_core
     ${CMAKE_DL_LIBS}
     sqlite3
 )
+
+if(TARGET rtl_airband_embedded)
+  target_link_libraries(multi_radio_core PRIVATE rtl_airband_embedded)
+  target_compile_definitions(multi_radio_core PRIVATE MR_HAS_RTL_AIRBAND=1)
+  target_include_directories(multi_radio_core PRIVATE
+    ${CMAKE_SOURCE_DIR}/RTLSDR-Airband/src
+    ${CMAKE_BINARY_DIR}/RTLSDR-Airband/src
+  )
+endif()
 
 if(MR_RTLSDR_LINK_TARGET)
   target_link_libraries(multi_radio_core PRIVATE ${MR_RTLSDR_LINK_TARGET})

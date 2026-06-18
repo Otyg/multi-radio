@@ -10,6 +10,10 @@ add_executable(test_multi_receiver_integration test_multi_receiver_integration.c
 target_link_libraries(test_multi_receiver_integration PRIVATE multi_radio::core)
 add_test(NAME test_multi_receiver_integration COMMAND test_multi_receiver_integration)
 
+add_executable(test_analog_demod_backend test_analog_demod_backend.cpp)
+target_link_libraries(test_analog_demod_backend PRIVATE multi_radio::core)
+add_test(NAME test_analog_demod_backend COMMAND test_analog_demod_backend)
+
 if(TARGET multi_radio_server_lib)
   add_executable(test_auth test_auth.cpp)
   target_link_libraries(test_auth PRIVATE multi_radio_server_lib)

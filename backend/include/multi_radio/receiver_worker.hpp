@@ -17,6 +17,10 @@
 #include "multi_radio/radio_device.hpp"
 #include "multi_radio/types.hpp"
 
+namespace rtl_airband {
+class Session;
+}
+
 namespace multi_radio {
 
 class ReceiverWorker {
@@ -40,6 +44,12 @@ class ReceiverWorker {
   void RunLoop();
   void IngestLoop();
   void ProcessLoop();
+  bool ReconfigureRuntime(std::string* error);
+  bool StartAirbandSession(std::string* error);
+  bool ReconfigureAirbandSession(std::string* error);
+  void StopAirbandSession();
+  bool WaitForIngestIdle(std::string* error);
+  void ResetRuntimeBuffers();
   void PushPluginConfig();  // pushes current mode_config_ params to plugin_host_
   void PublishEvent(EventKind kind, const std::string& message, double tuned_frequency_hz = 0.0,
                     bool log_event = true);
@@ -58,6 +68,9 @@ class ReceiverWorker {
   std::thread ingest_thread_;
   std::thread process_thread_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> ingest_enabled_{false};
+  std::atomic<bool> ingest_idle_{true};
+  std::atomic<bool> use_airband_runtime_{false};
   std::atomic<int> plugin_config_generation_{0};  // incremented by PushPluginConfig
   std::atomic<bool> nfm_dsc_audio_chain_enabled_{false};
 
@@ -96,6 +109,10 @@ class ReceiverWorker {
   std::deque<IqQueueEntry> iq_deque_;  // guarded by iq_queue_mu_
   std::mutex iq_queue_mu_;
   std::condition_variable iq_queue_cv_;
+  std::unique_ptr<rtl_airband::Session> airband_session_;
+  bool have_airband_applied_config_ = false;  // guarded by mu_
+  RadioMode airband_applied_mode_ = RadioMode::kFixed;  // guarded by mu_
+  ModeConfig airband_applied_mode_config_;  // guarded by mu_
 };
 
 }  // namespace multi_radio

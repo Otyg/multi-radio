@@ -12,6 +12,7 @@ option(MR_BUILD_TESTS "Build tests" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+add_subdirectory(RTLSDR-Airband/src EXCLUDE_FROM_ALL)
 add_subdirectory(proto)
 add_subdirectory(backend)
 if(MR_BUILD_SERVER)
