@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@ freq_t* MakeFrequencyList(int n) {
     }
     auto* freqlist = static_cast<freq_t*>(XCALLOC(static_cast<size_t>(n), sizeof(freq_t)));
     for (int i = 0; i < n; ++i) {
+        new (&freqlist[i].squelch) Squelch();
         freqlist[i].label = nullptr;
         freqlist[i].ampfactor = 1.0f;
         freqlist[i].active_counter = 0;
@@ -85,9 +87,6 @@ void ConfigureFrequency(freq_t* dest, const rtl_airband::FrequencyConfig& source
     }
     if (source.squelch_snr_threshold > 0.0f) {
         dest->squelch.set_squelch_snr_threshold(source.squelch_snr_threshold);
-    } else {
-        // Fallback to RTLSDR-Airband default SNR threshold (9.54 dB) if no manual value is provided
-        dest->squelch.set_squelch_snr_threshold(9.54f);
     }
     if (source.notch_freq > 0.0f) {
         const float q = source.notch_q > 0.0f ? source.notch_q : 10.0f;
