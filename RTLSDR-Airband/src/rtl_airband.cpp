@@ -96,22 +96,6 @@ enum fm_demod_algo fm_demod = FM_FAST_ATAN2;
 char* debug_path;
 #endif /* DEBUG */
 
-struct runtime_threads_state_t {
-    THREAD output_check;
-    bool output_check_started = false;
-    THREAD mixer;
-    bool mixer_started = false;
-    demod_params_t* demod_params = nullptr;
-    THREAD* demod_threads = nullptr;
-    int demod_thread_count = 0;
-    bool demod_threads_joined = false;
-    output_params_t* output_params = nullptr;
-    THREAD* output_threads = nullptr;
-    int output_thread_count = 0;
-};
-
-static runtime_threads_state_t runtime_threads;
-
 void sighandler(int sig) {
     log(LOG_NOTICE, "Got signal %d, exiting\n", sig);
     do_exit = 1;
@@ -119,7 +103,6 @@ void sighandler(int sig) {
 
 void* controller_thread(void* params) {
     device_t* dev = (device_t*)params;
-    const int device_index = static_cast<int>(dev - devices);
     int i = 0;
     int consecutive_squelch_off = 0;
     int new_centerfreq = 0;
@@ -140,7 +123,6 @@ void* controller_thread(void* params) {
                 if (input_set_centerfreq(dev->input, new_centerfreq) < 0) {
                     break;
                 }
-                rtl_airband_emit_scan_callback(device_index, 0, &dev->channels[0]);
             }
         } else {
             if (consecutive_squelch_off == 10) {
@@ -326,45 +308,6 @@ int next_device(demod_params_t* params, int current) {
     return params->device_start;
 }
 
-static void append_raw_iq_callback_samples(device_t* dev, unsigned char* src, size_t complex_samples) {
-    if (dev == nullptr || !dev->emit_raw_iq_callback || dev->raw_iq_callback == nullptr || complex_samples == 0) {
-        return;
-    }
-    if (dev->raw_iq_callback_fill_complex >= dev->raw_iq_callback_capacity_complex) {
-        return;
-    }
-    const size_t capacity_left = dev->raw_iq_callback_capacity_complex - dev->raw_iq_callback_fill_complex;
-    const size_t append_complex = std::min(complex_samples, capacity_left);
-    int16_t* dst = dev->raw_iq_callback + dev->raw_iq_callback_fill_complex * 2;
-
-    if (dev->input->sfmt == SFMT_S16) {
-        short* buf = reinterpret_cast<short*>(src);
-        for (size_t i = 0; i < append_complex * 2; ++i) {
-            dst[i] = static_cast<int16_t>(buf[i]);
-        }
-    } else if (dev->input->sfmt == SFMT_F32) {
-        float* buf = reinterpret_cast<float*>(src);
-        for (size_t i = 0; i < append_complex * 2; ++i) {
-            float sample = buf[i] / dev->input->fullscale;
-            if (sample > 1.0f) sample = 1.0f;
-            if (sample < -1.0f) sample = -1.0f;
-            dst[i] = static_cast<int16_t>(sample * 32767.0f);
-        }
-    } else if (dev->input->sfmt == SFMT_S8) {
-        int8_t* buf = reinterpret_cast<int8_t*>(src);
-        for (size_t i = 0; i < append_complex * 2; ++i) {
-            dst[i] = static_cast<int16_t>(static_cast<int16_t>(buf[i]) << 8);
-        }
-    } else {
-        uint8_t* buf = reinterpret_cast<uint8_t*>(src);
-        for (size_t i = 0; i < append_complex * 2; ++i) {
-            dst[i] = static_cast<int16_t>((static_cast<int>(buf[i]) - 128) << 8);
-        }
-    }
-
-    dev->raw_iq_callback_fill_complex += append_complex;
-}
-
 void* demodulate(void* params) {
     assert(params != NULL);
     demod_params_t* demod_params = (demod_params_t*)params;
@@ -474,17 +417,11 @@ void* demodulate(void* params) {
 
         // number of input bytes per output wave sample (x 2 for I and Q)
         size_t bps = 2 * dev->input->bytes_per_sample * (size_t)round((double)dev->input->sample_rate / (double)WAVE_RATE);
-        const size_t raw_complex_per_step = bps / (2 * dev->input->bytes_per_sample);
         if (available < bps * FFT_BATCH + fft_size * dev->input->bytes_per_sample * 2) {
             // move to next device
             device_num = next_device(demod_params, device_num);
             SLEEP(10);
             continue;
-        }
-
-        if (dev->emit_raw_iq_callback) {
-            unsigned char* raw_src = dev->input->buffer + dev->input->bufs;
-            append_raw_iq_callback_samples(dev, raw_src, raw_complex_per_step * FFT_BATCH);
         }
 
         if (dev->input->sfmt == SFMT_S16) {
@@ -617,11 +554,6 @@ void* demodulate(void* params) {
                         }
                     }
 
-                    if (channel->emit_iq_callback && (j - AGC_EXTRA) < WAVE_BATCH) {
-                        channel->iq_callback[2 * (j - AGC_EXTRA)] = real;
-                        channel->iq_callback[2 * (j - AGC_EXTRA) + 1] = imag;
-                    }
-
                     if (fparms->modulation == MOD_AM) {
                         // if squelch is just opening then bootstrip agcavgfast with prior values of wavein
                         if (fparms->squelch.first_open_sample()) {
@@ -639,8 +571,17 @@ void* demodulate(void* params) {
                         }
                     }
 
+                    // Debugging squelch state
+                    if (fparms->squelch.is_open()) {
+                        debug_print("Squelch OPEN (Dev %d, Ch %d, Freq %.3f MHz). Signal: %.2f dBFS, Noise: %.2f dBFS\n",
+                                    dev->device, i, channel->freqlist[channel->freq_idx].frequency / 1000000.0,
+                                    level_to_dBFS(fparms->squelch.signal_level()), level_to_dBFS(fparms->squelch.noise_level()));
+                    } else {
+                        debug_print("Squelch CLOSED (Dev %d, Ch %d, Freq %.3f MHz). Signal: %.2f dBFS, Noise: %.2f dBFS\n",
+                                    dev->device, i, channel->freqlist[channel->freq_idx].frequency / 1000000.0,
+                                    level_to_dBFS(fparms->squelch.signal_level()), level_to_dBFS(fparms->squelch.noise_level()));
+                    }
                     float& waveout = channel->waveout[j];
-                    waveout = 0.0f;
 
                     // If squelch sees power then do modulation-specific processing
                     if (fparms->squelch.should_process_audio()) {
@@ -677,28 +618,24 @@ void* demodulate(void* params) {
 #endif /* NFM */
 
                         // process audio sample for CTCSS, will be no-op if not configured
-                        if (fparms->modulation != MOD_RAWIQ) {
-                            fparms->squelch.process_audio_sample(waveout);
-                        }
+                        fparms->squelch.process_audio_sample(waveout);
                     }
 
                     // If squelch is still open then save samples to output
                     if (fparms->squelch.is_open()) {
-                        if (fparms->modulation != MOD_RAWIQ) {
-                            // apply the notch filter, will be a no-op if not configured
-                            fparms->notch_filter.apply(waveout);
+                        // apply the notch filter, will be a no-op if not configured
+                        fparms->notch_filter.apply(waveout);
 
-                            // apply the ampfactor
-                            waveout *= fparms->ampfactor;
+                        // apply the ampfactor
+                        waveout *= fparms->ampfactor;
 
-                            // make sure the value is between +/- 1 (requirement for libmp3lame)
-                            if (isnan(waveout)) {
-                                waveout = 0.0;
-                            } else if (waveout > 1.0) {
-                                waveout = 1.0;
-                            } else if (waveout < -1.0) {
-                                waveout = -1.0;
-                            }
+                        // make sure the value is between +/- 1 (requirement for libmp3lame)
+                        if (isnan(waveout)) {
+                            waveout = 0.0;
+                        } else if (waveout > 1.0) {
+                            waveout = 1.0;
+                        } else if (waveout < -1.0) {
+                            waveout = -1.0;
                         }
 
                         channel->axcindicate = SIGNAL;
@@ -743,7 +680,6 @@ void* demodulate(void* params) {
                 if (channel->axcindicate != NO_SIGNAL) {
                     channel->freqlist[channel->freq_idx].active_counter++;
                 }
-                rtl_airband_emit_iq_callback(device_num, i, channel);
             }
             if (dev->waveavail == 1) {
                 debug_print("devices[%d]: output channel overrun\n", device_num);
@@ -751,7 +687,6 @@ void* demodulate(void* params) {
             } else {
                 dev->waveavail = 1;
             }
-            rtl_airband_emit_raw_iq_callback(device_num, dev);
             dev->waveend -= WAVE_BATCH;
 #ifdef DEBUG
             gettimeofday(&te, NULL);
@@ -798,240 +733,6 @@ static int count_devices_running() {
     return ret;
 }
 
-void rtl_airband_runtime_set_log_to_stderr(bool enabled) {
-    log_destination = enabled ? STDERR : NONE;
-}
-
-void rtl_airband_runtime_set_tui(bool enabled) {
-    tui = enabled ? 1 : 0;
-}
-
-void rtl_airband_runtime_set_fft_size_log(size_t value) {
-    fft_size_log = value;
-    fft_size = 1 << fft_size_log;
-}
-
-void rtl_airband_runtime_set_shout_metadata_delay(int value) {
-    shout_metadata_delay = value;
-}
-
-void rtl_airband_runtime_set_multiple_demod_threads(bool enabled) {
-    multiple_demod_threads = enabled;
-}
-
-void rtl_airband_runtime_set_multiple_output_threads(bool enabled) {
-    multiple_output_threads = enabled;
-}
-
-void rtl_airband_runtime_set_use_localtime(bool enabled) {
-    use_localtime = enabled;
-}
-
-void rtl_airband_runtime_set_quadrature_demod(bool enabled) {
-#ifdef NFM
-    fm_demod = enabled ? FM_QUADRI_DEMOD : FM_FAST_ATAN2;
-#else
-    UNUSED(enabled);
-#endif
-}
-
-void rtl_airband_runtime_reset_globals() {
-    do_exit = 0;
-    use_localtime = false;
-    multiple_demod_threads = false;
-    multiple_output_threads = false;
-    log_scan_activity = false;
-    shout_metadata_delay = 3;
-    fft_size_log = DEFAULT_FFT_SIZE_LOG;
-    fft_size = 1 << fft_size_log;
-    device_count = 0;
-    mixer_count = 0;
-    devices = nullptr;
-    mixers = nullptr;
-    stats_filepath = NULL;
-    runtime_threads = runtime_threads_state_t{};
-}
-
-bool rtl_airband_runtime_running() {
-    return runtime_threads.output_threads != nullptr || runtime_threads.demod_threads != nullptr;
-}
-
-bool rtl_airband_runtime_start(bool foreground, std::string* error) {
-    if (device_count < 1 || devices == nullptr) {
-        if (error) *error = "runtime has no devices";
-        return false;
-    }
-
-    if (!foreground) {
-        if (error) *error = "background daemon mode is not supported through the embedded runtime";
-        return false;
-    }
-
-    shout_init();
-    sincosf_lut_init();
-
-    for (int i = 0; i < mixer_count; i++) {
-        if (mixers[i].enabled == false) {
-            continue;
-        }
-        channel_t* channel = &mixers[i].channel;
-        for (int k = 0; k < channel->output_count; k++) {
-            output_t* output = channel->outputs + k;
-            if (!init_output(channel, output)) {
-                if (error) *error = "failed to initialize mixer output";
-                return false;
-            }
-        }
-    }
-    for (int i = 0; i < device_count; i++) {
-        device_t* dev = devices + i;
-        for (int j = 0; j < dev->channel_count; j++) {
-            channel_t* channel = dev->channels + j;
-            for (int k = 0; k < channel->output_count; k++) {
-                output_t* output = channel->outputs + k;
-                if (!init_output(channel, output)) {
-                    if (error) *error = "failed to initialize device output";
-                    return false;
-                }
-            }
-            rtl_airband_emit_scan_callback(i, j, channel);
-        }
-        if (input_init(dev->input) != 0 || dev->input->state != INPUT_INITIALIZED) {
-            if (error) *error = "failed to initialize input device";
-            return false;
-        }
-        if (input_start(dev->input) != 0) {
-            if (error) *error = "failed to start input device";
-            return false;
-        }
-        if (dev->mode == R_SCAN) {
-            pthread_create(&dev->controller_thread, NULL, &controller_thread, dev);
-        }
-    }
-
-    int timeout = 50;
-    while ((devices_running = count_devices_running()) != device_count && timeout > 0) {
-        SLEEP(100);
-        timeout--;
-    }
-    if ((devices_running = count_devices_running()) != device_count) {
-        if (error) *error = "one or more devices failed to initialize";
-        return false;
-    }
-
-    if (tui) {
-        printf("\e[1;1H\e[2J");
-        GOTOXY(0, 0);
-        printf("                                                                               ");
-        for (int i = 0; i < device_count; i++) {
-            GOTOXY(0, i * 17 + 1);
-            for (int j = 0; j < devices[i].channel_count; j++) {
-                printf(" %7.3f  ", devices[i].channels[j].freqlist[devices[i].channels[j].freq_idx].frequency / 1000000.0);
-            }
-            if (i != device_count - 1) {
-                GOTOXY(0, i * 17 + 16);
-                printf("-------------------------------------------------------------------------------");
-            }
-        }
-    }
-
-    pthread_create(&runtime_threads.output_check, NULL, &output_check_thread, NULL);
-    runtime_threads.output_check_started = true;
-
-    runtime_threads.demod_thread_count = multiple_demod_threads ? device_count : 1;
-    runtime_threads.demod_params = (demod_params_t*)XCALLOC(runtime_threads.demod_thread_count, sizeof(demod_params_t));
-    runtime_threads.demod_threads = (THREAD*)XCALLOC(runtime_threads.demod_thread_count, sizeof(THREAD));
-
-    runtime_threads.output_thread_count = 1;
-    if (multiple_output_threads) {
-        runtime_threads.output_thread_count = runtime_threads.demod_thread_count;
-        if (mixer_count > 0) {
-            runtime_threads.output_thread_count++;
-        }
-    }
-    runtime_threads.output_params = (output_params_t*)XCALLOC(runtime_threads.output_thread_count, sizeof(output_params_t));
-    runtime_threads.output_threads = (THREAD*)XCALLOC(runtime_threads.output_thread_count, sizeof(THREAD));
-
-    if (multiple_output_threads == false) {
-        init_output_params(&runtime_threads.output_params[0], 0, device_count, 0, mixer_count);
-        if (multiple_demod_threads == false) {
-            init_demod(&runtime_threads.demod_params[0], runtime_threads.output_params[0].mp3_signal, 0, device_count);
-        } else {
-            for (int i = 0; i < runtime_threads.demod_thread_count; i++) {
-                init_demod(&runtime_threads.demod_params[i], runtime_threads.output_params[0].mp3_signal, i, i + 1);
-            }
-        }
-    } else {
-        if (multiple_demod_threads == false) {
-            init_output_params(&runtime_threads.output_params[0], 0, device_count, 0, 0);
-            init_demod(&runtime_threads.demod_params[0], runtime_threads.output_params[0].mp3_signal, 0, device_count);
-        } else {
-            for (int i = 0; i < device_count; i++) {
-                init_output_params(&runtime_threads.output_params[i], i, i + 1, 0, 0);
-                init_demod(&runtime_threads.demod_params[i], runtime_threads.output_params[i].mp3_signal, i, i + 1);
-            }
-        }
-        if (mixer_count > 0) {
-            init_output_params(&runtime_threads.output_params[runtime_threads.output_thread_count - 1], 0, 0, 0, mixer_count);
-        }
-    }
-
-    for (int i = 0; i < runtime_threads.output_thread_count; i++) {
-        pthread_create(&runtime_threads.output_threads[i], NULL, &output_thread, &runtime_threads.output_params[i]);
-    }
-    if (mixer_count > 0) {
-        pthread_create(&runtime_threads.mixer, NULL, &mixer_thread,
-                       runtime_threads.output_params[runtime_threads.output_thread_count - 1].mp3_signal);
-        runtime_threads.mixer_started = true;
-    }
-#ifdef WITH_PULSEAUDIO
-    pulse_start();
-#endif
-    for (int i = 0; i < runtime_threads.demod_thread_count; i++) {
-        pthread_create(&runtime_threads.demod_threads[i], NULL, &demodulate, &runtime_threads.demod_params[i]);
-    }
-    runtime_threads.demod_threads_joined = false;
-    if (error) error->clear();
-    return true;
-}
-
-bool rtl_airband_runtime_stop(std::string* error) {
-    if (!rtl_airband_runtime_running()) {
-        if (error) error->clear();
-        return true;
-    }
-
-    do_exit = 1;
-    for (int i = 0; i < runtime_threads.output_thread_count; i++) {
-        runtime_threads.output_params[i].mp3_signal->send();
-    }
-    if (!runtime_threads.demod_threads_joined) {
-        for (int i = 0; i < runtime_threads.demod_thread_count; i++) {
-            pthread_join(runtime_threads.demod_threads[i], NULL);
-        }
-        runtime_threads.demod_threads_joined = true;
-    }
-    for (int i = 0; i < device_count; i++) {
-        if (devices[i].mode == R_SCAN) {
-            pthread_join(devices[i].controller_thread, NULL);
-        }
-        input_stop(devices[i].input);
-    }
-    if (runtime_threads.mixer_started) {
-        pthread_join(runtime_threads.mixer, NULL);
-    }
-    for (int i = 0; i < runtime_threads.output_thread_count; i++) {
-        pthread_join(runtime_threads.output_threads[i], NULL);
-    }
-    for (int i = 0; i < device_count; i++) {
-        disable_device_outputs(devices + i);
-    }
-    runtime_threads = runtime_threads_state_t{};
-    if (error) error->clear();
-    return true;
-}
-
-#ifndef RTL_AIRBAND_NO_MAIN
 int main(int argc, char* argv[]) {
 #ifdef WITH_PROFILING
     ProfilerStart("rtl_airband.prof");
@@ -1276,18 +977,179 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::string runtime_error;
-    if (!rtl_airband_runtime_start(foreground != 0, &runtime_error)) {
-        cerr << runtime_error << "\n";
+    for (int i = 0; i < mixer_count; i++) {
+        if (mixers[i].enabled == false) {
+            continue;  // no inputs connected = no need to initialize output
+        }
+        channel_t* channel = &mixers[i].channel;
+        for (int k = 0; k < channel->output_count; k++) {
+            output_t* output = channel->outputs + k;
+            if (!init_output(channel, output)) {
+                cerr << "Failed to initialize mixer " << i << " output " << k << " - aborting\n";
+                error();
+            }
+        }
+    }
+    for (int i = 0; i < device_count; i++) {
+        device_t* dev = devices + i;
+        for (int j = 0; j < dev->channel_count; j++) {
+            channel_t* channel = dev->channels + j;
+
+            for (int k = 0; k < channel->output_count; k++) {
+                output_t* output = channel->outputs + k;
+                if (!init_output(channel, output)) {
+                    cerr << "Failed to initialize device " << i << " channel " << j << " output " << k << " - aborting\n";
+                    error();
+                }
+            }
+        }
+        if (input_init(dev->input) != 0 || dev->input->state != INPUT_INITIALIZED) {
+            if (errno != 0) {
+                cerr << "Failed to initialize input device " << i << ": " << strerror(errno) << " - aborting\n";
+            } else {
+                cerr << "Failed to initialize input device " << i << " - aborting\n";
+            }
+            error();
+        }
+        if (input_start(dev->input) != 0) {
+            cerr << "Failed to start input on device " << i << ": " << strerror(errno) << " - aborting\n";
+            error();
+        }
+        if (dev->mode == R_SCAN) {
+            // FIXME: set errno
+            if (pthread_mutex_init(&dev->tag_queue_lock, NULL) != 0) {
+                cerr << "Failed to initialize mutex - aborting\n";
+                error();
+            }
+            // FIXME: not needed when freq_count == 1?
+            pthread_create(&dev->controller_thread, NULL, &controller_thread, dev);
+        }
+    }
+
+    int timeout = 50;  // 5 seconds
+    while ((devices_running = count_devices_running()) != device_count && timeout > 0) {
+        SLEEP(100);
+        timeout--;
+    }
+    if ((devices_running = count_devices_running()) != device_count) {
+        log(LOG_ERR, "%d device(s) failed to initialize - aborting\n", device_count - devices_running);
         error();
     }
-    for (int i = 0; i < runtime_threads.demod_thread_count; i++) {
-        pthread_join(runtime_threads.demod_threads[i], NULL);
+    if (tui) {
+        printf("\e[1;1H\e[2J");
+
+        GOTOXY(0, 0);
+        printf("                                                                               ");
+        for (int i = 0; i < device_count; i++) {
+            GOTOXY(0, i * 17 + 1);
+            for (int j = 0; j < devices[i].channel_count; j++) {
+                printf(" %7.3f  ", devices[i].channels[j].freqlist[devices[i].channels[j].freq_idx].frequency / 1000000.0);
+            }
+            if (i != device_count - 1) {
+                GOTOXY(0, i * 17 + 16);
+                printf("-------------------------------------------------------------------------------");
+            }
+        }
     }
-    runtime_threads.demod_threads_joined = true;
+    THREAD output_check;
+    pthread_create(&output_check, NULL, &output_check_thread, NULL);
+
+    int demod_thread_count = multiple_demod_threads ? device_count : 1;
+    demod_params_t* demod_params = (demod_params_t*)XCALLOC(demod_thread_count, sizeof(demod_params_t));
+    THREAD* demod_threads = (THREAD*)XCALLOC(demod_thread_count, sizeof(THREAD));
+
+    int output_thread_count = 1;
+    if (multiple_output_threads) {
+        output_thread_count = demod_thread_count;
+        if (mixer_count > 0) {
+            output_thread_count++;
+        }
+    }
+    output_params_t* output_params = (output_params_t*)XCALLOC(output_thread_count, sizeof(output_params_t));
+    THREAD* output_threads = (THREAD*)XCALLOC(output_thread_count, sizeof(THREAD));
+
+    // Setup the output and demod threads
+    if (multiple_output_threads == false) {
+        init_output_params(&output_params[0], 0, device_count, 0, mixer_count);
+
+        if (multiple_demod_threads == false) {
+            init_demod(&demod_params[0], output_params[0].mp3_signal, 0, device_count);
+        } else {
+            for (int i = 0; i < demod_thread_count; i++) {
+                init_demod(&demod_params[i], output_params[0].mp3_signal, i, i + 1);
+            }
+        }
+    } else {
+        if (multiple_demod_threads == false) {
+            init_output_params(&output_params[0], 0, device_count, 0, 0);
+            init_demod(&demod_params[0], output_params[0].mp3_signal, 0, device_count);
+        } else {
+            for (int i = 0; i < device_count; i++) {
+                init_output_params(&output_params[i], i, i + 1, 0, 0);
+                init_demod(&demod_params[i], output_params[i].mp3_signal, i, i + 1);
+            }
+        }
+        if (mixer_count > 0) {
+            init_output_params(&output_params[output_thread_count - 1], 0, 0, 0, mixer_count);
+        }
+    }
+
+    // Startup the output threads
+    for (int i = 0; i < output_thread_count; i++) {
+        pthread_create(&output_threads[i], NULL, &output_thread, &output_params[i]);
+    }
+
+    // Startup the mixer thread (if there is one) using the signal for the last output thread
+    THREAD mixer;
+    if (mixer_count > 0) {
+        pthread_create(&mixer, NULL, &mixer_thread, output_params[output_thread_count - 1].mp3_signal);
+    }
+
+#ifdef WITH_PULSEAUDIO
+    pulse_start();
+#endif /* WITH_PULSEAUDIO */
+
+    sincosf_lut_init();
+
+    // Startup the demod threads
+    for (int i = 0; i < demod_thread_count; i++) {
+        pthread_create(&demod_threads[i], NULL, &demodulate, &demod_params[i]);
+    }
+
+    // Wait for demod threads to exit
+    for (int i = 0; i < demod_thread_count; i++) {
+        pthread_join(demod_threads[i], NULL);
+    }
 
     log(LOG_INFO, "Cleaning up\n");
-    rtl_airband_runtime_stop(nullptr);
+    for (int i = 0; i < device_count; i++) {
+        if (devices[i].mode == R_SCAN)
+            pthread_join(devices[i].controller_thread, NULL);
+        if (input_stop(devices[i].input) != 0 || devices[i].input->state != INPUT_STOPPED) {
+            if (errno != 0) {
+                log(LOG_ERR, "Failed do stop device #%d: %s\n", i, strerror(errno));
+            } else {
+                log(LOG_ERR, "Failed do stop device #%d\n", i);
+            }
+        }
+    }
+    log(LOG_INFO, "Input threads closed\n");
+
+    if (mixer_count > 0) {
+        log(LOG_INFO, "Closing mixer thread\n");
+        pthread_join(mixer, NULL);
+    }
+
+    log(LOG_INFO, "Closing output thread(s)\n");
+    for (int i = 0; i < output_thread_count; i++) {
+        output_params[i].mp3_signal->send();
+        pthread_join(output_threads[i], NULL);
+    }
+
+    for (int i = 0; i < device_count; i++) {
+        device_t* dev = devices + i;
+        disable_device_outputs(dev);
+    }
 
     for (int i = 0; i < device_count; i++) {
         device_t* dev = devices + i;
@@ -1308,4 +1170,3 @@ int main(int argc, char* argv[]) {
 #endif /* WITH_PROFILING */
     return 0;
 }
-#endif

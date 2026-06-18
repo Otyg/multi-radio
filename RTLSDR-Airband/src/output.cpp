@@ -477,7 +477,7 @@ static bool output_file_ready(channel_t* channel, output_t* output) {
 }
 
 // Create all the output for a particular channel.
-void process_outputs(channel_t* channel, int cur_scan_freq) {
+void process_outputs(int device_index, int channel_index, channel_t* channel, int cur_scan_freq) {
     for (int k = 0; k < channel->output_count; k++) {
         if (channel->outputs[k].enabled == false)
             continue;
@@ -580,8 +580,8 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
             udp_stream_data* sdata = (udp_stream_data*)channel->outputs[k].data;
 
             if (sdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
-                continue;
-            }
+                debug_print("UDP Stream: Skipping write for Dev %d, Ch %d, Freq %.3f MHz: not continuous and no signal\n",
+                            device_index, channel_index, channel->freqlist[channel->freq_idx].frequency / 1000000.0);                continue;            }
 
             if (channel->mode == MM_MONO) {
                 udp_stream_write(sdata, channel->waveout, (size_t)WAVE_BATCH * sizeof(float));
@@ -592,8 +592,11 @@ void process_outputs(channel_t* channel, int cur_scan_freq) {
 #ifdef WITH_PULSEAUDIO
         } else if (channel->outputs[k].type == O_PULSE) {
             pulse_data* pdata = (pulse_data*)(channel->outputs[k].data);
-            if (pdata->continuous == false && channel->axcindicate == NO_SIGNAL)
+            if (pdata->continuous == false && channel->axcindicate == NO_SIGNAL) {
+                debug_print("PulseAudio: Skipping write for Dev %d, Ch %d, Freq %.3f MHz: not continuous and no signal\n",
+                            device_index, channel_index, channel->freqlist[channel->freq_idx].frequency / 1000000.0);
                 continue;
+            }
 
             pulse_write_stream(pdata, channel->mode, channel->waveout, channel->waveout_r, (size_t)WAVE_BATCH * sizeof(float));
 #endif /* WITH_PULSEAUDIO */
@@ -930,9 +933,9 @@ void* output_thread(void* param) {
         for (int i = output_param->mixer_start; i < output_param->mixer_end; i++) {
             if (mixers[i].enabled == false)
                 continue;
-            channel_t* channel = &mixers[i].channel;
+            channel_t* channel = &mixers[i].channel; // Mixers don't have a device_index or channel_index in the same way as devices
             if (channel->state == CH_READY) {
-                process_outputs(channel, -1);
+                process_outputs(-1, -1, channel, -1); // Use -1 for device_index and channel_index for mixers
                 channel->state = CH_DIRTY;
             }
         }
@@ -958,8 +961,7 @@ void* output_thread(void* param) {
                 }
                 for (int j = 0; j < dev->channel_count; j++) {
                     channel_t* channel = devices[i].channels + j;
-                    process_outputs(channel, new_freq);
-                    rtl_airband_emit_audio_callback(i, j, channel);
+                    process_outputs(i, j, channel, new_freq);
                     memcpy(channel->waveout, channel->waveout + WAVE_BATCH, AGC_EXTRA * 4);
                 }
                 dev->waveavail = 0;
@@ -982,8 +984,7 @@ void* output_thread(void* param) {
             continue;
         for (int j = 0; j < dev->channel_count; j++) {
             channel_t* channel = devices[i].channels + j;
-            process_outputs(channel, -1);
-            rtl_airband_emit_audio_callback(i, j, channel);
+            process_outputs(i, j, channel, -1);
             memcpy(channel->waveout, channel->waveout + WAVE_BATCH, AGC_EXTRA * 4);
         }
         dev->waveavail = 0;
