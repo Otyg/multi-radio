@@ -74,7 +74,7 @@ using namespace libconfig;
 device_t* devices;
 mixer_t* mixers;
 int device_count, mixer_count;
-static int devices_running = 0;
+static int devices_running_count = 0; // Renamed to avoid conflict with function rtl_airband_runtime_running
 int tui = 0;  // do not display textual user interface
 int shout_metadata_delay = 3;
 volatile int do_exit = 0;
@@ -400,7 +400,7 @@ void* demodulate(void* params) {
             available = dev->input->buf_size - dev->input->bufs + dev->input->bufe;
         pthread_mutex_unlock(&dev->input->buffer_lock);
 
-        if (devices_running == 0) {
+        if (devices_running_count == 0) {
             log(LOG_ERR, "All receivers failed, exiting\n");
             do_exit = 1;
             continue;
@@ -409,7 +409,7 @@ void* demodulate(void* params) {
         if (dev->input->state != INPUT_RUNNING) {
             if (dev->input->state == INPUT_FAILED) {
                 dev->input->state = INPUT_DISABLED;
-                devices_running--;
+                devices_running_count--;
             }
             device_num = next_device(demod_params, device_num);
             continue;
@@ -574,11 +574,11 @@ void* demodulate(void* params) {
                     // Debugging squelch state
                     if (fparms->squelch.is_open()) {
                         debug_print("Squelch OPEN (Dev %d, Ch %d, Freq %.3f MHz). Signal: %.2f dBFS, Noise: %.2f dBFS\n",
-                                    dev->device, i, channel->freqlist[channel->freq_idx].frequency / 1000000.0,
+                                    device_num, i, channel->freqlist[channel->freq_idx].frequency / 1000000.0,
                                     level_to_dBFS(fparms->squelch.signal_level()), level_to_dBFS(fparms->squelch.noise_level()));
                     } else {
                         debug_print("Squelch CLOSED (Dev %d, Ch %d, Freq %.3f MHz). Signal: %.2f dBFS, Noise: %.2f dBFS\n",
-                                    dev->device, i, channel->freqlist[channel->freq_idx].frequency / 1000000.0,
+                                    device_num, i, channel->freqlist[channel->freq_idx].frequency / 1000000.0,
                                     level_to_dBFS(fparms->squelch.signal_level()), level_to_dBFS(fparms->squelch.noise_level()));
                     }
                     float& waveout = channel->waveout[j];
@@ -733,7 +733,302 @@ static int count_devices_running() {
     return ret;
 }
 
+// --- RTL-Airband Runtime API for library usage ---
+
+static pthread_t rtl_airband_main_thread_handle;
+static void* rtl_airband_main_thread_func(void* arg); // Forward declaration
+
+bool rtl_airband_runtime_running() {
+    return !do_exit;
+}
+
+void rtl_airband_runtime_reset_globals() {
+    // Reset global variables to their initial state.
+    // Note: This does NOT free `devices` or `mixers` as their lifecycle
+    // is managed by the `rtl_airband_lib.cpp` Session object.
+    // It also does not free `stats_filepath` or `debug_path` as they are strdup'd.
+    // The Session destructor or a dedicated cleanup function should handle these.
+
+    // Simple globals
+    device_count = 0;
+    mixer_count = 0;
+    devices_running_count = 0;
+    tui = 0;
+    shout_metadata_delay = 3;
+    do_exit = 0;
+    use_localtime = false;
+    multiple_demod_threads = false;
+    multiple_output_threads = false;
+    log_scan_activity = false;
+    fft_size_log = DEFAULT_FFT_SIZE_LOG;
+    fft_size = 1 << fft_size_log;
+#ifdef NFM
+    alpha = exp(-1.0f / (WAVE_RATE * 2e-4));
+    fm_demod = FM_FAST_ATAN2;
+#endif
+}
+
+void rtl_airband_runtime_set_log_to_stderr(bool enable) {
+    log_destination = enable ? STDERR : SYSLOG;
+}
+
+void rtl_airband_runtime_set_tui(bool enable) {
+    tui = enable ? 1 : 0;
+}
+
+void rtl_airband_runtime_set_fft_size_log(size_t size_log) {
+    fft_size_log = size_log;
+    fft_size = 1 << fft_size_log;
+}
+
+void rtl_airband_runtime_set_shout_metadata_delay(int delay) {
+    shout_metadata_delay = delay;
+}
+
+void rtl_airband_runtime_set_multiple_demod_threads(bool enable) {
+    multiple_demod_threads = enable;
+}
+
+void rtl_airband_runtime_set_multiple_output_threads(bool enable) {
+    multiple_output_threads = enable;
+}
+
+void rtl_airband_runtime_set_use_localtime(bool enable) {
+    use_localtime = enable;
+}
+
+void rtl_airband_runtime_set_quadrature_demod(bool enable) {
+#ifdef NFM
+    fm_demod = enable ? FM_QUADRI_DEMOD : FM_FAST_ATAN2;
+#else
+    UNUSED(enable);
+#endif
+}
+
+bool rtl_airband_runtime_start(bool foreground, std::string* error_str) {
+    if (rtl_airband_runtime_running()) {
+        if (error_str) *error_str = "RTL-Airband runtime already running.";
+        return false;
+    }
+
+    do_exit = 0; // Ensure not exiting
+
+    // Create and start the main processing thread
+    int err = pthread_create(&rtl_airband_main_thread_handle, NULL, rtl_airband_main_thread_func, (void*)(long)foreground);
+    if (err != 0) {
+        if (error_str) *error_str = "Failed to create main RTL-Airband thread: " + std::string(strerror(err));
+        return false;
+    }
+    return true;
+}
+
+bool rtl_airband_runtime_stop(std::string* error_str) {
+    if (!rtl_airband_runtime_running()) {
+        if (error_str) *error_str = "RTL-Airband runtime not running.";
+        return false;
+    }
+
+    do_exit = 1; // Signal threads to exit
+
+    // Wait for the main processing thread to finish
+    int err = pthread_join(rtl_airband_main_thread_handle, NULL);
+    if (err != 0) {
+        if (error_str) *error_str = "Failed to join main RTL-Airband thread: " + std::string(strerror(err));
+        return false;
+    }
+
+    // Cleanup logic is now part of rtl_airband_main_thread_func before it exits.
+    // The Session destructor in rtl_airband_lib.cpp should handle freeing
+    // the global `devices` and `mixers` data.
+
+    close_debug();
+
+    return true;
+}
+
+// This function contains the core logic of the original main's execution loop
+static void* rtl_airband_main_thread_func(void* arg) {
+    bool foreground = (bool)(long)arg; // Cast back the foreground flag
+    UNUSED(foreground); // Suppress unused parameter warning
+
+    // The configuration (devices, mixers) is assumed to be done by rtl_airband_lib.cpp's Configure method.
+
+    // Original main's setup part:
+    // Signal handlers are set up by the caller (rtl_airband_lib.cpp or main executable)
+    // Syslog/stderr logging is set by rtl_airband_runtime_set_log_to_stderr
+    // Mixer parsing and device parsing are done by rtl_airband_lib.cpp's Configure method.
+
+    // Start input devices
+    for (int i = 0; i < device_count; i++) {
+        device_t* dev = devices + i;
+        if (input_init(dev->input) != 0 || dev->input->state != INPUT_INITIALIZED) {
+            if (errno != 0) {
+                cerr << "Failed to initialize input device " << i << ": " << strerror(errno) << " - aborting\n";
+            } else {
+                cerr << "Failed to initialize input device " << i << " - aborting\n";
+            }
+            do_exit = 1; // Signal exit on failure
+            return (void*)1; // Return error code
+        }
+        if (input_start(dev->input) != 0) {
+            cerr << "Failed to start input on device " << i << ": " << strerror(errno) << " - aborting\n";
+            do_exit = 1; // Signal exit on failure
+            return (void*)1; // Return error code
+        }
+        if (dev->mode == R_SCAN) {
+            if (pthread_mutex_init(&dev->tag_queue_lock, NULL) != 0) {
+                cerr << "Failed to initialize mutex - aborting\n";
+                do_exit = 1;
+                return (void*)1; // Return error code
+            }
+            pthread_create(&dev->controller_thread, NULL, &controller_thread, dev);
+        }
+    }
+
+    int timeout = 50;  // 5 seconds
+    while ((devices_running_count = count_devices_running()) != device_count && timeout > 0 && !do_exit) {
+        SLEEP(100);
+        timeout--;
+    }
+    if ((devices_running_count = count_devices_running()) != device_count) {
+        log(LOG_ERR, "%d device(s) failed to initialize - aborting\n", device_count - devices_running_count);
+        do_exit = 1;
+        return (void*)1; // Return error code
+    }
+
+    if (tui) {
+        printf("\e[1;1H\e[2J");
+
+        GOTOXY(0, 0);
+        printf("                                                                               ");
+        for (int i = 0; i < device_count; i++) {
+            GOTOXY(0, i * 17 + 1);
+            for (int j = 0; j < devices[i].channel_count; j++) {
+                printf(" %7.3f  ", devices[i].channels[j].freqlist[devices[i].channels[j].freq_idx].frequency / 1000000.0);
+            }
+            if (i != device_count - 1) {
+                GOTOXY(0, i * 17 + 16);
+                printf("-------------------------------------------------------------------------------");
+            }
+        }
+    }
+    THREAD output_check;
+    pthread_create(&output_check, NULL, &output_check_thread, NULL);
+
+    int demod_thread_count = multiple_demod_threads ? device_count : 1;
+    demod_params_t* demod_params = (demod_params_t*)XCALLOC(demod_thread_count, sizeof(demod_params_t));
+    THREAD* demod_threads = (THREAD*)XCALLOC(demod_thread_count, sizeof(THREAD));
+
+    int output_thread_count = 1;
+    if (multiple_output_threads) {
+        output_thread_count = demod_thread_count;
+        if (mixer_count > 0) {
+            output_thread_count++;
+        }
+    }
+    output_params_t* output_params = (output_params_t*)XCALLOC(output_thread_count, sizeof(output_params_t));
+    THREAD* output_threads = (THREAD*)XCALLOC(output_thread_count, sizeof(THREAD));
+
+    // Setup the output and demod threads
+    if (multiple_output_threads == false) {
+        init_output_params(&output_params[0], 0, device_count, 0, mixer_count);
+
+        if (multiple_demod_threads == false) {
+            init_demod(&demod_params[0], output_params[0].mp3_signal, 0, device_count);
+        } else {
+            for (int i = 0; i < demod_thread_count; i++) {
+                init_demod(&demod_params[i], output_params[0].mp3_signal, i, i + 1);
+            }
+        }
+    } else {
+        if (multiple_demod_threads == false) {
+            init_output_params(&output_params[0], 0, device_count, 0, 0);
+            init_demod(&demod_params[0], output_params[0].mp3_signal, 0, device_count);
+        } else {
+            for (int i = 0; i < device_count; i++) {
+                init_output_params(&output_params[i], i, i + 1, 0, 0);
+                init_demod(&demod_params[i], output_params[i].mp3_signal, i, i + 1);
+            }
+        }
+        if (mixer_count > 0) {
+            init_output_params(&output_params[output_thread_count - 1], 0, 0, 0, mixer_count);
+        }
+    }
+
+    // Startup the output threads
+    for (int i = 0; i < output_thread_count; i++) {
+        pthread_create(&output_threads[i], NULL, &output_thread, &output_params[i]);
+    }
+
+    // Startup the mixer thread (if there is one) using the signal for the last output thread
+    THREAD mixer_thread_handle;
+    if (mixer_count > 0) {
+        pthread_create(&mixer_thread_handle, NULL, &mixer_thread, output_params[output_thread_count - 1].mp3_signal);
+    }
+
+#ifdef WITH_PULSEAUDIO
+    pulse_start();
+#endif /* WITH_PULSEAUDIO */
+
+    sincosf_lut_init();
+
+    // Startup the demod threads
+    for (int i = 0; i < demod_thread_count; i++) {
+        pthread_create(&demod_threads[i], NULL, &demodulate, &demod_params[i]);
+    }
+
+    // Main loop: just wait for do_exit
+    while (!do_exit) {
+        SLEEP(100); // Small sleep to prevent busy-waiting
+    }
+
+    // Wait for demod threads to exit
+    for (int i = 0; i < demod_thread_count; i++) {
+        pthread_join(demod_threads[i], NULL);
+    }
+
+    // Join output check thread
+    pthread_join(output_check, NULL);
+
+    if (mixer_count > 0) {
+        pthread_join(mixer_thread_handle, NULL);
+    }
+
+    // Join output threads
+    for (int i = 0; i < output_thread_count; i++) {
+        output_params[i].mp3_signal->send(); // Signal output threads to finish
+        pthread_join(output_threads[i], NULL);
+    }
+
+    // Free allocated memory for demod and output params
+    for (int i = 0; i < demod_thread_count; ++i) {
+#ifndef WITH_BCM_VC
+        fftwf_free(demod_params[i].fftin);
+        fftwf_free(demod_params[i].fftout);
+        fftwf_destroy_plan(demod_params[i].fft);
+#endif
+    }
+    free(demod_params);
+    free(demod_threads);
+
+    for (int i = 0; i < output_thread_count; ++i) {
+        delete output_params[i].mp3_signal;
+    }
+    free(output_params);
+    free(output_threads);
+
+    // Cleanup for devices and mixers is handled by rtl_airband_lib.cpp's Session destructor.
+    // Global `devices` and `mixers` pointers will be freed there.
+
+    return (void*)0; // Success
+}
+
+// --- End RTL-Airband Runtime API ---
+
+
+#ifndef RTL_AIRBAND_AS_LIBRARY
 int main(int argc, char* argv[]) {
+
 #ifdef WITH_PROFILING
     ProfilerStart("rtl_airband.prof");
 #endif /* WITH_PROFILING */
@@ -1027,12 +1322,12 @@ int main(int argc, char* argv[]) {
     }
 
     int timeout = 50;  // 5 seconds
-    while ((devices_running = count_devices_running()) != device_count && timeout > 0) {
+    while ((devices_running_count = count_devices_running()) != device_count && timeout > 0) {
         SLEEP(100);
         timeout--;
     }
-    if ((devices_running = count_devices_running()) != device_count) {
-        log(LOG_ERR, "%d device(s) failed to initialize - aborting\n", device_count - devices_running);
+    if ((devices_running_count = count_devices_running()) != device_count) {
+        log(LOG_ERR, "%d device(s) failed to initialize - aborting\n", device_count - devices_running_count);
         error();
     }
     if (tui) {
@@ -1054,7 +1349,7 @@ int main(int argc, char* argv[]) {
     THREAD output_check;
     pthread_create(&output_check, NULL, &output_check_thread, NULL);
 
-    int demod_thread_count = multiple_demod_threads ? device_count : 1;
+    int demod_thread_count = multiple_demod_threads ? device_count : 1; // This is a global variable
     demod_params_t* demod_params = (demod_params_t*)XCALLOC(demod_thread_count, sizeof(demod_params_t));
     THREAD* demod_threads = (THREAD*)XCALLOC(demod_thread_count, sizeof(THREAD));
 
@@ -1101,7 +1396,7 @@ int main(int argc, char* argv[]) {
 
     // Startup the mixer thread (if there is one) using the signal for the last output thread
     THREAD mixer;
-    if (mixer_count > 0) {
+    if (mixer_count > 0) { // This is a global variable
         pthread_create(&mixer, NULL, &mixer_thread, output_params[output_thread_count - 1].mp3_signal);
     }
 
@@ -1116,7 +1411,7 @@ int main(int argc, char* argv[]) {
         pthread_create(&demod_threads[i], NULL, &demodulate, &demod_params[i]);
     }
 
-    // Wait for demod threads to exit
+    // Main loop: just wait for do_exit
     for (int i = 0; i < demod_thread_count; i++) {
         pthread_join(demod_threads[i], NULL);
     }
@@ -1135,7 +1430,7 @@ int main(int argc, char* argv[]) {
     }
     log(LOG_INFO, "Input threads closed\n");
 
-    if (mixer_count > 0) {
+    if (mixer_count > 0) { // This is a global variable
         log(LOG_INFO, "Closing mixer thread\n");
         pthread_join(mixer, NULL);
     }
@@ -1170,3 +1465,4 @@ int main(int argc, char* argv[]) {
 #endif /* WITH_PROFILING */
     return 0;
 }
+#endif // RTL_AIRBAND_AS_LIBRARY

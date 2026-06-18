@@ -200,11 +200,12 @@ struct freq_tag {
 };
 
 enum modulations {
-    MOD_AM,
-    MOD_RAWIQ
+    MOD_AM
 #ifdef NFM
-    , MOD_NFM
+    ,
+    MOD_NFM
 #endif /* NFM */
+    , MOD_RAWIQ
 };
 
 class Signal {
@@ -256,7 +257,6 @@ struct channel_t {
     float waveout_r[WAVE_LEN];   // right channel mixer output
     float iq_in[2 * WAVE_LEN];   // raw input samples for I/Q outputs and NFM demod
     float iq_out[2 * WAVE_LEN];  // raw output samples for I/Q outputs (FIXME: allocate only if required)
-    float iq_callback[2 * WAVE_BATCH];  // post-channelized IQ for embedders/plugins
 #ifdef NFM
     float pr;            // previous sample - real part
     float pj;            // previous sample - imaginary part
@@ -274,11 +274,13 @@ struct channel_t {
     int has_iq_outputs;
     enum ch_states state;  // mixer channel state flag
     int output_count;
+    // Callbacks for library usage
+    // These are set by the library user to receive audio/IQ frames
+    bool emit_audio_callback;
+    bool emit_iq_callback;
     output_t* outputs;
     int highpass;  // highpass filter cutoff
     int lowpass;   // lowpass filter cutoff
-    bool emit_audio_callback;
-    bool emit_iq_callback;
 };
 
 enum rec_modes { R_MULTICHANNEL, R_SCAN };
@@ -302,10 +304,6 @@ struct device_t {
     int failed;
     enum rec_modes mode;
     size_t output_overrun_count;
-    bool emit_raw_iq_callback;
-    int16_t* raw_iq_callback;
-    size_t raw_iq_callback_capacity_complex;
-    size_t raw_iq_callback_fill_complex;
 };
 
 struct mixinput_t {
@@ -362,17 +360,22 @@ void* output_check_thread(void* params);
 void* output_thread(void* params);
 
 // rtl_airband.cpp
-extern bool use_localtime;
-extern bool multiple_demod_threads;
-extern bool multiple_output_threads;
-extern char* stats_filepath;
-extern size_t fft_size, fft_size_log;
-extern int device_count, mixer_count;
-extern int shout_metadata_delay;
-extern volatile int do_exit, device_opened;
-extern float alpha;
-extern device_t* devices;
-extern mixer_t* mixers;
+void rtl_airband_emit_audio_callback(int device_index, int channel_index, channel_t* channel);
+void rtl_airband_emit_iq_callback(int device_index, int channel_index, channel_t* channel);
+void rtl_airband_emit_raw_iq_callback(int device_index, device_t* dev);
+bool rtl_airband_runtime_running();
+void rtl_airband_runtime_reset_globals();
+void rtl_airband_runtime_set_log_to_stderr(bool enable);
+void rtl_airband_runtime_set_tui(bool enable);
+void rtl_airband_runtime_set_fft_size_log(size_t size_log);
+void rtl_airband_runtime_set_shout_metadata_delay(int delay);
+void rtl_airband_runtime_set_multiple_demod_threads(bool enable);
+void rtl_airband_runtime_set_multiple_output_threads(bool enable);
+void rtl_airband_runtime_set_use_localtime(bool enable);
+void rtl_airband_runtime_set_quadrature_demod(bool enable);
+bool rtl_airband_runtime_start(bool foreground, std::string* error_str);
+bool rtl_airband_runtime_stop(std::string* error_str);
+void rtl_airband_emit_scan_callback(int device_index, int channel_index, channel_t* channel);
 
 // util.cpp
 int atomic_inc(volatile int* pv);
@@ -405,27 +408,6 @@ const char* mixer_get_error();
 int parse_devices(libconfig::Setting& devs);
 int parse_mixers(libconfig::Setting& mx);
 
-// embedded runtime hooks
-bool rtl_airband_has_audio_callback();
-bool rtl_airband_has_iq_callback();
-bool rtl_airband_has_raw_iq_callback();
-void rtl_airband_emit_audio_callback(int device_index, int channel_index, channel_t* channel);
-void rtl_airband_emit_iq_callback(int device_index, int channel_index, channel_t* channel);
-void rtl_airband_emit_raw_iq_callback(int device_index, device_t* device);
-void rtl_airband_emit_scan_callback(int device_index, int channel_index, channel_t* channel);
-bool rtl_airband_runtime_start(bool foreground, std::string* error);
-bool rtl_airband_runtime_stop(std::string* error);
-void rtl_airband_runtime_reset_globals();
-void rtl_airband_runtime_set_log_to_stderr(bool enabled);
-void rtl_airband_runtime_set_tui(bool enabled);
-void rtl_airband_runtime_set_fft_size_log(size_t value);
-void rtl_airband_runtime_set_shout_metadata_delay(int value);
-void rtl_airband_runtime_set_multiple_demod_threads(bool enabled);
-void rtl_airband_runtime_set_multiple_output_threads(bool enabled);
-void rtl_airband_runtime_set_use_localtime(bool enabled);
-void rtl_airband_runtime_set_quadrature_demod(bool enabled);
-bool rtl_airband_runtime_running();
-
 // udp_stream.cpp
 bool udp_stream_init(udp_stream_data* sdata, mix_modes mode, size_t len);
 void udp_stream_write(udp_stream_data* sdata, const float* data, size_t len);
@@ -441,5 +423,17 @@ void pulse_start();
 void pulse_shutdown(pulse_data* pdata);
 void pulse_write_stream(pulse_data* pdata, mix_modes mode, const float* data_left, const float* data_right, size_t len);
 #endif /* WITH_PULSEAUDIO */
+
+extern bool use_localtime;
+extern bool multiple_demod_threads;
+extern bool multiple_output_threads;
+extern char* stats_filepath;
+extern size_t fft_size, fft_size_log;
+extern int device_count, mixer_count;
+extern int shout_metadata_delay;
+extern volatile int do_exit, device_opened;
+extern float alpha;
+extern device_t* devices;
+extern mixer_t* mixers;
 
 #endif /* _RTL_AIRBAND_H */

@@ -108,7 +108,7 @@ set(CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES_SAVE})
 set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES_SAVE})
 set(CMAKE_REQUIRED_LINK_OPTIONS ${CMAKE_REQUIRED_LINK_OPTIONS_SAVE})
 
-option(NFM "Enable support for narrow FM channels" OFF)
+option(NFM "Enable support for narrow FM channels" ON)
 
 set(PLATFORM "native" CACHE STRING "Optimize the build for the given hardware platform")
 
@@ -330,7 +330,7 @@ target_link_libraries (rtl_airband
 add_library(rtl_airband_embedded STATIC
 	${RTL_AIRBAND_COMMON_SOURCES}
 )
-target_compile_definitions(rtl_airband_embedded PRIVATE RTL_AIRBAND_NO_MAIN=1)
+target_compile_definitions(rtl_airband_embedded PRIVATE RTL_AIRBAND_AS_LIBRARY=1)
 target_include_directories(rtl_airband_embedded PUBLIC
 	${CMAKE_CURRENT_BINARY_DIR}
 	${CMAKE_CURRENT_SOURCE_DIR}

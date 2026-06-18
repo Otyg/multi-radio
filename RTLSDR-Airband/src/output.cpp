@@ -478,6 +478,12 @@ static bool output_file_ready(channel_t* channel, output_t* output) {
 
 // Create all the output for a particular channel.
 void process_outputs(int device_index, int channel_index, channel_t* channel, int cur_scan_freq) {
+    // Emit callbacks for library usage if this is a valid device channel.
+    // This ensures the frontend receives audio and IQ data streams.
+    if (device_index >= 0) {
+        rtl_airband_emit_audio_callback(device_index, channel_index, channel);
+        rtl_airband_emit_iq_callback(device_index, channel_index, channel);
+    }
     for (int k = 0; k < channel->output_count; k++) {
         if (channel->outputs[k].enabled == false)
             continue;
@@ -955,6 +961,7 @@ void* output_thread(void* param) {
                         gettimeofday(&tv, NULL);
                         if (tag.tv.tv_sec < tv.tv_sec || (tag.tv.tv_sec == tv.tv_sec && tag.tv.tv_usec <= tv.tv_usec)) {
                             new_freq = tag.freq;
+                            rtl_airband_emit_scan_callback(i, 0, &dev->channels[0]);
                             tag_queue_advance(dev);
                         }
                     }
