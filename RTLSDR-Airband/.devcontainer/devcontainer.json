@@ -1,0 +1,32 @@
+{
+	"name": "Existing Dockerfile",
+	"context": "..",
+	"dockerFile": "Dockerfile",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-python.black-formatter",
+				"ms-python.pylint",
+				"ms-python.isort",
+				"ms-vscode.cpptools",
+				"ms-vscode.cpptools-extension-pack",
+				"streetsidesoftware.code-spell-checker",
+				"ms-azuretools.vscode-docker",
+				"GitHub.vscode-github-actions",
+				"xaver.clang-format"
+			]
+		}
+	},
+	"containerEnv": {
+		"SHELL": "/bin/bash"
+	},
+	"postCreateCommand": "pre-commit install",
+	"postStartCommand": "cd ${containerWorkspaceFolder}/system_tests && uv sync",
+	"runArgs": [
+		"--cap-add=SYS_PTRACE",
+		"--security-opt",
+		"seccomp=unconfined"
+	]
+}
