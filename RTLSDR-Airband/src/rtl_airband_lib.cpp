@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <pthread.h>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -76,10 +75,6 @@ bool ConfigureRtlSdrInput(const rtl_airband::DeviceConfig& config, input_t* inpu
 }
 
 void ConfigureFrequency(freq_t* dest, const rtl_airband::FrequencyConfig& source) {
-    if (dest->label != nullptr) {
-        std::free(dest->label);
-        dest->label = nullptr;
-    }
     dest->frequency = source.frequency;
     dest->label = source.label.empty() ? nullptr : strdup(source.label.c_str());
     dest->modulation = ToAirbandModulation(source.modulation);
@@ -87,11 +82,12 @@ void ConfigureFrequency(freq_t* dest, const rtl_airband::FrequencyConfig& source
     dest->active_counter = 0;
     if (source.squelch_threshold_dbfs < 0) {
         dest->squelch.set_squelch_level_threshold(dBFS_to_level(static_cast<float>(source.squelch_threshold_dbfs)));
-    } else if (source.squelch_threshold_dbfs == 0) {
-        dest->squelch.set_squelch_level_threshold(0.0f);
     }
-    if (source.squelch_snr_threshold >= 0.0f) {
+    if (source.squelch_snr_threshold > 0.0f) {
         dest->squelch.set_squelch_snr_threshold(source.squelch_snr_threshold);
+    } else {
+        // Fallback to RTLSDR-Airband default SNR threshold (9.54 dB) if no manual value is provided
+        dest->squelch.set_squelch_snr_threshold(9.54f);
     }
     if (source.notch_freq > 0.0f) {
         const float q = source.notch_q > 0.0f ? source.notch_q : 10.0f;
@@ -132,9 +128,6 @@ void ConfigureChannel(device_t* device, channel_t* channel, const rtl_airband::C
     channel->freqlist = MakeFrequencyList(channel->freq_count);
     for (int freq_index = 0; freq_index < channel->freq_count; ++freq_index) {
         ConfigureFrequency(&channel->freqlist[freq_index], config.frequencies[freq_index]);
-        if (config.frequencies[static_cast<size_t>(freq_index)].modulation == rtl_airband::Modulation::Iq) {
-            device->emit_raw_iq_callback = true;
-        }
 #ifdef NFM
         if (channel->freqlist[freq_index].modulation == MOD_NFM) {
             channel->needs_raw_iq = 1;
@@ -202,10 +195,6 @@ bool ConfigureDevices(const std::vector<rtl_airband::DeviceConfig>& configs, std
         device->output_overrun_count = 0;
         device->waveend = device->waveavail = device->row = device->tq_head = device->tq_tail = 0;
         device->last_frequency = -1;
-        device->emit_raw_iq_callback = false;
-        device->raw_iq_callback = nullptr;
-        device->raw_iq_callback_capacity_complex = 0;
-        device->raw_iq_callback_fill_complex = 0;
         pthread_mutex_init(&device->tag_queue_lock, NULL);
 
         if (config.channels.empty()) {
@@ -228,39 +217,12 @@ bool ConfigureDevices(const std::vector<rtl_airband::DeviceConfig>& configs, std
             }
             ConfigureChannel(device, &device->channels[channel_index], channel_config, channel_index);
         }
-        if (device->emit_raw_iq_callback) {
-            const size_t raw_complex_per_window =
-                static_cast<size_t>(WAVE_BATCH) *
-                static_cast<size_t>(std::round(static_cast<double>(device->input->sample_rate) / static_cast<double>(WAVE_RATE)));
-            device->raw_iq_callback_capacity_complex = std::max<size_t>(1, raw_complex_per_window);
-            device->raw_iq_callback = static_cast<int16_t*>(
-                XCALLOC(device->raw_iq_callback_capacity_complex * 2, sizeof(int16_t)));
-        }
     }
     return true;
 }
 
 bool IsValidDeviceIndex(int device_index) {
     return device_index >= 0 && device_index < device_count;
-}
-
-bool UpdateRtlSdrCorrection(device_t* device, int correction, std::string* error) {
-    if (device == nullptr || device->input == nullptr || device->input->dev_data == nullptr) {
-        if (error) *error = "invalid device";
-        return false;
-    }
-    auto* dev_data = static_cast<rtlsdr_dev_data_t*>(device->input->dev_data);
-    if (dev_data->dev == nullptr) {
-        dev_data->correction = correction;
-        return true;
-    }
-    const int rc = rtlsdr_set_freq_correction(dev_data->dev, correction);
-    if (rc < 0 && rc != -2) {
-        if (error) *error = "failed to update RTLSDR frequency correction";
-        return false;
-    }
-    dev_data->correction = correction;
-    return true;
 }
 
 bool RetuneScanChannel(int device_index, channel_t* channel, device_t* device, std::string* error) {
@@ -292,10 +254,6 @@ bool rtl_airband_has_iq_callback() {
     return static_cast<bool>(g_embedded_state.callbacks.on_iq);
 }
 
-bool rtl_airband_has_raw_iq_callback() {
-    return static_cast<bool>(g_embedded_state.callbacks.on_raw_iq);
-}
-
 void rtl_airband_emit_audio_callback(int device_index, int channel_index, channel_t* channel) {
     if (!g_embedded_state.callbacks.on_audio || channel == nullptr || !channel->emit_audio_callback) {
         return;
@@ -324,21 +282,6 @@ void rtl_airband_emit_iq_callback(int device_index, int channel_index, channel_t
     batch.interleaved_iq = channel->iq_callback;
     batch.complex_sample_count = WAVE_BATCH;
     g_embedded_state.callbacks.on_iq(batch);
-}
-
-void rtl_airband_emit_raw_iq_callback(int device_index, device_t* device) {
-    if (!g_embedded_state.callbacks.on_raw_iq || device == nullptr || !device->emit_raw_iq_callback ||
-        device->raw_iq_callback == nullptr || device->raw_iq_callback_fill_complex == 0) {
-        return;
-    }
-    rtl_airband::RawIqBatch batch;
-    batch.device_index = device_index;
-    batch.center_frequency = device->input ? device->input->centerfreq : 0;
-    batch.sample_rate = device->input ? device->input->sample_rate : 0;
-    batch.interleaved_iq_s16 = device->raw_iq_callback;
-    batch.complex_sample_count = device->raw_iq_callback_fill_complex;
-    g_embedded_state.callbacks.on_raw_iq(batch);
-    device->raw_iq_callback_fill_complex = 0;
 }
 
 void rtl_airband_emit_scan_callback(int device_index, int channel_index, channel_t* channel) {
@@ -405,24 +348,6 @@ bool Session::Stop(std::string* error) {
         return true;
     }
     return rtl_airband_runtime_stop(error);
-}
-
-bool Session::UpdateDeviceCorrection(int device_index, int correction, std::string* error) {
-    if (!IsValidDeviceIndex(device_index)) {
-        if (error) *error = "invalid device index";
-        return false;
-    }
-    device_t* device = devices + device_index;
-    if (!UpdateRtlSdrCorrection(device, correction, error)) {
-        return false;
-    }
-    if (static_cast<size_t>(device_index) < g_embedded_state.devices.size()) {
-        g_embedded_state.devices[static_cast<size_t>(device_index)].rtlsdr.correction = correction;
-    }
-    if (error) {
-        error->clear();
-    }
-    return true;
 }
 
 bool Session::SetScanFrequencyIndex(int device_index, int frequency_index, std::string* error) {
