@@ -54,6 +54,7 @@ void AsmMessageWidget::AddMessage(int msg_type, uint32_t mmsi, const QString& la
     AsmMessageRecord msg{msg_type, mmsi, label, payload, fields, unix_ms};
 
     auto* card = new QPushButton(container_);
+    card->setMinimumHeight(88);
     card->setCursor(Qt::PointingHandCursor);
     card->setStyleSheet(
         "QPushButton { text-align: left; padding: 8px; border-radius: 6px; "
@@ -63,7 +64,6 @@ void AsmMessageWidget::AddMessage(int msg_type, uint32_t mmsi, const QString& la
     auto* v = new QVBoxLayout(card);
     v->setContentsMargins(5, 5, 5, 5);
     v->setSpacing(2);
-
     const QString station = label.isEmpty() ? QString::number(mmsi) : QString("%1 (%2)").arg(label).arg(mmsi);
     auto* line1 = new QLabel(QString("<b>%1</b> — %2").arg(MsgTypeName(msg_type)).arg(station), card);
     line1->setStyleSheet("color: #92E6B5; font-size: 13px;");
