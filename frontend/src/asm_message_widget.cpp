@@ -110,7 +110,10 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& msg) {
     // Convert fields to pretty JSON
     QJsonObject obj;
     for (auto it = msg.fields.begin(); it != msg.fields.end(); ++it)
+    {
         obj.insert(it.key(), QJsonValue::fromVariant(it.value()));
+    }
+    obj.insert("Hex payload", QJsonValue::fromVariant(msg.payload));
     QJsonDocument doc(obj);
     text->setPlainText(doc.toJson(QJsonDocument::Indented));
 
