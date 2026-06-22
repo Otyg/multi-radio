@@ -18,7 +18,12 @@ add_library(multi_radio_frontend_common
   include/grpc_client.hpp
   include/radar_types.hpp
 )
-
+find_library(AIS_LIBRARY NAMES ais libais)
+if(NOT AIS_LIBRARY)
+    message(FATAL_ERROR "Kunde inte hitta libais i systemet! Kontrollera att det är installerat.")
+else()
+    message(STATUS "Hittade libais här: ${AIS_LIBRARY}")
+endif()
 target_include_directories(multi_radio_frontend_common
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -115,6 +120,7 @@ target_link_libraries(multi_radio_client
     Qt6::Concurrent
     multi_radio_frontend_common
     sqlite3
+    -Wl,--whole-archive ${AIS_LIBRARY} -Wl,--no-whole-archive
 )
 
 if(TARGET Qt6::Multimedia)
