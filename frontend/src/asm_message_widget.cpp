@@ -60,6 +60,140 @@ std::string HexToAis6BitAscii(const std::string& hex) {
     }
     return ascii6bit;
 }
+QString DecodeAis6BitString(libais::AisBitset& bits, size_t start_bit, size_t num_bits) {
+    QString result = "";
+    size_t num_chars = num_bits / 6;
+    for (size_t i = 0; i < num_chars; ++i) {
+        uint32_t val = bits.ToUnsignedInt(start_bit + (i * 6), 6);
+        if (val == 0) break;
+        if (val < 32) result.append(QChar(val + 64));
+        else result.append(QChar(val));
+    }
+    return result.trimmed();
+}
+QString GetAreaTypeText(int type) {
+    switch (type) {
+        case 0:  return "Inshore traffic zone";
+        case 1:  return "Traffic separation scheme lane";
+        case 2:  return "Traffic separation scheme roundabout";
+        case 3:  return "Precautionary area";
+        case 4:  return "Area to be avoided";
+        case 5:  return "Two-way traffic route";
+        case 6:  return "Recommended track";
+        case 7:  return "Recommended traffic lane";
+        case 8:  return "Deep-water route";
+        case 9:  return "Fairway";
+        case 10: return "Regulated area / Restricted area";
+        case 11: return "Anchorage area";
+        case 12: return "Asdic / Fishing area";
+        case 13: return "Military practice area / Danger area";
+        case 14: return "Pilot boarding area";
+        default: return QString("Unknown Area Type (%1)").arg(type);
+    }
+}
+
+QString GetAreaShapeText(int shape) {
+    switch (shape) {
+        case 0: return "Circle / Point";
+        case 1: return "Rectangle / Box";
+        case 2: return "Sector";
+        case 3: return "Polyline";
+        case 4: return "Polygon";
+        case 5: return "Text notation only";
+        default: return QString("Unknown Shape (%1)").arg(shape);
+    }
+}
+
+QString GetTargetTypeText(int type) {
+    switch (type) {
+        case 0: return "Default / Unknown target";
+        case 1: return "Vessel / Ship";
+        case 2: return "Iceberg";
+        case 3: return "Floating ice / Pack ice";
+        case 4: return "AtoN (Aid to Navigation)";
+        case 5: return "Oil slick / Pollution";
+        case 6: return "Debris / Flotsam";
+        case 7: return "Whale / Marine mammal";
+        case 8: return "Life raft / Person in water";
+        default: return QString("Unknown Target Type (%1)").arg(type);
+    }
+}
+
+QString GetAtonTypeText(int type) {
+    switch (type) {
+        case 0:  return "Default / Type not specified";
+        case 1:  return "Reference point";
+        case 2:  return "RACON (Radar beacon)";
+        case 3:  return "Fixed light / Beacon";
+        case 4:  return "Light vessel / Lightship";
+        case 5:  return "Light buoy";
+        case 6:  return "Cardinal buoy - North";
+        case 7:  return "Cardinal buoy - East";
+        case 8:  return "Cardinal buoy - South";
+        case 9:  return "Cardinal buoy - West";
+        case 10: return "Isolated danger mark";
+        case 11: return "Safe water mark";
+        case 12: return "Special mark";
+        case 13: return "Lateral mark - Port hand";
+        case 14: return "Lateral mark - Starboard hand";
+        default: return QString("Unknown AtoN Type (%1)").arg(type);
+    }
+}
+
+QString GetNoticeTypeText(int type) {
+    switch (type) {
+        case 0:  return "Cautionary notice / General warning";
+        case 1:  return "Underwater obstruction / Wreck";
+        case 2:  return "Drifting hazard (e.g. logs, containers)";
+        case 3:  return "Gunnery / Military exercise area active";
+        case 4:  return "Cable / Pipeline laying operations";
+        case 5:  return "Dredging / Underwater works active";
+        case 6:  return "Diving operations active";
+        case 7:  return "Bridge closed / Bridge works";
+        case 8:  return "Fairway closed / Blocked";
+        case 9:  return "AtoN defective / Out of position";
+        case 10: return "Search and Rescue (SAR) active";
+        default: return QString("Unknown Notice Type (%1)").arg(type);
+    }
+}
+
+QString GetSensorSourceText(int source) {
+    switch (source) {
+        case 0: return "Onboard Sensor (Vessel)";
+        case 1: return "Shore-based Station / Bureau";
+        case 2: return "Buoy / Floating station";
+        case 3: return "Fixed structure / Offshore platform";
+        case 4: return "Aircraft / UAV";
+        case 5: return "Satellite / Remote sensing";
+        default: return QString("Unknown Sensor Source (%1)").arg(source);
+    }
+}
+
+QString GetSensorStatusText(int status) {
+    switch (status) {
+        case 0: return "Operational / Normal data";
+        case 1: return "Calibrating / Maintenance mode";
+        case 2: return "Degraded performance / Warning";
+        case 3: return "Error / Unreliable data";
+        default: return "Unknown Status";
+    }
+}
+
+QString GetRouteTypeText(int type) {
+    switch (type) {
+        case 0: return "Recommended / Standard Route";
+        case 1: return "Alternative Route";
+        case 2: return "Mandatory Traffic Route / Lane";
+        case 3: return "Transit corridor";
+        case 4: return "Inbound / Entry track";
+        case 5: return "Outbound / Exit track";
+        default: return QString("Unknown Route Type (%1)").arg(type);
+    }
+}
+
+QString GetRetransmitText(int flag) {
+    return (flag == 1) ? "Retransmitted (Not original)" : "Original transmission";
+}
 
 AsmMessageWidget::AsmMessageWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
@@ -160,30 +294,119 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& org_msg) {
     if (bits.GetNumBits() < 6) {
         std::cerr << "Fel: Strängen innehåller för få bitar för att läsa meddelande-ID.";
         return;
-    }
-    QJsonObject obj;
-    obj.insert("Message Type", (int)bits.ToUnsignedInt(0, 6));
-    obj.insert("Repeat Indicator", (int)bits.ToUnsignedInt(6, 2));
-    obj.insert("MMSI", (double)bits.ToUnsignedInt(8, 30));
-    obj.insert("Total Bits", (int)bits.GetNumBits());
-
-    // Loopa igenom resten av bitarna i meddelandet generellt och spara som rådata-block
-    size_t total_bits = bits.GetNumBits();
-    QJsonObject raw_fields;
-    int field_counter = 1;
+    }int message_id = bits.ToUnsignedInt(0, 6);
+    QJsonObject root_obj;
     
-    // Vi läser ut resterande data i 8-bitars (byte) segment helt generellt
-    for (size_t i = 38; i + 8 <= total_bits; i += 8) {
-        QString key = QString("Byte_%1_bit_%2").arg(field_counter++).arg(i);
-        uint32_t val = bits.ToUnsignedInt(i, 8);
-        raw_fields.insert(key, (int)val);
-    }
-    obj.insert("Decoded Raw Bytes", raw_fields);
+    QString msg_type_text = "Unknown AIS Message";
+    if (message_id == 6) msg_type_text = "Binary Addressed Message (Type 6)";
+    else if (message_id == 8) msg_type_text = "Binary Broadcast Message (Type 8)";
+    else if (message_id == 12) msg_type_text = "Addressed Safety Message (Type 12)";
+    else if (message_id == 14) msg_type_text = "Broadcast Safety Message (Type 14)";
 
-    // 4. Lägg till din egna metadata
-    obj.insert("Hex payload", org_msg.payload);
-    obj.insert("AIS ASCII Transport", QString::fromStdString(ais_ascii));
-    QJsonDocument doc(obj);
+    root_obj.insert("Message Type", msg_type_text);
+    root_obj.insert("Repeat Indicator", (int)bits.ToUnsignedInt(6, 2));
+    root_obj.insert("Source MMSI", (double)bits.ToUnsignedInt(8, 30));
+
+    if (message_id == 6 || message_id == 8) {
+        int dac = 0;
+        int fi = 0;
+        size_t payload_start = 0;
+
+        if (message_id == 6) {
+            root_obj.insert("Sequence Number", (int)bits.ToUnsignedInt(38, 2));
+            root_obj.insert("Destination MMSI", (double)bits.ToUnsignedInt(40, 30));
+            root_obj.insert("Retransmit Status", (bits.ToUnsignedInt(70, 1) == 1) ? "Retransmitted" : "Original");
+            dac = bits.ToUnsignedInt(72, 10);
+            fi = bits.ToUnsignedInt(82, 6);
+            payload_start = 88;
+        } else {
+            dac = bits.ToUnsignedInt(40, 10);
+            fi = bits.ToUnsignedInt(50, 6);
+            payload_start = 56;
+        }
+
+        root_obj.insert("DAC", dac);
+        root_obj.insert("FI", fi);
+
+        if (dac == 1 && (fi == 11 || fi == 13 || fi == 17 || fi == 21 || 
+                         fi == 22 || fi == 26 || fi == 28 || fi == 29 || fi == 31)) {
+            
+            QJsonObject app_fields;
+
+            if (fi == 11) {
+                int area_type = bits.ToUnsignedInt(payload_start, 4);
+                int area_shape = bits.ToUnsignedInt(payload_start + 4, 3);
+                app_fields.insert("Area Type", GetAreaTypeText(area_type));
+                app_fields.insert("Area Shape", GetAreaShapeText(area_shape));
+            }
+            else if (fi == 13) {
+                app_fields.insert("Persons Onboard", (int)bits.ToUnsignedInt(payload_start, 13));
+            }
+            else if (fi == 17) {
+                int target_type = bits.ToUnsignedInt(payload_start, 4);
+                app_fields.insert("Target Type", GetTargetTypeText(target_type));
+                app_fields.insert("Latitude", bits.ToInt(payload_start + 4, 24) / 60000.0);
+                app_fields.insert("Longitude", bits.ToInt(payload_start + 28, 25) / 60000.0);
+            }
+            else if (fi == 21) {
+                int aton_type = bits.ToUnsignedInt(payload_start, 5);
+                int status_bits = bits.ToUnsignedInt(payload_start + 5, 8);
+                app_fields.insert("AtoN Type", GetAtonTypeText(aton_type));
+                app_fields.insert("Light Operational Status", (status_bits & 0x80) ? "Error" : "Good");
+                app_fields.insert("RACON Status", (status_bits & 0x40) ? "Error" : "Good");
+            }
+            else if (fi == 22) {
+                int notice_type = bits.ToUnsignedInt(payload_start, 7);
+                app_fields.insert("Notice Type", GetNoticeTypeText(notice_type));
+                app_fields.insert("Latitude", bits.ToInt(payload_start + 7, 24) / 60000.0);
+                app_fields.insert("Longitude", bits.ToInt(payload_start + 31, 25) / 60000.0);
+            }
+            else if (fi == 26) {
+                int sensor_src = bits.ToUnsignedInt(payload_start, 4);
+                int sensor_stat = bits.ToUnsignedInt(payload_start + 4, 2);
+                app_fields.insert("Sensor Source", GetSensorSourceText(sensor_src));
+                app_fields.insert("Sensor Status", GetSensorStatusText(sensor_stat));
+            }
+            else if (fi == 28) {
+                int route_type = bits.ToUnsignedInt(payload_start, 5);
+                app_fields.insert("Route Type", GetRouteTypeText(route_type));
+                app_fields.insert("Waypoints Count", (int)bits.ToUnsignedInt(payload_start + 5, 4));
+            }
+            else if (fi == 29) {
+                app_fields.insert("Text Segment", DecodeAis6BitString(bits, payload_start, bits.GetNumBits() - payload_start));
+            }
+            else if (fi == 31) {
+                app_fields.insert("Latitude", bits.ToInt(payload_start, 24) / 60000.0);
+                app_fields.insert("Longitude", bits.ToInt(payload_start + 24, 25) / 60000.0);
+                int raw_ws = bits.ToUnsignedInt(payload_start + 49, 7);
+                app_fields.insert("Wind Speed (knots)", raw_ws == 127 ? "N/A" : QJsonValue(raw_ws));
+                int raw_wg = bits.ToUnsignedInt(payload_start + 56, 7);
+                app_fields.insert("Wind Gusts (knots)", raw_wg == 127 ? "N/A" : QJsonValue(raw_wg));
+                int raw_wd = bits.ToUnsignedInt(payload_start + 63, 9);
+                app_fields.insert("Wind Direction", raw_wd == 511 ? "N/A" : QJsonValue(raw_wd));
+                int raw_vis = bits.ToUnsignedInt(payload_start + 93, 7);
+                app_fields.insert("Visibility (NM)", raw_vis == 127 ? "N/A" : QJsonValue(raw_vis / 10.0));
+            }
+
+            root_obj.insert("Decoded Application Data", app_fields);
+        } else {
+            root_obj.insert("Application Info", "Ignored: Missing selection filter criteria.");
+        }
+    }
+    else if (message_id == 12 || message_id == 14) {
+        size_t text_start_bit = (message_id == 12) ? 72 : 40;
+        if (message_id == 12) {
+            root_obj.insert("Sequence Number", (int)bits.ToUnsignedInt(38, 2));
+            root_obj.insert("Destination MMSI", (double)bits.ToUnsignedInt(40, 30));
+        }
+        size_t text_bits = bits.GetNumBits() - text_start_bit;
+        root_obj.insert("Safety Message Text", DecodeAis6BitString(bits, text_start_bit, text_bits));
+    }
+
+    root_obj.insert("Raw Hex Payload", org_msg.payload);
+    root_obj.insert("AIS ASCII Transport", QString::fromStdString(ais_ascii));
+
+    QJsonDocument doc(root_obj);
     text->setPlainText(doc.toJson(QJsonDocument::Indented));
 
     v->addWidget(text);
