@@ -333,65 +333,67 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& org_msg) {
             
             QJsonObject app_fields;
 
-            if (fi == 11) {
+             if (fi == 11 && (total_bits >= payload_start + 7)) {
                 int area_type = bits.ToUnsignedInt(payload_start, 4);
                 int area_shape = bits.ToUnsignedInt(payload_start + 4, 3);
                 app_fields.insert("Area Type", GetAreaTypeText(area_type));
                 app_fields.insert("Area Shape", GetAreaShapeText(area_shape));
             }
-            else if (fi == 13) {
+            else if (fi == 13 && (total_bits >= payload_start + 13)) {
                 app_fields.insert("Persons Onboard", (int)bits.ToUnsignedInt(payload_start, 13));
             }
-            else if (fi == 17) {
+            else if (fi == 17 && (total_bits >= payload_start + 53)) {
                 int target_type = bits.ToUnsignedInt(payload_start, 4);
                 app_fields.insert("Target Type", GetTargetTypeText(target_type));
                 app_fields.insert("Latitude", bits.ToInt(payload_start + 4, 24) / 60000.0);
                 app_fields.insert("Longitude", bits.ToInt(payload_start + 28, 25) / 60000.0);
             }
-            else if (fi == 21) {
+            else if (fi == 21 && (total_bits >= payload_start + 13)) {
                 int aton_type = bits.ToUnsignedInt(payload_start, 5);
                 int status_bits = bits.ToUnsignedInt(payload_start + 5, 8);
                 app_fields.insert("AtoN Type", GetAtonTypeText(aton_type));
                 app_fields.insert("Light Operational Status", (status_bits & 0x80) ? "Error" : "Good");
                 app_fields.insert("RACON Status", (status_bits & 0x40) ? "Error" : "Good");
             }
-            else if (fi == 22) {
+            else if (fi == 22 && (total_bits >= payload_start + 56)) {
                 int notice_type = bits.ToUnsignedInt(payload_start, 7);
                 app_fields.insert("Notice Type", GetNoticeTypeText(notice_type));
                 app_fields.insert("Latitude", bits.ToInt(payload_start + 7, 24) / 60000.0);
                 app_fields.insert("Longitude", bits.ToInt(payload_start + 31, 25) / 60000.0);
             }
-            else if (fi == 26) {
+            else if (fi == 26 && (total_bits >= payload_start + 6)) {
                 int sensor_src = bits.ToUnsignedInt(payload_start, 4);
                 int sensor_stat = bits.ToUnsignedInt(payload_start + 4, 2);
                 app_fields.insert("Sensor Source", GetSensorSourceText(sensor_src));
                 app_fields.insert("Sensor Status", GetSensorStatusText(sensor_stat));
             }
-            else if (fi == 28) {
+            else if (fi == 28 && (total_bits >= payload_start + 9)) {
                 int route_type = bits.ToUnsignedInt(payload_start, 5);
                 app_fields.insert("Route Type", GetRouteTypeText(route_type));
                 app_fields.insert("Waypoints Count", (int)bits.ToUnsignedInt(payload_start + 5, 4));
             }
-            else if (fi == 29) {
-                app_fields.insert("Text Segment", DecodeAis6BitString(bits, payload_start, bits.GetNumBits() - payload_start));
+            else if (fi == 29 && total_bits > payload_start) {
+                app_fields.insert("Text Segment", DecodeAis6BitString(bits, payload_start, total_bits - payload_start));
             }
-            else if (fi == 31) {
+            else if (fi == 31 && (total_bits >= payload_start + 100)) {
                 app_fields.insert("Latitude", bits.ToInt(payload_start, 24) / 60000.0);
                 app_fields.insert("Longitude", bits.ToInt(payload_start + 24, 25) / 60000.0);
+                
                 int raw_ws = bits.ToUnsignedInt(payload_start + 49, 7);
                 app_fields.insert("Wind Speed (knots)", raw_ws == 127 ? "N/A" : QJsonValue(raw_ws));
+                
                 int raw_wg = bits.ToUnsignedInt(payload_start + 56, 7);
                 app_fields.insert("Wind Gusts (knots)", raw_wg == 127 ? "N/A" : QJsonValue(raw_wg));
+                
                 int raw_wd = bits.ToUnsignedInt(payload_start + 63, 9);
                 app_fields.insert("Wind Direction", raw_wd == 511 ? "N/A" : QJsonValue(raw_wd));
+                
                 int raw_vis = bits.ToUnsignedInt(payload_start + 93, 7);
                 app_fields.insert("Visibility (NM)", raw_vis == 127 ? "N/A" : QJsonValue(raw_vis / 10.0));
             }
-
-            root_obj.insert("Decoded Application Data", app_fields);
-        } else {
-            root_obj.insert("Application Info", "Ignored: Missing selection filter criteria.");
-        }
+            else {
+                app_fields.insert("Error", "Payload length does not match FI specifications.");
+            }
     }
     else if (message_id == 12 || message_id == 14) {
         size_t text_start_bit = (message_id == 12) ? 72 : 40;
