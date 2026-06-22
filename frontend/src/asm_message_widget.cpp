@@ -291,10 +291,13 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& org_msg) {
         std::cerr << "Fel: Kunde inte parsa bitströmmen. Statuskod:" + parse_status;
         return;
     }
-    if (bits.GetNumBits() < 6) {
+    size_t total_bits = bits.GetNumBits();
+    if (total_bits < 6) {
         std::cerr << "Fel: Strängen innehåller för få bitar för att läsa meddelande-ID.";
         return;
-    }int message_id = bits.ToUnsignedInt(0, 6);
+    }
+    ;
+    int message_id = bits.ToUnsignedInt(0, 6);
     QJsonObject root_obj;
     
     QString msg_type_text = "Unknown AIS Message";
@@ -394,6 +397,7 @@ void AsmMessageWidget::ShowDetails(const AsmMessageRecord& org_msg) {
             else {
                 app_fields.insert("Error", "Payload length does not match FI specifications.");
             }
+        }
     }
     else if (message_id == 12 || message_id == 14) {
         size_t text_start_bit = (message_id == 12) ? 72 : 40;
