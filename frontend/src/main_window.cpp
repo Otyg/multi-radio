@@ -25,10 +25,14 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QDir>
+#include <QFileInfo>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QIODevice>
+#include <QPainter>
 #include <QPushButton>
+#include <QSvgRenderer>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QTabBar>
@@ -56,6 +60,60 @@
 namespace multi_radio {
 
 namespace {
+
+QString ResolveWeatherSymbolPath(const QString& file_name) {
+  const QStringList candidates = {
+      QDir::currentPath() + "/resources/symbols/" + file_name,
+      QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../resources/symbols/" + file_name),
+      QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../resources/symbols/" + file_name),
+      QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../../../resources/symbols/" + file_name),
+  };
+  for (const QString& candidate : candidates) {
+    if (QFileInfo::exists(candidate)) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+QPixmap LoadWeatherSymbolPixmap(const QString& symbol_name, int size) {
+  const QString path = ResolveWeatherSymbolPath(symbol_name);
+  if (path.isEmpty()) {
+    return {};
+  }
+
+  QSvgRenderer renderer(path);
+  if (!renderer.isValid()) {
+    return {};
+  }
+
+  QImage image(size, size, QImage::Format_ARGB32_Premultiplied);
+  image.fill(Qt::transparent);
+  QPainter painter(&image);
+  renderer.render(&painter);
+  painter.end();
+  return QPixmap::fromImage(image);
+}
+
+QString FormatWeatherValue(const QVariant& value, const QString& suffix = {}) {
+  if (!value.isValid() || value.isNull()) {
+    return "-";
+  }
+  if (value.typeId() == QMetaType::Double || value.typeId() == QMetaType::Float) {
+    const double number = value.toDouble();
+    return QString("%1%2").arg(number, 0, 'f', 1).arg(suffix);
+  }
+  return value.toString() + suffix;
+}
+
+QString FormatCloudCover(const QVariant& value) {
+  if (!value.isValid() || value.isNull()) {
+    return "-";
+  }
+  const double fraction = value.toDouble();
+  const int percent = static_cast<int>(std::round((fraction / 8.0) * 100.0));
+  return QString("%1%") .arg(percent);
+}
 
 constexpr int kFixedModeTabIndex = 0;
 constexpr int kScanRangeModeTabIndex = 1;
@@ -1797,7 +1855,56 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   visible_objects_widget_ = new VisibleObjectsWidget(side_splitter);
   weather_widget_ = new QWidget(side_splitter);
   weather_widget_->setObjectName("weather_widget");
-  weather_widget_->setMinimumHeight(120);
+  weather_widget_->setMinimumHeight(220);
+
+  auto* weather_layout = new QVBoxLayout(weather_widget_);
+  weather_layout->setContentsMargins(6, 6, 6, 6);
+  weather_layout->setSpacing(4);
+
+  weather_timestamp_label_ = new QLabel("--", weather_widget_);
+  weather_timestamp_label_->setStyleSheet("font-size: 11px; color: #B2C0D6;");
+  weather_layout->addWidget(weather_timestamp_label_);
+
+  weather_table_ = new QTableWidget(weather_widget_);
+  weather_table_->setColumnCount(3);
+  weather_table_->setRowCount(7);
+  weather_table_->setHorizontalHeaderLabels({"Now", "+1h", "+2h"});
+  weather_table_->setVerticalHeaderLabels({
+      "Symbol",
+      "Temperature",
+      "Wind direction",
+      "Wind speed",
+      "Cloud cover",
+      "Visibility",
+      "Air pressure"
+  });
+  weather_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  weather_table_->setSelectionMode(QAbstractItemView::NoSelection);
+  weather_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+  weather_table_->setAlternatingRowColors(false);
+  weather_table_->setShowGrid(true);
+  weather_table_->setCornerButtonEnabled(false);
+  weather_table_->horizontalHeader()->setStretchLastSection(true);
+  weather_table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+  weather_table_->verticalHeader()->setVisible(true);
+  weather_table_->setStyleSheet(
+      "QTableWidget { background: #0D141F; color: #E0E6ED; border: 1px solid #2A3A4F; }"
+      "QHeaderView::section { background: #162231; color: #92E6B5; padding: 4px; border: 1px solid #2A3A4F; }"
+      "QTableWidget::item { padding: 4px; }"
+  );
+  weather_layout->addWidget(weather_table_);
+
+  weather_worker_ = new WeatherWorker();
+  connect(weather_worker_, &WeatherWorker::weatherUpdated, this, [this](const WeatherSnapshot& snapshot) {
+    PopulateWeatherWidget(snapshot);
+  });
+  connect(weather_worker_, &WeatherWorker::errorOccurred, this, [this](const QString& message) {
+    if (weather_timestamp_label_ != nullptr) {
+      weather_timestamp_label_->setText("Weather unavailable: " + message);
+    }
+  });
+  weather_worker_->StartHourlyUpdates(60 * 60 * 1000);
+
   side_splitter->addWidget(visible_objects_widget_);
   side_splitter->addWidget(weather_widget_);
   side_splitter->setStretchFactor(0, 3);
@@ -2653,7 +2760,16 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
   });
 }
 
-MainWindow::~MainWindow() { client_->StopStreaming(); }
+MainWindow::~MainWindow() {
+  if (client_ != nullptr) {
+    client_->StopStreaming();
+  }
+  if (weather_worker_ != nullptr) {
+    weather_worker_->Stop();
+    weather_worker_->deleteLater();
+    weather_worker_ = nullptr;
+  }
+}
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
   if (scan_list_scroll_area_ != nullptr && watched == scan_list_scroll_area_->viewport() &&
@@ -2661,6 +2777,91 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     RefreshScanListChannelCards();
   }
   return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::PopulateWeatherWidget(const WeatherSnapshot& snapshot) {
+  if (weather_timestamp_label_ != nullptr) {
+    weather_timestamp_label_->setText(snapshot.timestamp.isEmpty() ? "Weather" : "Weather — " + snapshot.timestamp);
+  }
+  if (weather_table_ == nullptr) {
+    return;
+  }
+
+  const auto row_to_key = [](int row) {
+    switch (row) {
+      case 0: return QString("symbol_code");
+      case 1: return QString("air_temperature");
+      case 2: return QString("wind_from_direction");
+      case 3: return QString("wind_speed");
+      case 4: return QString("cloud_area_fraction");
+      case 5: return QString("visibility_in_air");
+      case 6: return QString("air_pressure_at_mean_sea_level");
+      default: return QString();
+    }
+  };
+
+  weather_table_->clearContents();
+
+  const auto fill_cell = [this](int row, int column, const QVariantMap& values, const QString& label) {
+    if (row == 0) {
+      const QString symbol = values.value("symbol_code").toString();
+      const QString file_name = symbol.isEmpty() ? "01d.svg" : symbol;
+      const QPixmap pixmap = LoadWeatherSymbolPixmap(file_name, 28);
+      auto* image_label = new QLabel(weather_table_);
+      image_label->setAlignment(Qt::AlignCenter);
+      if (!pixmap.isNull()) {
+        image_label->setPixmap(pixmap);
+      } else {
+        image_label->setText(file_name);
+      }
+      weather_table_->setCellWidget(row, column, image_label);
+      return;
+    }
+
+    const QVariant value = values.value(label);
+    const QString text = [&]() -> QString {
+      if (label == "cloud_area_fraction") {
+        return FormatCloudCover(value);
+      }
+      if (label == "visibility_in_air") {
+        return FormatWeatherValue(value);
+      }
+      if (label == "air_pressure_at_mean_sea_level") {
+        return FormatWeatherValue(value);
+      }
+      if (label == "air_temperature") {
+        if (!value.isValid() || value.isNull()) {
+          return "-";
+        }
+        const double number = value.toDouble();
+        return QString::number(std::lround(number));
+      }
+      if (label == "wind_speed") {
+        const QVariant gust_value = values.value("wind_speed_of_gust");
+        const QString speed_text = FormatWeatherValue(value);
+        if (!gust_value.isValid() || gust_value.isNull()) {
+          return speed_text;
+        }
+        const QString gust_text = FormatWeatherValue(gust_value);
+        return QString("%1 (%2)").arg(speed_text).arg(gust_text);
+      }
+      return FormatWeatherValue(value);
+    }();
+
+    auto* item = new QTableWidgetItem(text);
+    item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+    weather_table_->setItem(row, column, item);
+  };
+
+  const auto fill_row = [this, &fill_cell, &row_to_key](int row, const QVariantMap& observation, const QVariantMap& forecast_one, const QVariantMap& forecast_two) {
+    fill_cell(row, 0, observation, row_to_key(row));
+    fill_cell(row, 1, forecast_one, row_to_key(row));
+    fill_cell(row, 2, forecast_two, row_to_key(row));
+  };
+
+  for (int row = 0; row < weather_table_->rowCount(); ++row) {
+    fill_row(row, snapshot.observation, snapshot.forecast_one, snapshot.forecast_two);
+  }
 }
 
 void MainWindow::RefreshReceivers() {

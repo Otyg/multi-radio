@@ -65,7 +65,7 @@ if(NOT MR_BUILD_FRONTEND)
   return()
 endif()
 
-find_package(Qt6 COMPONENTS Widgets Network Concurrent)
+find_package(Qt6 COMPONENTS Widgets Network Concurrent Svg)
 message(STATUS "DBG Qt6_FOUND=${Qt6_FOUND}")
 message(STATUS "DBG Qt6Widgets_FOUND=${Qt6Widgets_FOUND}")
 message(STATUS "DBG Qt6Gui_FOUND=${Qt6Gui_FOUND}")
@@ -93,6 +93,7 @@ add_executable(multi_radio_client
   src/visible_objects_widget.cpp
   src/coastline_cache.cpp
   src/coastline_loader.cpp
+  src/weather_worker.cpp
   include/main_window.hpp
   include/asm_message_widget.hpp
   include/signal_visualization_widget.hpp
@@ -101,6 +102,7 @@ add_executable(multi_radio_client
   include/visible_objects_widget.hpp
   include/coastline_cache.hpp
   include/coastline_loader.hpp
+  include/weather_worker.hpp
 )
 
 target_include_directories(multi_radio_client
@@ -113,6 +115,7 @@ target_link_libraries(multi_radio_client
     Qt6::Widgets
     Qt6::Network
     Qt6::Concurrent
+    Qt6::Svg
     multi_radio_frontend_common
     sqlite3
 )

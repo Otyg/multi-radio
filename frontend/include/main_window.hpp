@@ -29,6 +29,7 @@
 #include "scan_range_visualization_widget.hpp"
 #include "signal_visualization_widget.hpp"
 #include "visible_objects_widget.hpp"
+#include "weather_worker.hpp"
 
 class QEvent;
 class QIODevice;
@@ -68,6 +69,7 @@ class MainWindow : public QMainWindow {
   void StopSelectedReceiver();
   void ApplyModeAndConfig();
   void OpenVisualizationSettingsDialog();
+  void PopulateWeatherWidget(const WeatherSnapshot& snapshot);
 
   void OnReceiverEvent(uint32_t receiver_id, int event_kind, double tuned_frequency_hz,
                        const QString& message, quint64 unix_ms);
@@ -225,6 +227,9 @@ class MainWindow : public QMainWindow {
   QComboBox* receiver_filter_combo_ = nullptr;
   RadarMapWidget* radar_widget_ = nullptr;
   QWidget* weather_widget_ = nullptr;
+  QLabel* weather_timestamp_label_ = nullptr;
+  QTableWidget* weather_table_ = nullptr;
+  WeatherWorker* weather_worker_ = nullptr;
   VisibleObjectsWidget* visible_objects_widget_ = nullptr;
   std::unordered_map<std::string, RadarFixedObject> bsr_fixed_objects_;
   CoastlineLoader* coastline_loader_boundaries_ = nullptr;
