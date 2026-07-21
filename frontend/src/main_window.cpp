@@ -11,6 +11,7 @@
 
 #include <QByteArray>
 #include <QAbstractButton>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
