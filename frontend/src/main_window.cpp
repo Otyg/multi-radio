@@ -1,5 +1,4 @@
 #include "main_window.hpp"
-#include "asm_message_widget.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1796,9 +1795,11 @@ MainWindow::MainWindow(std::string grpc_target, std::string token,
 
   auto* side_splitter = new QSplitter(Qt::Vertical, air_marine_controls);
   visible_objects_widget_ = new VisibleObjectsWidget(side_splitter);
-  asm_message_widget_ = new AsmMessageWidget(side_splitter);
+  weather_widget_ = new QWidget(side_splitter);
+  weather_widget_->setObjectName("weather_widget");
+  weather_widget_->setMinimumHeight(120);
   side_splitter->addWidget(visible_objects_widget_);
-  side_splitter->addWidget(asm_message_widget_);
+  side_splitter->addWidget(weather_widget_);
   side_splitter->setStretchFactor(0, 3);
   side_splitter->setStretchFactor(1, 1);
   controls_outer->addWidget(side_splitter, 1);
@@ -3747,22 +3748,6 @@ void MainWindow::OnDecodedMessage(uint32_t receiver_id, const QString& signal_ty
                   .arg(plugin_type)
                   .arg(frequency_hz, 0, 'f', 0)
                   .arg(payload));
-
-    // Skicka till ASM-panelen om det är typ 6, 8, 12 eller 14
-    if (asm_message_widget_) {
-      int mt = mtype_str.toInt();
-      if (mt == 6 || mt == 8 || mt == 12 || mt == 14) {
-        uint32_t sender = fields.value("sender_mmsi").toUInt();
-        if (sender == 0) sender = fields.value("mmsi").toUInt();
-        if (sender == 0) sender = fields.value("src_mmsi").toUInt();
-        asm_message_widget_->AddMessage(mt, sender, LabelFromFields(fields), payload, fields, unix_ms);
-
-        // Trigger explicit visual ping on the radar target
-        if (radar_widget_ != nullptr && sender > 0) {
-          radar_widget_->TriggerMessagePing(QString::number(sender));
-        }
-      }
-    }
 
     all_rows_.push_back(row);
     AddMessageRow(row);
