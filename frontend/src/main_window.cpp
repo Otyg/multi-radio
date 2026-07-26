@@ -2807,7 +2807,7 @@ void MainWindow::PopulateWeatherWidget(const WeatherSnapshot& snapshot) {
     if (row == 0) {
       const QString symbol = values.value("symbol_code").toString();
       const QString file_name = symbol.isEmpty() ? "01d.svg" : symbol;
-      const QPixmap pixmap = LoadWeatherSymbolPixmap(file_name, 28);
+      const QPixmap pixmap = LoadWeatherSymbolPixmap(file_name, 30);
       auto* image_label = new QLabel(weather_table_);
       image_label->setAlignment(Qt::AlignCenter);
       if (!pixmap.isNull()) {
